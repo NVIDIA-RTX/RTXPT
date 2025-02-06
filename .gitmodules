@@ -1,6 +1,6 @@
 [submodule "external/RayTracingDenoiser"]
 	path = external/RayTracingDenoiser
-	url = https://github.com/NVIDIAGameWorks/RayTracingDenoiser.git
+	url = https://github.com/NVIDIA-RTX/NRD
 [submodule "external/Opacity-MicroMap-SDK"]
 	path = external/Opacity-MicroMap-SDK
 	url = https://github.com/NVIDIAGameWorks/Opacity-MicroMap-SDK.git
