@@ -1,16 +1,16 @@
 [submodule "external/RayTracingDenoiser"]
 	path = external/RayTracingDenoiser
-	url = https://github.com/NVIDIAGameWorks/RayTracingDenoiser.git
+	url = https://github.com/NVIDIA-RTX/NRD
 [submodule "external/Opacity-MicroMap-SDK"]
 	path = external/Opacity-MicroMap-SDK
-	url = https://github.com/NVIDIAGameWorks/Opacity-MicroMap-SDK.git
+	url = https://github.com/NVIDIA-RTX/OMM
 	branch = main-minimal
 [submodule "donut/nvrhi"]
 	path = donut/nvrhi
-	url = https://github.com/NVIDIAGameWorks/nvrhi.git
+	url = https://github.com/NVIDIA-RTX/NVRHI
 [submodule "external/RTXDI"]
 	path = external/RTXDI
-	url = https://github.com/NVIDIAGameWorks/RTXDI.git
+	url = https://github.com/NVIDIAGameWorks/RTXDI
 	branch = sdk-only
 [submodule "media"]
 	path = media
@@ -27,4 +27,4 @@
 	url = https://github.com/jarro2783/cxxopts.git
 [submodule "donut/ShaderMake"]
 	path = donut/ShaderMake
-	url = https://github.com/NVIDIAGameWorks/ShaderMake.git
+	url = https://github.com/NVIDIA-RTX/ShaderMake
