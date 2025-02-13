@@ -74,7 +74,7 @@ At the moment, only Windows builds are supported. We are going to add Linux supp
 2. Use CMake to configure the build and generate the project files.
    
    ```
-   cd Path-Tracing-SDK
+   cd RTX-Path-Tracing
    cmake CMakeLists.txt -B ./build
    ```
 
