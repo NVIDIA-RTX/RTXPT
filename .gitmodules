@@ -1,0 +1,30 @@
+[submodule "External/RayTracingDenoiser"]
+	path = External/Nrd
+	url = https://github.com/NVIDIA-RTX/NRD
+[submodule "External/Opacity-MicroMap-SDK"]
+	path = External/Omm
+	url = https://github.com/NVIDIA-RTX/OMM.git
+	branch = main-minimal
+[submodule "External/NVAPI"]
+	path = External/NVAPI
+	url = https://github.com/NVIDIA/nvapi.git
+	branch = 530
+[submodule "External/cxxopts"]
+	path = External/cxxopts
+	url = https://github.com/jarro2783/cxxopts.git
+[submodule "External/rtxdi-runtime"]
+	path = External/Rtxdi
+	url = https://github.com/NVIDIA-RTX/RTXDI-Library.git
+[submodule "External/donut"]
+	path = External/Donut
+	url = https://github.com/NVIDIA-RTX/Donut
+	branch = main
+[submodule "Assets"]
+	path = Assets
+	url = https://github.com/NVIDIA-RTX/RTXPT-Assets.git
+[submodule "External/Streamline"]
+	path = External/Streamline
+	url = https://github.com/NVIDIAGameWorks/Streamline.git
+[submodule "External/Rtxtf"]
+	path = External/Rtxtf
+	url = https://github.com/NVIDIA-RTX/RTXTF-Library

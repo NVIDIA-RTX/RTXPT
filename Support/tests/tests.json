@@ -1,0 +1,54 @@
+{
+	"tests": [
+		{
+			"scene": "test.kitchen.realtime",
+			"sampleCount": 1,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.realtime",
+			"sampleCount": 2,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.realtime",
+			"sampleCount": 3,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.realtime",
+			"sampleCount": 4,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.realtime",
+			"sampleCount": 4096,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.reference",
+			"sampleCount": 1,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.reference",
+			"sampleCount": 2,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.reference",
+			"sampleCount": 3,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.reference",
+			"sampleCount": 4,
+			"threshold": 0
+		},
+		{
+			"scene": "test.kitchen.reference",
+			"sampleCount": 4096,
+			"threshold": 0
+		}
+	]
+}
