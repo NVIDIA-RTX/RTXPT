@@ -14,7 +14,7 @@ file(GLOB_RECURSE sources "*.cpp" "*.h" "*.md")
 file(GLOB NRD_INTEGRATION_HEADERS "../External/Nrd/Integration/*.h" "../External/Nrd/Integration/*.hpp")
 source_group("RayTracingDenoiser" FILES ${NRD_INTEGRATION_HEADERS})
 
-set(project rtxpt)
+set(project Rtxpt)
 set(folder "!RTX Path Tracing")
 
 set(rtxpt_shaders ${project}_shaders)
