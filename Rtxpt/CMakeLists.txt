@@ -50,10 +50,10 @@ add_executable(${project} WIN32 ${sources})
 
 add_dependencies(${project} rtxpt_shaders nrd_shaders omm_shaders)
 
-target_link_libraries(${project} cxxopts donut_render donut_app donut_engine NRD rtxdi-runtime omm-lib omm-gpu-nvrhi)
+target_link_libraries(${project} cxxopts donut_render donut_app donut_engine NRD Rtxdi omm-lib omm-gpu-nvrhi)
 
 set_target_properties(${project} PROPERTIES FOLDER ${folder})
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${shaders})
 
-target_include_directories(${project} PRIVATE "../External/Nrd/Include") #"../External/Streamline/include")
+target_include_directories(${project} PRIVATE "../External/Nrd/Include" ${CMAKE_SOURCE_DIR}/External/Rtxdi/Include) #"../External/Streamline/include")

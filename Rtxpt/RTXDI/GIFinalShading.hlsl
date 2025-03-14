@@ -16,7 +16,7 @@
 
 #include "../RTXDI/RtxdiApplicationBridge.hlsli"
 
-#include "../../External/Rtxdi/include/rtxdi/GIResamplingFunctions.hlsli"
+#include "../../External/Rtxdi/Include/Rtxdi/GI/Reservoir.hlsli"
 
 static const float kMaxBrdfValue = 1e4;
 static const float kMISRoughness = 0.2;

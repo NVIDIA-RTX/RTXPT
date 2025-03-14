@@ -17,7 +17,7 @@
 #include "../PathTracer/Utils/ColorHelpers.hlsli"
 #include "../PathTracer/Lighting/EnvMap.hlsli"
 #include "../PathTracer/PathTracerHelpers.hlsli"
-#include <rtxdi/RtxdiHelpers.hlsli>
+#include <Rtxdi/Utils/Checkerboard.hlsli>
 
 // This is a adapter for PolymorphicLight, enabling features as needed by RTXDI
 

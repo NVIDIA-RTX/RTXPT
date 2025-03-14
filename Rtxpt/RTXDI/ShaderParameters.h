@@ -18,9 +18,9 @@
 #include <donut/shaders/sky_cb.h>
 
 
-#include <rtxdi/ReSTIRDIParameters.h>
-#include <rtxdi/ReGIRParameters.h>
-#include <rtxdi/ReSTIRGIParameters.h>
+#include <Rtxdi/DI/ReSTIRDIParameters.h>
+#include <Rtxdi/ReGIR/ReGIRParameters.h>
+#include <Rtxdi/GI/ReSTIRGIParameters.h>
 #include "../PathTracer/PathTracerShared.h"
 #include "../PathTracer/Lighting/PolymorphicLight.h"
 

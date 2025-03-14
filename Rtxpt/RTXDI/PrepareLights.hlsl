@@ -12,7 +12,7 @@
 
 #include <donut/shaders/bindless.h>
 #include <donut/shaders/binding_helpers.hlsli>
-#include "../../External/Rtxdi/include/rtxdi/RtxdiMath.hlsli"
+#include "../../External/Rtxdi/Include/Rtxdi/Utils/Math.hlsli"
 #include "ShaderParameters.h"
 #include "../PathTracer/PathTracerDebug.hlsli"
 #include "../PathTracer/Utils/Utils.hlsli"

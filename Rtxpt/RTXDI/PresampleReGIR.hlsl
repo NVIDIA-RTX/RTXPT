@@ -12,7 +12,8 @@
 
 #include "RtxdiApplicationBridge.hlsli"
 
-#include <rtxdi/PresamplingFunctions.hlsli>
+#include <Rtxdi/ReGIR/ReGIRSampling.hlsli>
+#include <rtxdi/LightSampling/PresamplingFunctions.hlsli>
 
 [numthreads(256, 1, 1)]
 void main(uint GlobalIndex : SV_DispatchThreadID)

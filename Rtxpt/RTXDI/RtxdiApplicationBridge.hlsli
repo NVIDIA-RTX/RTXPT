@@ -794,6 +794,11 @@ bool RAB_GetTemporalConservativeVisibility(RAB_Surface currentSurface, RAB_Surfa
     return GetConservativeVisibility(SceneBVH, ray);
 }
 
+RAB_Surface RAB_GetMaterial(RAB_Surface currentSurface)
+{
+    return currentSurface;
+}
+
 #endif // RTXDI_WITH_RESTIR_GI
 
 #endif // #if !defined(RTXPT_RTXDI_RESOURCES_ONLY)

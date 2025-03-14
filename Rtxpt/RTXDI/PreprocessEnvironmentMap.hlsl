@@ -10,7 +10,7 @@
 
 #include "ShaderParameters.h"
 #include <donut/shaders/binding_helpers.hlsli>
-#include "../../External/Rtxdi/include/rtxdi/RtxdiMath.hlsli"
+#include "../../External/Rtxdi/Include/Rtxdi/Utils/Math.hlsli"
 #include "../PathTracer/Utils/Math/MathHelpers.hlsli"
 #include "../PathTracer/Utils/Utils.hlsli"
 

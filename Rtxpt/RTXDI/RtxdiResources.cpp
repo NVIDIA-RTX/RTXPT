@@ -11,8 +11,8 @@
 #define RTXDI_WITH_RESTIR_GI
 
 #include "RtxdiResources.h"
-#include <rtxdi/ReSTIRDI.h>
-#include <rtxdi/RISBufferSegmentAllocator.h>
+#include <rtxdi/DI/ReSTIRDI.h>
+#include <rtxdi/LightSampling/RISBufferSegmentAllocator.h>
 
 #include <donut/core/math/math.h>
 
@@ -114,7 +114,7 @@ RtxdiResources::RtxdiResources(
     
 
     nvrhi::BufferDesc neighborOffsetBufferDesc;
-    neighborOffsetBufferDesc.byteSize = context.getStaticParameters().NeighborOffsetCount * 2;
+    neighborOffsetBufferDesc.byteSize = context.GetStaticParameters().NeighborOffsetCount * 2;
     neighborOffsetBufferDesc.format = nvrhi::Format::RG8_SNORM;
     neighborOffsetBufferDesc.canHaveTypedViews = true;
     neighborOffsetBufferDesc.debugName = "NeighborOffsets";
@@ -124,7 +124,7 @@ RtxdiResources::RtxdiResources(
 
 
     nvrhi::BufferDesc lightReservoirBufferDesc;
-    lightReservoirBufferDesc.byteSize = sizeof(RTXDI_PackedDIReservoir) * context.getReservoirBufferParameters().reservoirArrayPitch * rtxdi::c_NumReSTIRDIReservoirBuffers;
+    lightReservoirBufferDesc.byteSize = sizeof(RTXDI_PackedDIReservoir) * context.GetReservoirBufferParameters().reservoirArrayPitch * rtxdi::c_NumReSTIRDIReservoirBuffers;
     lightReservoirBufferDesc.structStride = sizeof(RTXDI_PackedDIReservoir);
     lightReservoirBufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
     lightReservoirBufferDesc.keepInitialState = true;
@@ -134,7 +134,7 @@ RtxdiResources::RtxdiResources(
 
 
     nvrhi::BufferDesc giReservoirBufferDesc;
-    giReservoirBufferDesc.byteSize = sizeof(RTXDI_PackedGIReservoir) * context.getReservoirBufferParameters().reservoirArrayPitch * rtxdi::c_NumReSTIRDIReservoirBuffers;
+    giReservoirBufferDesc.byteSize = sizeof(RTXDI_PackedGIReservoir) * context.GetReservoirBufferParameters().reservoirArrayPitch * rtxdi::c_NumReSTIRDIReservoirBuffers;
     giReservoirBufferDesc.structStride = sizeof(RTXDI_PackedGIReservoir);
     giReservoirBufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
     giReservoirBufferDesc.keepInitialState = true;

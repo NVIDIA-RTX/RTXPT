@@ -10,7 +10,9 @@
 
 #include "ShaderParameters.h"
 #include "RtxdiApplicationBridge.hlsli"
-#include <rtxdi/DIResamplingFunctions.hlsli>
+#include <Rtxdi/DI/TemporalResampling.hlsli>
+#include <Rtxdi/DI/SpatioTemporalResampling.hlsli>
+#include <Rtxdi/DI/SpatialResampling.hlsli>
 
 // this is for debugging viz
 //RWTexture2D<float4>                     u_DebugVizOutput    : register(u50);

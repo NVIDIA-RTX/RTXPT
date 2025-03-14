@@ -19,7 +19,11 @@
 #endif
 
 #include "../RTXDI/RtxdiApplicationBridge.hlsli"
-#include <rtxdi/GIResamplingFunctions.hlsli>
+#include <Rtxdi/GI/Reservoir.hlsli>
+#include <Rtxdi/GI/BoilingFilter.hlsli>
+#include <Rtxdi/GI/TemporalResampling.hlsli>
+#include <Rtxdi/GI/SpatioTemporalResampling.hlsli>
+#include <Rtxdi/GI/SpatialResampling.hlsli>
 
 [numthreads(RTXDI_SCREEN_SPACE_GROUP_SIZE, RTXDI_SCREEN_SPACE_GROUP_SIZE, 1)]
 void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupThreadID, uint2 GroupIdx : SV_GroupID)

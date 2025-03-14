@@ -12,7 +12,7 @@
 
 #include <donut/engine/SceneGraph.h>
 #include <nvrhi/nvrhi.h>
-#include <rtxdi/ReSTIRDI.h>
+#include <rtxdi/DI/ReSTIRDI.h>
 #include <memory>
 #include <unordered_map>
 

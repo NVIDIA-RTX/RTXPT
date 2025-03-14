@@ -12,7 +12,7 @@
 
 #include "RtxdiApplicationBridge.hlsli"
 
-#include <rtxdi/InitialSamplingFunctions.hlsli>
+#include <Rtxdi/Di/InitialSampling.hlsli>
 
 #if USE_RAY_QUERY
 [numthreads(RTXDI_SCREEN_SPACE_GROUP_SIZE, RTXDI_SCREEN_SPACE_GROUP_SIZE, 1)]

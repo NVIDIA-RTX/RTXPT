@@ -9,7 +9,7 @@
 */
 
 #include "RtxdiApplicationBridge.hlsli"
-#include <rtxdi/PresamplingFunctions.hlsli>
+#include <rtxdi/LightSampling/PresamplingFunctions.hlsli>
 
 [numthreads(RTXDI_PRESAMPLING_GROUP_SIZE, 1, 1)] 
 void main(uint2 GlobalIndex : SV_DispatchThreadID) 
