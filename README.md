@@ -71,7 +71,7 @@ At the moment, only Windows builds are fully supported. We are going to add Linu
 
 1. Clone the repository **with all submodules recursively**:
    
-   `git clone --recursive https://github.com/NVIDIAGameWorks/RTX-Path-Tracing.git`
+   `git clone --recursive https://github.com/NVIDIA-RTX/RTXPT.git`
 
 2. Use CMake to configure the build and generate the project files.
    
@@ -88,7 +88,7 @@ At the moment, only Windows builds are fully supported. We are going to add Linu
 
 4. Select and run the `rtxpt` project. Binaries get built to the `bin` folder. Assets/media are loaded from `assets` folder.
 
-   If making a binary build, the `assets` and `tools` folders can be placed into `bin` next to executable and packed up together (i.e. the sample app will search for both `assets/` and `../assets/`).
+   If making a binary build, the `assets` and `tools` folders can be placed into `bin` next to executable and packed up together (i.e. the sample app will search for both `Assets/` and `../Assets/`).
 
 
 ## Building Vulkan
