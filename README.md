@@ -1,6 +1,6 @@
 # RTX Path Tracing v1.5.0
 
-![Title](./docs/r-title.png)
+![Title](./Docs/r-title.png)
 
 
 ## Overview
@@ -104,7 +104,7 @@ Due to interaction with various included libraries, Vulkan support is not enable
 
 Once the application is running, most of the SDK features can be accessed via the UI window on the left hand side and drop-down controls in the top-center. 
 
-![UI](./docs/r-ui.png)
+![UI](./Docs/r-ui.png)
 
 Camera can be moved using W/S/A/D keys and rotated by dragging with the left mouse cursor.
 
