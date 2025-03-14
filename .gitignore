@@ -1,9 +1,10 @@
 bin/
 build*/
 .vs
-nrd.cfg
-omm.cfg
+Nrd.cfg
+Omm.cfg
 tests/output/*
+.vscode/
 
 # local project files for shader development outside of VS
 *.sublime-*

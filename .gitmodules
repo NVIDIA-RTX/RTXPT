@@ -1,30 +1,30 @@
-[submodule "external/RayTracingDenoiser"]
-	path = external/RayTracingDenoiser
+[submodule "External/RayTracingDenoiser"]
+	path = External/Nrd
 	url = https://github.com/NVIDIA-RTX/NRD
-[submodule "external/Opacity-MicroMap-SDK"]
-	path = external/Opacity-MicroMap-SDK
-	url = https://github.com/NVIDIA-RTX/OMM
+[submodule "External/Opacity-MicroMap-SDK"]
+	path = External/Omm
+	url = https://github.com/NVIDIA-RTX/OMM.git
 	branch = main-minimal
-[submodule "donut/nvrhi"]
-	path = donut/nvrhi
-	url = https://github.com/NVIDIA-RTX/NVRHI
-[submodule "external/RTXDI"]
-	path = external/RTXDI
-	url = https://github.com/NVIDIAGameWorks/RTXDI
-	branch = sdk-only
-[submodule "media"]
-	path = media
-	url = https://github.com/NVIDIAGameWorks/Path-Tracing-SDK-Media
-[submodule "external/Streamline"]
-	path = external/Streamline
-	url = https://github.com/NVIDIAGameWorks/Streamline.git
-[submodule "external/NVAPI"]
-	path = external/NVAPI
+[submodule "External/NVAPI"]
+	path = External/NVAPI
 	url = https://github.com/NVIDIA/nvapi.git
 	branch = 530
-[submodule "external/cxxopts"]
-	path = external/cxxopts
+[submodule "External/cxxopts"]
+	path = External/cxxopts
 	url = https://github.com/jarro2783/cxxopts.git
-[submodule "donut/ShaderMake"]
-	path = donut/ShaderMake
-	url = https://github.com/NVIDIA-RTX/ShaderMake
+[submodule "External/rtxdi-runtime"]
+	path = External/Rtxdi
+	url = https://github.com/NVIDIA-RTX/RTXDI-Library.git
+[submodule "External/donut"]
+	path = External/Donut
+	url = https://github.com/NVIDIA-RTX/Donut
+	branch = main
+[submodule "Assets"]
+	path = Assets
+	url = https://github.com/NVIDIA-RTX/RTXPT-Assets.git
+[submodule "External/Streamline"]
+	path = External/Streamline
+	url = https://github.com/NVIDIAGameWorks/Streamline.git
+[submodule "External/Rtxtf"]
+	path = External/Rtxtf
+	url = https://github.com/NVIDIA-RTX/RTXTF-Library
