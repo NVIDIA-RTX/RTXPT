@@ -28,3 +28,17 @@
 [submodule "External/Rtxtf"]
 	path = External/Rtxtf
 	url = https://github.com/NVIDIA-RTX/RTXTF-Library
+[submodule "External/Nrd"]
+	path = External/Nrd
+	url = https://github.com/NVIDIA-RTX/NRD
+[submodule "External/Omm"]
+	path = External/Omm
+	url = https://github.com/NVIDIA-RTX/OMM.git
+	branch = main-minimal
+[submodule "External/Rtxdi"]
+	path = External/Rtxdi
+	url = https://github.com/NVIDIA-RTX/RTXDI-Library.git
+[submodule "External/Donut"]
+	path = External/Donut
+	url = https://github.com/NVIDIA-RTX/Donut
+	branch = main
