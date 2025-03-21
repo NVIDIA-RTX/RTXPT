@@ -335,6 +335,10 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
 #else
         desc.height = dm::div_ceil(screenResolution.y, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE);
 #endif
+        // add border to accommodate for jitter offset
+        desc.width += 1;
+        desc.height += 1;
+
         desc.depth = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
         assert(desc.depth == RTXPT_LIGHTING_NARROW_PROXY_COUNT);
         static_assert(RTXPT_LIGHTING_NARROW_PROXY_COUNT <= 256);
@@ -763,6 +767,31 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
     RAII_SCOPE( commandList->beginMarker("LightBaker");, commandList->endMarker(); );
     // RAII_SCOPE( commandList->setEnableAutomaticBarriers(false);, commandList->setEnableAutomaticBarriers(true); );
 
+    uint2 prevLocalJitter = m_localJitter;
+    if (_settings.ResetFeedback)
+    {
+        m_updateCounter = 0;
+        m_localJitter = prevLocalJitter = {0,0};
+    }
+    m_updateCounter++;
+
+    if (!m_dbgDebugDisableJitter)
+    {
+        // Advance R2 jitter sequence
+        // http://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
+
+        if (m_updateCounter == (1<<16) )
+            m_localJitterF = {0, 0}; // not sure how long can the sequence remain high quality, so perhaps best to reset after a period
+
+        static const float g = 1.32471795724474602596f;
+        static const float a1 = 1.0f / g;
+        static const float a2 = 1.0f / (g * g);
+        m_localJitterF[0] = fmodf(m_localJitterF[0] + a1, 1.0f);
+        m_localJitterF[1] = fmodf(m_localJitterF[1] + a2, 1.0f);
+
+        m_localJitter = dm::clamp( uint2(m_localJitterF * (float)RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE), uint2(0, 0), uint2(RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE-1, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE-1) );
+    }
+
     bool lastFrameLocalSamplesAvailable = m_currentCtrlBuff.LastFrameTemporalFeedbackAvailable; // if last frame had temporal feedback, it will have had built local (tile) sampling
 
     m_currentSettings = _settings;
@@ -779,6 +808,9 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
     LightingControlData ctrlBuff; memset(&ctrlBuff, 0, sizeof(ctrlBuff)); 
     LightsBakerConstants consts; memset(&consts, 0, sizeof(consts));
 
+    ctrlBuff.LocalSamplingTileJitter = m_localJitter;
+    ctrlBuff.LocalSamplingTileJitterPrev = prevLocalJitter;
+
     assert( _settings.ViewportSize.x > 0 && _settings.ViewportSize.y > 0 && _settings.PrevViewportSize.x > 0 && _settings.PrevViewportSize.y > 0 );
     consts.PrevOverCurrentViewportSize = m_currentSettings.PrevViewportSize / m_currentSettings.ViewportSize;
 
@@ -790,7 +822,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         {
             assert(m_envMapBaker->GetImportanceSampling()->GetImportanceMap() != nullptr);   //< if enabled, must have importance map
             consts.EnvMapParams = m_currentSettings.EnvMapParams;
-            const float defaultScale = 0.0002f;
+            const float defaultScale = 0.001f;
             consts.DistantVsLocalRelativeImportance = m_currentSettings.DistantVsLocalImportanceScale * defaultScale;
         }
         else
@@ -1204,9 +1236,13 @@ bool LightsBaker::DebugGUI(float indent)
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("If set, debug view shows direct lighting buffers; otherwise it shows indirect lighting buffers");
     }
 
-#if 0
+    ImGui::Checkbox("Disable local tile jitter", &m_dbgDebugDisableJitter);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mapping from pixels to tiles will be jittered to avoid denoising artifacts.\nIt also helps with spatial sharing.\nDisable for debugging.");
+    
+
+#if 1
     ImGui::Separator();
-    if (ImGui::CollapsingHeader("Advanced", 0/*ImGuiTreeNodeFlags_DefaultOpen*/))
+    if (ImGui::CollapsingHeader("Advanced settings", 0/*ImGuiTreeNodeFlags_DefaultOpen*/))
     {
         ImGui::SliderFloat("DirectVsIndirectThreshold", &m_advSetting_DirectVsIndirectThreshold, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Used to determine whether to use direct vs indirect light caching strategy for current surface.");

@@ -40,7 +40,7 @@ struct LightSampler
     Texture2D<uint>                             EnvLookupMap;
 
     lpuint2                                     PixelPos;                   ///< screen pixel being lit (relevant for feedback loop and narrow sampling)
-    lpuint2                                     NarrowSamplingTilePos;      ///< could be 2 uint16s
+    lpuint2                                     NarrowSamplingTilePos;      ///< tile coord, jitter included
     bool                                        IsDebugPixel;               ///< for visual debugging
     bool                                        IsIndirect;
 
@@ -74,8 +74,9 @@ struct LightSampler
         lightSampler.PixelPos                   = (lpuint2)pixelPos;
         lightSampler.IsDebugPixel               = isDebugPixel;
 
-        lightSampler.NarrowSamplingTilePos      = (lpuint2)(pixelPos / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx);
+        lightSampler.NarrowSamplingTilePos      = (lpuint2)((pixelPos+controlBuffer[0].LocalSamplingTileJitter) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx);
 
+        // storage for indirect sits in the (expanded) lower half
         if ( lightSampler.IsIndirect )
         {
             lightSampler.PixelPos.y                 += (lpuint)controlBuffer[0].FeedbackBufferHeight;
