@@ -463,7 +463,8 @@ namespace ShaderDebug
 
 #define DEBUG_PRINT_DEFINED         1
 
-#ifdef SPIRV // version that works with current SPIRV compiler bugs - no text
+// strings disabled for now, see https://github.com/microsoft/hlsl-specs/issues/279 and https://github.com/microsoft/hlsl-specs/issues/245
+#if 1 // defined(SPIRV)
 #define DebugPrint(str, ...) do {                            \
     ShaderDebug::DebugPrinter printer;                       \
     printer.Init();                                          \

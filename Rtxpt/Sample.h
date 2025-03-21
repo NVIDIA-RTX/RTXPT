@@ -133,6 +133,7 @@ public:
 
     void                                    Denoise(nvrhi::IFramebuffer* framebuffer);
     void                                    PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants & constants);
+    void                                    PreRenderScripts();
     void                                    StreamlinePreRender();
     void                                    Render(nvrhi::IFramebuffer* framebuffer) override;
     void                                    PostProcessAA(nvrhi::IFramebuffer* framebuffer, bool reset);

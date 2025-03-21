@@ -73,6 +73,9 @@ struct LightingControlData
     float   DirectVsIndirectThreshold;  ///< Used to determine whether to use direct vs indirect light caching strategy for current surface
     uint    _padding0;
 
+    uint2   LocalSamplingTileJitter;
+    uint2   LocalSamplingTileJitterPrev;
+
     float4  SceneCameraPos;             ///< Reference center (perhaps rename?) - currently used for debugging viz only
     // float4  SceneWorldMax;
 
@@ -139,22 +142,25 @@ struct LightsBakerConstants
 
 // tile (local) sampling settings
 #define RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE        (8) // 6x6 is good; 8x8 is acceptable and will reduce post-processing (P3 pass) cost over 6x6 by around 1.8x; the loss in quality is on small detail and shadows
-#define RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE      (8) // has to be same or bigger than RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE
-#define RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE         (3)
-#define RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE   (8) // that's times 3 RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE in real world pixels
+#define RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE      (10) // has to be same as RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE or n*2+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE
+#define RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE         (4)
+#define RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE   (4) // that's times RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE in real world pixels
+#define RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT          12 //(28)
 
-// we take 
+// we take, roughly (see FillTile)
 // 1.) one per pixel sample from past most used samples in the RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE window
-// 2.) every second pixel sample from the previous tile set (helps with keeping track of samples skipped by last frame's feedback - useful i.e. with fast occlusions-disocclusions)
-// 3.) every second low res pixel sample from low res buffer RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE window - this helps with sharing most important feedback between neighbours
-#define RTXPT_LIGHTING_NARROW_PROXY_COUNT              (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE+  \
-                                                         RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE)         // must always be less or equal than 256 due to count packing
+// 2.) one per pixel sample from low res buffer RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE window - this helps with sharing most important feedback between neighbours
+// 3.) exactly RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT historic samples from previous frame's feedback 
+// NOTE: must always be less or equal compared to 256, due to current count packing
+#define RTXPT_LIGHTING_NARROW_PROXY_COUNT              (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE  \
+                                                         + RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE \
+                                                         + RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT)
 
 // environment map quad tree settings
 // (one potential future upgrade is to eliminate subdivisions when child nodes are all equally lit - e.g. there's no point having many nodes within the sun, only enough to capture the sun itself; this could be done with an additional "difference" mip-mapped lookup, produced together with the luminance map)
 // (another potential future upgrade is to have nodes optionally capture & emit color themselves, like emissive triangles do, which would reduce noise and also speed up sampling side but is biased)
 #define RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION        16
-#define RTXPT_LIGHTING_ENVMAP_QT_SUBDIVISIONS           256    // how many times the nodes will be subdivided; ~150-512 seems like a good balance depending on the number of bright light sources in the environment map
+#define RTXPT_LIGHTING_ENVMAP_QT_SUBDIVISIONS           160    // how many times the nodes will be subdivided; ~150-512 seems like a good balance depending on the number of bright light sources in the environment map
 #define RTXPT_LIGHTING_ENVMAP_QT_ADDITIONAL_NODES       (3*RTXPT_LIGHTING_ENVMAP_QT_SUBDIVISIONS) // for each subdivision, one goes out, 4 get added - net is 3 new nodes
 #define RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT       (RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION*RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION + RTXPT_LIGHTING_ENVMAP_QT_ADDITIONAL_NODES)
 

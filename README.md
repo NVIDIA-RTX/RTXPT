@@ -1,4 +1,4 @@
-# RTX Path Tracing v1.5.0
+# RTX Path Tracing v1.5.1
 
 ![Title](./Docs/r-title.png)
 

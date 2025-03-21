@@ -54,7 +54,7 @@ public:
         
         // NEE-AT settings
         bool    GlobalTemporalFeedbackEnabled       = false;    // <- remove, just use
-        float   GlobalTemporalFeedbackRatio         = 0.8f;     // 0.0 - use no feedback, 1.0 use feedback only
+        float   GlobalTemporalFeedbackRatio         = 0.65f;    // 0.0 - use no feedback, 0.95 use almost feedback only (some power-based input always needed to bring in new lights)
         bool    NarrowTemporalFeedbackEnabled       = false;    // <- remove, just use
         float   NarrowTemporalFeedbackRatio         = 0.5f;     // 0.0 - use no feedback, 1.0 use feedback only
         float   LightSampling_MIS_Boost             = 1.0f;     // boost light sampling when doing MIS vs BSDF
@@ -202,14 +202,19 @@ private:
     std::unordered_map<size_t, uint32_t> m_historyRemapEmissiveLightBlockOffsets;
     std::unordered_map<size_t, uint32_t> m_historyRemapAnalyticLightIndices;
 
-    bool                            m_dbgDebugDrawLights = false;
-    bool                            m_dbgDebugDrawTileLightConnections = false;
-    bool                            m_dbgFreezeUpdates = false;
-    
-    LightingDebugViewType           m_dbgDebugDrawType    = LightingDebugViewType::Disabled;
-    bool                            m_dbgDebugDrawDirect  = true;
+    float2                          m_localJitterF          = {0, 0};
+    uint2                           m_localJitter           = {0, 0};
+    uint                            m_updateCounter         = 0;
 
-    float                           m_advSetting_DirectVsIndirectThreshold = 0.1f;
+    bool                            m_dbgDebugDrawLights    = false;
+    bool                            m_dbgDebugDrawTileLightConnections = false;
+    bool                            m_dbgFreezeUpdates      = false;
+    
+    LightingDebugViewType           m_dbgDebugDrawType      = LightingDebugViewType::Disabled;
+    bool                            m_dbgDebugDrawDirect    = true;
+    bool                            m_dbgDebugDisableJitter = false;
+
+    float                           m_advSetting_DirectVsIndirectThreshold = 0.3f;
 
     bool                            m_deviceHas32ThreadWaves = false;
 };

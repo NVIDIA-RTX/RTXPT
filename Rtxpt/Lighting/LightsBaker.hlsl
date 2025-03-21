@@ -1153,9 +1153,7 @@ uint SampleLightLocalHistoric(uint2 tilePos, bool indirect, inout SampleGenerato
 {
     const LightingControlData controlInfo = u_controlBuffer[0];
 
-    float rnd = sampleNext1D(sampleGenerator);
-    uint narrowProxyCount = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
-    uint indexInIndex = clamp( uint(rnd * narrowProxyCount), 0, narrowProxyCount-1 );    // when rnd guaranteed to be [0, 1), clamp is unnecessary
+    uint indexInIndex = sampleGenerator.Next() % RTXPT_LIGHTING_NARROW_PROXY_COUNT;
 
     return RemapPastToCurrent(controlInfo, UnpackMiniListLight(u_narrowSamplingBuffer[ uint3(tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), indexInIndex) ]));
 }
@@ -1199,15 +1197,13 @@ uint SampleLightLocalHistoric(uint2 tilePos, bool indirect, inout SampleGenerato
         uint lightIndexHistoric = RTXPT_INVALID_LIGHT_INDEX;
         if( all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy) && controlInfo.LastFrameLocalSamplesAvailable )
         {
-            uint2 tilePos = prevPixelPos / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
+            uint2 tilePos = (prevPixelPos+controlInfo.LocalSamplingTileJitterPrev) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
             lightIndexHistoric = SampleLightLocalHistoric(tilePos, indirect, sampleGenerator);
-            if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
-                lightIndex = SampleLightLocalHistoric(tilePos, indirect, sampleGenerator);  // no local? better to try to rely on historic if available first
         }
         if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
             lightIndex = SampleLightGlobal(sampleGenerator);
         if( lightIndexHistoric == RTXPT_INVALID_LIGHT_INDEX )
-            lightIndexHistoric = lightIndex; // historic can be invalid if there is no mapping (light no longer present) - best to just repeat local then
+            lightIndexHistoric = SampleLightGlobal(sampleGenerator); // historic can be invalid if there is no mapping (light no longer present)
 
         // uint2 tilePos = prevPixelPos / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
         // if( all(tilePos == uint2(7,7)) )
@@ -1225,21 +1221,18 @@ uint SampleLightLocalHistoric(uint2 tilePos, bool indirect, inout SampleGenerato
     {
         LightFeedbackReservoir reservoir = LightFeedbackReservoir::make();
 
-        // note, we sample +1 pixel on each side, but weigh them at only 5% - this is to plug large holes with no data 
-        int2 cellTopLeft    = dispatchThreadID.xy * RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE;
-        for( uint x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE+2; x++ )
-            for( uint y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE+2; y++ )
+        int2 blockTopLeft    = dispatchThreadID.xy * RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE;
+        for( uint x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; x++ )
+            for( uint y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; y++ )
             {
-                uint2 pixelPos = cellTopLeft + uint2(x,y);
+                uint2 pixelPos = blockTopLeft + uint2(x,y);
 
                 float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace( pixelPos, t_motionVectors[pixelPos] );
-                int2 prevPixelPos = int2( float2(pixelPos) + screenSpaceMotion.xy + 0.5.xx - 1.0.xx );
+                int2 prevPixelPos = int2( float2(pixelPos) + screenSpaceMotion.xy + 0.5.xx );
 
                 if( all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy) )
                 {
                     LightFeedbackReservoir other = SampleFeedback( controlInfo, prevPixelPos, indirect );
-                    if( x==0 || y == 0 || x > RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE || y > RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE )  // 
-                        other.CandidateWeight *= 0.05; // tiny weight for pixels outside of block
                     reservoir.Add( sampleNext1D( sampleGenerator ), other.CandidateIndex, other.CandidateWeight );
                 }
             }
@@ -1254,7 +1247,7 @@ uint SampleLightLocalHistoric(uint2 tilePos, bool indirect, inout SampleGenerato
             for( int x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; x++ )
                 for( int y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; y++ )
                  {
-                     uint2 pixelPos = cellTopLeft + uint2(x,y);
+                     uint2 pixelPos = blockTopLeft + uint2(x,y);
                      DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(lightIndex)), 0.95) );
                  }
     }
@@ -1265,40 +1258,31 @@ void FillTile( uint2 tilePos, bool indirect )
 {
     const LightingControlData controlInfo = u_controlBuffer[0];
     int margin = (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE - RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE)/2;
-    int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
+    int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - (int2)controlInfo.LocalSamplingTileJitter;
     int2 windowTopLeft  = (int2)cellTopLeft - margin;
-    int2 lrWindowTopLeft = (int2((tilePos.xy+0.5)*RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE) / RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx) - RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE.xx/2;
+    int2 lrWindowTopLeft = int2( float2(cellTopLeft+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE*0.5) / RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE*0.5 + 0.5.xx );
 
     uint currentlyCollectedCount = 0;
 
     bool debugTile = all( g_const.MouseCursorPos >= cellTopLeft ) && all((g_const.MouseCursorPos-cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
 
-    SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( tilePos, 0, g_const.SampleIndex ) );
+    uint2 actualTilePos = tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0);  // support for handling of indirect as well
 
-    int checkerOne = (sampleGenerator.Next() & 0x80000000) != 0;
-
-    for( int x = 0; x < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
-        for( int y = 0; y < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; y++ )
+    for ( int x = 0; x < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
+        for ( int y = 0; y < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; y++ )
         {
             int2 pixelPos = windowTopLeft + int2(x,y);
             int2 srcCoord = MirrorCoord(pixelPos, g_const.FeedbackResolution);
 
             uint lightIndexA = u_reprojectedFeedbackBuffer[srcCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)].x;
-            uint lightIndexB = u_reprojectedFeedbackBuffer[srcCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)].y;
 
-            if( lightIndexA == RTXPT_INVALID_LIGHT_INDEX || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
+            if ( lightIndexA == RTXPT_INVALID_LIGHT_INDEX )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
             {
                 DebugPixel( cellTopLeft, float4(1,0,0,1) );
                 DebugPrint("Bad light read from {0} - missing barrier or etc?", srcCoord);
             }
 
-            bool insideCell = all( pixelPos >= cellTopLeft ) && all( (pixelPos - cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
-
-            u_narrowSamplingBuffer[ uint3(tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndexA, 0 );
-
-            if( ((x + y + checkerOne) % 2) == 0 )
-            //if( x >= cellTopLeft.x && y >= cellTopLeft.y && x < (cellTopLeft.x+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE) && y < (cellTopLeft.y+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE) )
-                u_narrowSamplingBuffer[ uint3(tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndexB, 0 );
+            u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndexA, 0 );
         }
 
     for( int x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
@@ -1311,13 +1295,35 @@ void FillTile( uint2 tilePos, bool indirect )
             if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
                 DebugPrint("LR bad light read from {0} - missing barrier or etc?", lrSrcCoord);
 
-            // if( currentlyCollectedCount == RTXPT_LIGHTING_NARROW_PROXY_COUNT )
-            //     break;
+            u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 0 );
+        }  
 
-            if( ((x + y + checkerOne) % 2) == 1 )
-                u_narrowSamplingBuffer[ uint3(tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 0 );
-        }    
-}
+    SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( tilePos, 0, g_const.SampleIndex ) );
+    for ( int i = 0; i < RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT; i++ )
+    {
+        uint ox = sampleGenerator.Next() % RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE;
+        uint oy = sampleGenerator.Next() % RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE;
+
+        int2 pixelPos = windowTopLeft + int2(ox,oy);
+        int2 srcCoord = MirrorCoord(pixelPos, g_const.FeedbackResolution);
+
+        uint lightIndex = u_reprojectedFeedbackBuffer[srcCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)].y;  // note, .y is historic samples!
+
+        if ( lightIndex == RTXPT_INVALID_LIGHT_INDEX )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
+        {
+            DebugPixel( cellTopLeft, float4(1,0,0,1) );
+            DebugPrint("Bad historic light read from {0} - missing barrier or etc?", srcCoord);
+        }
+        u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 0 );
+    }
+
+    if ( currentlyCollectedCount != RTXPT_LIGHTING_NARROW_PROXY_COUNT )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
+    {
+        DebugPixel( cellTopLeft, float4(1,0,0,1) );
+        DebugPrint("Wrong number of lights in FillTile {0}, {1} - missing barrier or etc?", actualTilePos, currentlyCollectedCount);
+    }
+
+ }
 
 [numthreads(8, 8, 1)]
 void ProcessFeedbackHistoryP2( uint2 dispatchThreadID : SV_DispatchThreadID )
@@ -1348,7 +1354,7 @@ void ProcessFeedbackHistoryP3a( uint3 dispatchThreadID : SV_DispatchThreadID, ui
     if( tilePos.x >= g_const.NarrowSamplingResolution.x || tilePos.y >= g_const.NarrowSamplingResolution.y*2 )
         return;
 
-    int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
+    int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - (int2)controlInfo.LocalSamplingTileJitter;
     bool debugTile = all( g_const.MouseCursorPos >= cellTopLeft ) && all((g_const.MouseCursorPos-cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
     debugTile = false;
 
@@ -1630,9 +1636,9 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
     if( any(tilePos >= g_const.NarrowSamplingResolution) )
         return;
     int margin = (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE - RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE)/2;
-    int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
+    int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - (int2)controlInfo.LocalSamplingTileJitter;
     int2 windowTopLeft  = (int2)cellTopLeft - margin;
-    int2 lrWindowTopLeft = (int2((tilePos.xy+0.5)*RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE) / RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx) - RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE.xx/2;
+    int2 lrWindowTopLeft = int2( float2(cellTopLeft+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE*0.5) / RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE*0.5 + 0.5.xx );
 
     bool debugTile = all( g_const.MouseCursorPos >= cellTopLeft ) && all((g_const.MouseCursorPos-cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
     debugTile &= g_const.DebugDrawDirect == !indirect;
@@ -1686,8 +1692,8 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
                 bool insideCell = all( pixelPos >= cellTopLeft ) && all( (pixelPos - cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
                 if( debugTile )
                     DebugPixel( pixelPos, float4( insideCell, 1-indirect, indirect, 1 ) );
-                if( !debugTile && (x == 0 || y == 0) )
-                    DebugPixel( pixelPos, float4( 0, 0, 1, 0.1 ) );
+                if( !debugTile && (x == margin || y == margin) )
+                    DebugPixel( pixelPos, float4( 0, 0, 1, 0.15 ) );
 
                 if (g_const.DebugDrawType == (int)LightingDebugViewType::TileHeatmap )
                     DebugPixel( pixelPos, float4(heatmapCol, 0.95) );
@@ -1700,9 +1706,9 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
                 int2 lrSrcCoord = MirrorCoord(lrPixelPos, g_const.LRFeedbackResolution);
 
                 if( debugTile && (x == 0 || y == 0) )
-                    DebugPixel( lrSrcCoord*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE, float4( 1, 1, 0, 0.5 ) );
+                    DebugPixel( lrSrcCoord*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE, float4( 0, 1, 1, 1.0 ) );
                 if( debugTile && ( ((x == (RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE-1)) || (y == (RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE-1) ) ) ) )
-                    DebugPixel( (lrSrcCoord+1)*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - 1.xx, float4( 1, 1, 0, 0.5 ) );
+                    DebugPixel( (lrSrcCoord+1)*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - 1.xx, float4( 0, 1, 1, 1.0 ) );
             }
     }
 
