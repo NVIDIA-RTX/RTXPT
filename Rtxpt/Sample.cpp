@@ -64,7 +64,7 @@ extern "C"
 
 static const int c_swapchainCount = 3;
 
-static const char* g_windowTitle = "RTX Path Tracing v1.5.0";
+static const char* g_windowTitle = "RTX Path Tracing v1.5.1";
 
 const char* g_assetsFolder = "Assets";
 
@@ -1500,7 +1500,11 @@ void Sample::UpdateLighting(nvrhi::CommandListHandle commandList)
         settings.NarrowTemporalFeedbackRatio    = m_ui.NEEAT_NarrowTemporalFeedbackRatio;
         settings.LightSampling_MIS_Boost        = m_ui.NEEAT_MIS_Boost;
         settings.DistantVsLocalImportanceScale  = m_ui.NEEAT_Distant_vs_Local_Importance;
-        settings.ResetFeedback = m_ui.ResetAccumulation && !m_ui.RealtimeMode || m_ui.ResetRealtimeCaches;    // only reset if in reference, accumulation mode (not in realtime mode)
+        settings.ResetFeedback = m_ui.ResetAccumulation && !m_ui.RealtimeMode 
+#if 1
+            || m_ui.ResetRealtimeCaches
+#endif
+        ;
         settings.SampleIndex = m_sampleIndex;
         settings.PrevViewportSize = float2( (float)m_viewPrevious->GetViewExtent().width(), (float)m_viewPrevious->GetViewExtent().height() );
         settings.ViewportSize = float2( (float)m_view->GetViewExtent().width(), (float)m_view->GetViewExtent().height() );
@@ -1883,22 +1887,42 @@ void Sample::StreamlinePreRender()
 #endif // #if DONUT_WITH_STREAMLINE
 }
 
+void Sample::PreRenderScripts()
+{
+    if( m_ui.FPSLimiter > 0 )
+        g_FPSLimiter.FramerateLimit( m_ui.FPSLimiter );
+
+    korgi::Update();
+
+    if (m_ui.ScreenshotMiniSequenceCounter == -1)
+    {
+        if (!m_ui.ScreenshotFileName.empty() && m_ui.ScreenshotResetAndDelay) 
+        {
+            if (m_ui.ScreenshotResetAndDelayCounter == -1) // we just started with delay, set it up
+            {
+                m_ui.ScreenshotResetAndDelayCounter = m_ui.ScreenshotResetAndDelayFrames+1;
+                m_ui.ResetRealtimeCaches = true;
+            }
+            m_ui.ScreenshotResetAndDelayCounter--;
+            assert(m_ui.ScreenshotResetAndDelayCounter >= 0);
+        }
+    }
+
+}
+
 void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 {
     const auto& fbinfo = framebuffer->getFramebufferInfo();
     m_displaySize = m_renderSize = uint2(fbinfo.width, fbinfo.height);
     float lodBias = 0.f;
 
-    if( m_ui.FPSLimiter > 0 )
-        g_FPSLimiter.FramerateLimit( m_ui.FPSLimiter );
-
-    korgi::Update();
-
     if (m_scene == nullptr)
     {
         assert( false ); // TODO: handle separately, just display pink color
         return;
     }
+
+    PreRenderScripts();
 
     bool needNewPasses = false;
     bool needNewBindings = false;
@@ -2352,10 +2376,30 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         }
     };
 
-    if (!m_ui.ScreenshotFileName.empty())
+    if (!m_ui.ScreenshotFileName.empty() && !(m_ui.ScreenshotResetAndDelay && m_ui.ScreenshotResetAndDelayCounter>0) )
     {
-        DumpScreenshot(framebufferTexture, m_ui.ScreenshotFileName.c_str(), false /*exitOnCompletion*/);
-        m_ui.ScreenshotFileName = "";
+        std::filesystem::path screenshotFile = m_ui.ScreenshotFileName;
+        if (m_ui.ScreenshotMiniSequence)
+        {
+            if ( m_ui.ScreenshotMiniSequenceCounter == -1 ) // start sequence if in sequence mode
+                m_ui.ScreenshotMiniSequenceCounter = m_ui.ScreenshotMiniSequenceFrames;
+            assert( m_ui.ScreenshotMiniSequenceFrames > 0 );
+            m_ui.ScreenshotMiniSequenceCounter--;
+
+            std::filesystem::path justName = screenshotFile.filename().stem();
+            std::filesystem::path justExtension = screenshotFile.extension();
+            screenshotFile.remove_filename();
+            screenshotFile /= justName.string() + string_format("_%03d", m_ui.ScreenshotMiniSequenceFrames - m_ui.ScreenshotMiniSequenceCounter) + justExtension.string();
+        }
+
+        DumpScreenshot(framebufferTexture, screenshotFile.string().c_str(), false /*exitOnCompletion*/);
+
+        if (!m_ui.ScreenshotMiniSequence || m_ui.ScreenshotMiniSequenceCounter==0)
+        {
+            m_ui.ScreenshotFileName = "";
+            m_ui.ScreenshotResetAndDelayCounter = -1;
+            m_ui.ScreenshotMiniSequenceCounter = -1;
+        }
     }
 
 	if (!m_cmdLine.screenshotFileName.empty() && (m_cmdLine.screenshotFrameIndex == GetFrameIndex()))
@@ -2810,9 +2854,8 @@ int main(int __argc, const char** __argv)
     app::DeviceManager* deviceManager = app::DeviceManager::Create(api);
 
     app::DeviceCreationParameters deviceParams;
-    // deviceParams.adapter = VrSystem::GetRequiredAdapter();
-    deviceParams.backBufferWidth = 1920;
-    deviceParams.backBufferHeight = 1080;
+    deviceParams.backBufferWidth = 0;   // initialized from CmdLine
+    deviceParams.backBufferHeight = 0;  // initialized from CmdLine
     deviceParams.swapChainSampleCount = 1;
     deviceParams.swapChainBufferCount = c_swapchainCount;
     deviceParams.startFullscreen = false;
@@ -2836,7 +2879,6 @@ int main(int __argc, const char** __argv)
     deviceParams.enableStreamlineLog = true;
 #endif
 #endif
-
 
 #if DONUT_WITH_VULKAN
     deviceParams.requiredVulkanDeviceExtensions.push_back("VK_KHR_buffer_device_address");

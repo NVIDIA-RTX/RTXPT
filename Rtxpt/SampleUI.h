@@ -110,12 +110,19 @@ struct SampleUIData
     bool                                ShaderReloadRequested = false;
     bool                                AccelerationStructRebuildRequested = false;
     float                               ShaderAndACRefreshDelayedRequest = 0.0f;
-    std::string                         ScreenshotFileName;
+    std::filesystem::path               ScreenshotFileName;
     std::string                         ScreenshotSequencePath = "D:/AnimSequence/";
     bool                                ScreenshotSequenceCaptureActive = false;
     int                                 ScreenshotSequenceCaptureIndex = -64; // -x means x warmup frames for recording to stabilize denoiser
     bool                                LoopLongestAnimation = false; // some animation sequences want to loop only the longest, but some want to loop each independently
     bool                                ExperimentalPhotoModeScreenshot = false;
+
+    bool                                ScreenshotResetAndDelay = false;
+    int                                 ScreenshotResetAndDelayFrames = 5;
+    int                                 ScreenshotResetAndDelayCounter = -1;
+    bool                                ScreenshotMiniSequence = false;
+    int                                 ScreenshotMiniSequenceFrames = 5;
+    int                                 ScreenshotMiniSequenceCounter = -1;
 
     bool                                UseStablePlanes = false; // only determines whether UseStablePlanes is used in Accumulate mode (for testing correctness and enabling RTXDI) - in Realtime mode or when using RTXDI UseStablePlanes are necessary
     bool                                AllowRTXDIInReferenceMode   = false; // allows use of RTXDI even in reference mode
@@ -124,7 +131,7 @@ struct SampleUIData
     int                                 NEECandidateSamples                     = 6;        // each full sample is picked from a number of candidate samples; these are not visibility tested so taking too many can hurt quality in heavily shadowed scenarios
     int                                 NEEFullSamples                          = 2;        // each full sample requires a shadow ray!
     bool                                NEEAT_GlobalTemporalFeedbackEnabled     = true;
-    float                               NEEAT_GlobalTemporalFeedbackRatio       = 0.8f;
+    float                               NEEAT_GlobalTemporalFeedbackRatio       = 0.65f;
     bool                                NEEAT_NarrowTemporalFeedbackEnabled     = true;
     float                               NEEAT_NarrowTemporalFeedbackRatio       = 0.5f;
     float                               NEEAT_MIS_Boost                         = 1.0f;
@@ -292,6 +299,8 @@ private:
     virtual bool MousePosUpdate(double xpos, double ypos) override;
     virtual void DisplayScaleChanged(float scaleX, float scaleY) override { m_currentScale = scaleX; assert( scaleX == scaleY ); }
     virtual void Animate(float elapsedTimeSeconds) override;
+
+    bool BuildUIScriptsAndEtc(void);
 
 
 private:
