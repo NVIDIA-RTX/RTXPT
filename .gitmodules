@@ -1,6 +1,6 @@
 [submodule "External/RayTracingDenoiser"]
 	path = External/Nrd
-	url = https://github.com/NVIDIA-RTX/NRD
+	url = https://github.com/NVIDIA-RTX/NRD.git
 [submodule "External/Opacity-MicroMap-SDK"]
 	path = External/Omm
 	url = https://github.com/NVIDIA-RTX/OMM.git
@@ -17,14 +17,14 @@
 	url = https://github.com/NVIDIA-RTX/RTXDI-Library.git
 [submodule "External/donut"]
 	path = External/Donut
-	url = https://github.com/NVIDIA-RTX/Donut
+	url = https://github.com/NVIDIA-RTX/Donut.git
 	branch = main
 [submodule "Assets"]
 	path = Assets
 	url = https://github.com/NVIDIA-RTX/RTXPT-Assets.git
 [submodule "External/Streamline"]
 	path = External/Streamline
-	url = https://github.com/NVIDIA-RTX/Streamline
+	url = https://github.com/NVIDIA-RTX/Streamline.git
 [submodule "External/Rtxtf"]
 	path = External/Rtxtf
-	url = https://github.com/NVIDIA-RTX/RTXTF-Library
+	url = https://github.com/NVIDIA-RTX/RTXTF-Library.git
