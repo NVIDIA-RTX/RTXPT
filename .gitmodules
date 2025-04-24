@@ -24,7 +24,7 @@
 	url = https://github.com/NVIDIA-RTX/RTXPT-Assets.git
 [submodule "External/Streamline"]
 	path = External/Streamline
-	url = https://github.com/NVIDIAGameWorks/Streamline.git
+	url = https://github.com/NVIDIA-RTX/Streamline
 [submodule "External/Rtxtf"]
 	path = External/Rtxtf
 	url = https://github.com/NVIDIA-RTX/RTXTF-Library
