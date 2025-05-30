@@ -141,6 +141,7 @@ Many thanks to the developers of the following open-source libraries or projects
  * DirectX Shader Compiler (https://github.com/microsoft/DirectXShaderCompiler)
  * cgltf, Single-file glTF 2.0 loader (https://github.com/jkuhlmann/cgltf)
  * Krzysztof Narkowicz's Real-time BC6H compression on GPU (https://github.com/knarkowicz/GPURealTimeBC6H)
+ * okdshin's https://github.com/okdshin/PicoSHA2
  * ...and any we might have forgotten (please let us know) :)
 
 ## Citation
