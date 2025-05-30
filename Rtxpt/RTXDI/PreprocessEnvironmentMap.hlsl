@@ -11,8 +11,8 @@
 #include "ShaderParameters.h"
 #include <donut/shaders/binding_helpers.hlsli>
 #include "../../External/Rtxdi/Include/Rtxdi/Utils/Math.hlsli"
-#include "../PathTracer/Utils/Math/MathHelpers.hlsli"
-#include "../PathTracer/Utils/Utils.hlsli"
+#include "../Shaders/PathTracer/Utils/Math/MathHelpers.hlsli"
+#include "../Shaders/PathTracer/Utils/Utils.hlsli"
 
 RWTexture2D<float> u_IntegratedMips[] : register(u0);
 

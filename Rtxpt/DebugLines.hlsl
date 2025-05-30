@@ -13,7 +13,7 @@
 
 #ifndef __cplusplus
 
-#include "SampleConstantBuffer.h"
+#include "Shaders/SampleConstantBuffer.h"
 ConstantBuffer<SampleConstants> g_Const : register(b0);
 
 #ifdef DRAW_LINES_SHADERS

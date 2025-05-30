@@ -13,24 +13,24 @@
 
 #include "precomputed_sky.hlsli"
 
-#include "../../PathTracer/Utils/Utils.hlsli"
+#include "../../Shaders/PathTracer/Utils/Utils.hlsli"
 
 struct ProceduralSkyConstants
 {
     AtmosphereParameters    SkyParams;
 
     float3                  FinalRadianceMultiplier;
-    float                   _padding0;
+    float                   _padding3;
 
     float3                  SunDir;
     float                   CloudsTime;
 
     float3                  GroundAlbedo;
-    float                   SunAngularRadius;
+    float                   SunAngularDiameter;
 
     // precomputed for performance
-    float                   sun_tan_half_angle;
-    float                   sun_cos_half_angle;
+    float                   _padding0;
+    float                   _padding1;
     float                   sun_solid_angle;
     float                   _padding2;
     float3                  physical_sky_ground_radiance;
@@ -68,7 +68,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // The rest below is shader only code
 #if !defined(__cplusplus) || defined(__INTELLISENSE__) 
 
-#include "../../PathTracer/Utils/NoiseAndSequences.hlsli"
+#include "../../Shaders/PathTracer/Utils/NoiseAndSequences.hlsli"
 
 struct ProceduralSkyWorkingContext
 {
@@ -248,7 +248,11 @@ float4 ProceduralSkyLowRes( uint cubeDim, uint3 cubePosFace, const float3 viewDi
     float3 sun_direct_radiance = sun_transmittance;
 
     sun_direct_radiance /= workingContext.Consts.sun_solid_angle;
-    sun_direct_radiance *= pow(clamp((dot(eyeVec, workingContext.Consts.SunDir) - workingContext.Consts.sun_cos_half_angle) * 1000 + 0.875, 0, 1), 10);
+
+    float angl = acos(saturate(dot(eyeVec, workingContext.Consts.SunDir)));
+    angl /= workingContext.Consts.SunAngularDiameter*0.5;
+    sun_direct_radiance *= pow( saturate((1-angl)*5.0 + 0.875), 10 );
+    //sun_direct_radiance *= pow(clamp((dot(eyeVec, workingContext.Consts.SunDir) - workingContext.Consts.sun_cos_half_angle) * 1000 + 0.875, 0, 1), 10);
         
     radiance += sun_direct_radiance;
         
@@ -282,7 +286,10 @@ float3 ProceduralSky( uint cubeDim, uint3 cubePosFace, const float3 viewDirectio
     float3 sun_direct_radiance = sun_transmittance;
 
     sun_direct_radiance /= workingContext.Consts.sun_solid_angle;
-    sun_direct_radiance *= pow(clamp((dot(eyeVec, workingContext.Consts.SunDir) - workingContext.Consts.sun_cos_half_angle) * 1000 + 0.875, 0, 1), 10);
+
+    float angl = acos(saturate(dot(eyeVec, workingContext.Consts.SunDir)));
+    angl /= workingContext.Consts.SunAngularDiameter*0.5;
+    sun_direct_radiance *= pow( saturate((1-angl)*5.0 + 0.875), 10 );
         
     radiance += sun_direct_radiance;
         

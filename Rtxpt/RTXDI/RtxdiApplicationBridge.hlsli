@@ -45,8 +45,8 @@ between the bridge functions.
 
 #include "ShaderParameters.h"
 #include "SurfaceData.hlsli"
-#include "../Bindings/ShaderResourceBindings.hlsli"
-#include "../PathTracerBridgeDonut.hlsli"
+#include "../Shaders/Bindings/ShaderResourceBindings.hlsli"
+#include "../Shaders/PathTracerBridgeDonut.hlsli"
 
 // RTXDI resources
 StructuredBuffer<PolymorphicLightInfoFull> t_LightDataBuffer    : register(t21 VK_DESCRIPTOR_SET(2));
@@ -725,8 +725,8 @@ bool RAB_AreMaterialsSimilar(RAB_Surface a, RAB_Surface b)
 //     (previousUV * previousViewportSize - currentUV * currentViewportSize)
 //
 float3 convertMotionVectorToPixelSpace(
-    PlanarViewConstants view,
-    PlanarViewConstants viewPrev,
+    SimpleViewConstants view,
+    SimpleViewConstants viewPrev,
     int2 pixelPosition,
     float3 motionVector)
 {

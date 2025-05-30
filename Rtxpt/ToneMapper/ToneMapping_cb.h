@@ -36,6 +36,10 @@ struct ToneMappingConstants
 	float autoExposureLumValueMin;
 	float autoExposureLumValueMax;
     float3x4 colorTransform;
+    uint enabled;
+    uint _padding0;
+    uint _padding1;
+    uint _padding2;
 };
 
 

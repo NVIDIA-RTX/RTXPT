@@ -31,7 +31,7 @@ Based on E. Bruneton F. Neyet paper "Precomputed Atmospheric Scattering"
 struct AtmosphereParameters
 {
 	float3		StarIrradiance;                 // Irradiance of the star light spectrum translated to RGB
-	float		StarAngularRadius;              // Angular radius of the star
+	float		StarAngularDiameter;            // Angular radius of the star
 
 	float3		RayleightScatteringRGB;         // Rayleigh scattering term
 	float		PlanetSurfaceRadius;            // Radius of the planet

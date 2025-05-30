@@ -11,11 +11,11 @@
 #ifndef SURFACE_DATA_HLSLI
 #define SURFACE_DATA_HLSLI
 
-#include "../PathTracer/PathTracerTypes.hlsli"
+#include "../Shaders/PathTracer/PathTracerTypes.hlsli"
 
-#include "../Bindings/ShaderResourceBindings.hlsli"
+#include "../Shaders/Bindings/ShaderResourceBindings.hlsli"
 
-#include "../PathTracerBridgeDonut.hlsli"
+#include "../Shaders/PathTracerBridgeDonut.hlsli"
 
 #include "ShaderParameters.h"
 #include "HelperFunctions.hlsli"
@@ -419,11 +419,10 @@ PathTracerSurfaceData getGBufferSurfaceImpl(uint2 pixelPosition, StablePlane sp,
     PackedHitInfo packedHitInfo; 
 	float3 rayDir;
 	uint vertexIndex; 
-	uint SERSortKey; 
 	float sceneLength; 
 	float3 pathThp; 
 	float3 motionVectors;
-    StablePlanesContext::UnpackStablePlane(sp, vertexIndex, packedHitInfo, SERSortKey, rayDir, sceneLength, pathThp, motionVectors);
+    StablePlanesContext::UnpackStablePlane(sp, vertexIndex, packedHitInfo, rayDir, sceneLength, pathThp, motionVectors);
 	
     uint planeHash = (dominantStablePlaneIndex << 16) | vertexIndex;    // consider replacing with stableBranchID - that will cover vertexIndex and planes but also separate delta paths within a plane
 
@@ -436,7 +435,7 @@ PathTracerSurfaceData getGBufferSurfaceImpl(uint2 pixelPosition, StablePlane sp,
         SampleGenerator sampleGenerator = SampleGenerator::make(SampleGeneratorVertexBase::make(pixelPosition, 0, Bridge::getSampleIndex()));
 
 		const PathTracer::SurfaceData bridgedData = Bridge::loadSurface(
-			PathTracer::OptimizationHints::NoHints(0), 
+			PathTracer::OptimizationHints::NoHints(), 
 			TriangleHit::make(packedHitInfo), 
 			rayDir, 
 			rayCone, 

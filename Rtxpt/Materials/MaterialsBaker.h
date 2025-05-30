@@ -19,8 +19,8 @@
 #include <donut\engine\SceneTypes.h>
 
 #include "../ComputePass.h"
-#include "../SubInstanceData.h"
-#include "../PathTracer/Materials/MaterialPT.h"
+#include "../Shaders/SubInstanceData.h"
+#include "../Shaders/PathTracer/Materials/MaterialPT.h"
 
 #include <unordered_map>
 
@@ -28,7 +28,6 @@ using namespace donut::math;
 
 namespace donut::engine
 {
-    class ExtendedScene;
     class FramebufferFactory;
     class TextureCache;
     class TextureHandle;
@@ -39,27 +38,61 @@ namespace donut::engine
 }
 
 class ShaderDebug;
+class ExtendedScene;
 
-struct MaterialPT
+struct MaterialShadingProperties
 {
-    struct Texture
-    {
-        std::filesystem::path   LocalPath;
-        bool                    sRGB;           // whether to assume that, when loading from sRGB agnostic formats, the texture's .rgb channels are in sRGB (.a is always linear)
-        std::shared_ptr<donut::engine::LoadedTexture>  
-                                Loaded;
-        bool                    NormalMap;      // determines unpacking (not actually used as a flag now by shading, but normalmaps are marked as so for future use)
+    bool AlphaTest;
+    bool HasTransmission;
+    bool NoTransmission;
+    bool OnlyDeltaLobes;
+    bool NoTextures;
+    bool ExcludeFromNEE;
 
-        void                    InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTexture> & loaded, bool sRGB, bool normalMap, const std::filesystem::path & mediaPath);
-    };
+    bool operator==(const MaterialShadingProperties& other) const { return AlphaTest == other.AlphaTest && HasTransmission == other.HasTransmission && NoTransmission == other.NoTransmission && OnlyDeltaLobes == other.OnlyDeltaLobes && NoTextures == other.NoTextures && ExcludeFromNEE == other.ExcludeFromNEE; };
+    bool operator!=(const MaterialShadingProperties& other) const { return !(*this == other); }
 
+    static MaterialShadingProperties Compute(const struct PTMaterial& material);
+};
+
+struct PTTexture
+{
+    std::filesystem::path   LocalPath;
+    bool                    sRGB;           // whether to assume that, when loading from sRGB agnostic formats, the texture's .rgb channels are in sRGB (.a is always linear)
+    std::shared_ptr<donut::engine::LoadedTexture>
+        Loaded;
+    bool                    NormalMap;      // determines unpacking (not actually used as a flag now by shading, but normalmaps are marked as so for future use)
+
+    bool                    Enabled;        // an easy way to disable/enable texture slot without actually disconnecting a texture
+
+    // float4                  ValueDefault;   // when texture is not enabled or can't be loaded
+    // float4                  ValueMultiply;
+    // float4                  ValueAdd;
+
+    void                    InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTexture>& loaded, bool sRGB, bool normalMap, const std::filesystem::path& mediaPath);
+};
+
+// All materials share these base properties and some of them have tight integration with the rest of the renderer
+struct PTMaterialBase
+{
     std::string             Name;
-    
-    Texture                 BaseTexture;                        // .rgb base color; .a = opacity (both modes)
-    Texture                 OcclusionRoughnessMetallicTexture;  // .rgb ORM; (spec-gloss fallback: specular color, .a = glossiness)
-    Texture                 NormalTexture;
-    Texture                 EmissiveTexture;
-    Texture                 TransmissionTexture;                // see KHR_materials_transmission; undefined on specular-gloss materials
+
+    // base texture? & alpha test - opacity?
+    // emissive texture?
+
+    bool                    SharedWithAllScenes                 = true;    // if 'true', will be saved to MaterialsBaker::m_materialsPath; otherwise in MaterialsBaker::m_materialsSceneSpecializedPath
+
+    virtual void            Write(Json::Value & output) = 0;
+    virtual bool            Read(Json::Value & output, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache) = 0;
+};                                                                                                                      
+
+struct PTMaterial : public PTMaterialBase
+{
+    PTTexture               BaseTexture;                        // .rgb base color; .a = opacity (both modes)
+    PTTexture               OcclusionRoughnessMetallicTexture;  // .rgb ORM; (spec-gloss fallback: specular color, .a = glossiness)
+    PTTexture               NormalTexture;
+    PTTexture               EmissiveTexture;
+    PTTexture               TransmissionTexture;                // see KHR_materials_transmission; undefined on specular-gloss materials
 
     dm::float3              BaseOrDiffuseColor                  = 1.f; // metal-rough: base color, spec-gloss: diffuse color (if no texture present)
     dm::float3              SpecularColor                       = 0.f; // spec-gloss: specular color
@@ -120,19 +153,22 @@ struct MaterialPT
     bool                    GPUDataDirty                        = true;         // params changed, GPU data needs update
     uint                    GPUDataIndex                        = 0xFFFFFFFF;   // 0xFFFFFFFF if no GPU buffer slot allocated
 
-    void                    FillData(MaterialPTData & data);
-    bool                    EditorGUI();
+    bool                    EnableAsAnalyticLightProxy          = false;
+
+    void                    FillData(PTMaterialData & data);
+    bool                    EditorGUI(class MaterialsBaker & baker);
     bool                    IsEmissive() const;
 
-    static std::shared_ptr<MaterialPT> FromDonut(const std::shared_ptr<donut::engine::Material>& donutMaterial);
-    static std::shared_ptr<MaterialPT> FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache);
+    static std::shared_ptr<PTMaterial> FromDonut(const std::shared_ptr<donut::engine::Material>& donutMaterial);
+    static std::shared_ptr<PTMaterial> FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache);
 
-    void                    Write(Json::Value & output, const std::filesystem::path & mediaPath);
+    virtual void            Write(Json::Value & output) override;
+    virtual bool            Read(Json::Value & output, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache) override;
 };
 
 struct MaterialEx : donut::engine::Material
 {
-    std::shared_ptr<MaterialPT> MaterialPT;              
+    std::shared_ptr<PTMaterial> PTMaterial;              
 };
 
 class MaterialsBaker
@@ -141,28 +177,34 @@ public:
     MaterialsBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory);
     ~MaterialsBaker();
 
-    void                            CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const std::shared_ptr<donut::engine::ExtendedScene>& scene, const std::filesystem::path & sceneFilePath, const std::filesystem::path & mediaPath);
+    void                            CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path & sceneFilePath, const std::filesystem::path & mediaPath);
 
     // this update can happen in parallel with any other ray preparatory tracing work - anything from BVH building to laying down denoising layers
-    void                            Update(nvrhi::ICommandList * commandList, const std::shared_ptr<donut::engine::ExtendedScene> & scene, std::vector<SubInstanceData> & subInstanceData);
+    void                            Update(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::vector<SubInstanceData> & subInstanceData);
 
     nvrhi::BufferHandle             GetMaterialDataBuffer() const           { return m_materialData; }
     uint                            GetMaterialDataCount() const            { return m_materialsGPU.size(); }
 
-    const std::unordered_map<std::string, MaterialPT::Texture> &
+    const std::unordered_map<std::string, PTTexture> &
                                     GetUsedTextures() const                 { return m_textures; }
 
     bool                            DebugGUI(float indent);
 
     void                            SceneReloaded();
 
+    std::filesystem::path           GetMaterialStoragePath(PTMaterialBase& material);
+
+    bool                            SaveSingle(PTMaterialBase& material);
+    bool                            LoadSingle(PTMaterialBase& material);
+
 private:
     void                            Clear();
 
-    std::shared_ptr<MaterialPT>     ImportFromDonut(donut::engine::Material & material);
-
-    void                            LoadAll(std::unordered_map<std::string, std::shared_ptr<MaterialPT>> & container);
+    std::shared_ptr<PTMaterial>     Load(const std::string& name);
+    std::shared_ptr<PTMaterial>     ImportFromDonut(donut::engine::Material & material);
     void                            SaveAll();
+
+    void                            CompleteDeferredTexturesLoad(nvrhi::ICommandList* commandList);
 
 private:
     nvrhi::DeviceHandle             m_device;
@@ -175,13 +217,15 @@ private:
 
     nvrhi::BufferHandle             m_materialData;
     bool                            m_materialDataWasReset = true;
+    bool                            m_deferredTextureLoadInProgress = false;
 
-    std::vector<std::shared_ptr<MaterialPT>>    
+    std::vector<std::shared_ptr<PTMaterial>>    
                                     m_materials;
-    std::vector<MaterialPTData>     m_materialsGPU;
+    std::vector<PTMaterialData>     m_materialsGPU;
 
-    std::unordered_map<std::string, MaterialPT::Texture> m_textures;
+    std::unordered_map<std::string, PTTexture> m_textures;
 
-    std::filesystem::path           m_sceneMaterialsFilePath;
     std::filesystem::path           m_mediaPath;
+    std::filesystem::path           m_materialsPath;                    // usually "Assets/Materials/"              <- used for materials shared between all scenes
+    std::filesystem::path           m_materialsSceneSpecializedPath;    // usually "Assets/Materials/SceneName/"    <- used for materials specific to scene (not shared between scenes)
 };

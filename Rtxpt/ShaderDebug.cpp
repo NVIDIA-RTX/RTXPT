@@ -85,8 +85,10 @@ ShaderDebug::ShaderDebug( nvrhi::IDevice* device, nvrhi::ICommandList* commandLi
 void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::TextureHandle depthBuffer )
 {
     nvrhi::TextureDesc desc;
-    desc.width = frameBuffer->getDesc().colorAttachments[0].texture->getDesc().width;
-    desc.height = frameBuffer->getDesc().colorAttachments[0].texture->getDesc().height;
+    //desc.width = frameBuffer->getDesc().colorAttachments[0].texture->getDesc().width;
+    //desc.height = frameBuffer->getDesc().colorAttachments[0].texture->getDesc().height;
+    desc.width  = depthBuffer->getDesc().width;
+    desc.height = depthBuffer->getDesc().height;
     desc.debugName = "DebugVizOutput";
     desc.format = nvrhi::Format::RGBA16_FLOAT;
     desc.clearValue = nvrhi::Color(0.0f, 0.0f, 0.0f, 0.0f);   // avoid the debug layer warnings... not actually cleared except for debug purposes
@@ -112,7 +114,7 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
         std::vector<donut::engine::ShaderMacro> shaderMacros;
         shaderMacros.push_back(donut::engine::ShaderMacro({              "BLEND_DEBUG_BUFFER", "1" })); 
 
-        m_blendDebugVizPS = m_shaderFactory->CreateShader("app/ShaderDebug.hlsl", "main", &shaderMacros, nvrhi::ShaderType::Pixel);
+        m_blendDebugVizPS = m_shaderFactory->CreateShader("app/Shaders/ShaderDebug.hlsl", "main", &shaderMacros, nvrhi::ShaderType::Pixel);
 
         nvrhi::GraphicsPipelineDesc pipelineDesc;
         pipelineDesc.bindingLayouts = { m_geometryBindingLayout };
@@ -133,14 +135,14 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
     // debug triangles and lines...
     {
         std::vector<ShaderMacro> drawTrianglesMacro = { ShaderMacro("DRAW_TRIANGLES_SHADERS", "1") };
-        m_trianglesVertexShader = m_shaderFactory->CreateShader("app/ShaderDebug.hlsl", "main_vs", &drawTrianglesMacro, nvrhi::ShaderType::Vertex);
-        m_trianglesPixelShader = m_shaderFactory->CreateShader("app/ShaderDebug.hlsl", "main_ps", &drawTrianglesMacro, nvrhi::ShaderType::Pixel);
+        m_trianglesVertexShader = m_shaderFactory->CreateShader("app/Shaders/ShaderDebug.hlsl", "main_vs", &drawTrianglesMacro, nvrhi::ShaderType::Vertex);
+        m_trianglesPixelShader = m_shaderFactory->CreateShader("app/Shaders/ShaderDebug.hlsl", "main_ps", &drawTrianglesMacro, nvrhi::ShaderType::Pixel);
     }
 
     {
         std::vector<ShaderMacro> drawLinesMacro = { ShaderMacro("DRAW_LINES_SHADERS", "1") };
-        m_linesVertexShader = m_shaderFactory->CreateShader("app/ShaderDebug.hlsl", "main_vs", &drawLinesMacro, nvrhi::ShaderType::Vertex);
-        m_linesPixelShader = m_shaderFactory->CreateShader("app/ShaderDebug.hlsl", "main_ps", &drawLinesMacro, nvrhi::ShaderType::Pixel);
+        m_linesVertexShader = m_shaderFactory->CreateShader("app/Shaders/ShaderDebug.hlsl", "main_vs", &drawLinesMacro, nvrhi::ShaderType::Vertex);
+        m_linesPixelShader = m_shaderFactory->CreateShader("app/Shaders/ShaderDebug.hlsl", "main_ps", &drawLinesMacro, nvrhi::ShaderType::Pixel);
     }
 
     nvrhi::BindingSetDesc bindingSetDesc;
@@ -208,10 +210,7 @@ void ShaderDebug::EndFrameAndOutput( nvrhi::ICommandList* commandList, nvrhi::IF
         state.framebuffer = frameBuffer;
         state.bindings = { bindingSet };
         nvrhi::ViewportState viewportState;
-        auto desc = frameBuffer->getDesc().colorAttachments[0].texture->getDesc();
-        viewportState.addViewport(nvrhi::Viewport((float)desc.width, (float)desc.height));
-        viewportState.addScissorRect(nvrhi::Rect(desc.width, desc.height));
-        state.viewport = viewportState;
+        state.viewport.addViewportAndScissorRect(viewport);
         commandList->setGraphicsState(state);
 
         nvrhi::DrawArguments args;

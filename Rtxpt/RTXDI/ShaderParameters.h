@@ -21,8 +21,9 @@
 #include <Rtxdi/DI/ReSTIRDIParameters.h>
 #include <Rtxdi/ReGIR/ReGIRParameters.h>
 #include <Rtxdi/GI/ReSTIRGIParameters.h>
-#include "../PathTracer/PathTracerShared.h"
-#include "../PathTracer/Lighting/PolymorphicLight.h"
+#include "../Shaders/PathTracer/PathTracerShared.h"
+#include "../Shaders/PathTracer/Lighting/PolymorphicLight.h"
+#include "../Shaders/Bindings/BindingDataTypes.hlsli"
 
 #define TASK_PRIMITIVE_LIGHT_BIT 0x80000000u
 
@@ -264,26 +265,6 @@ struct SecondarySurface
     uint2 throughput;
     uint diffuseAlbedo;
     uint specularAndRoughness;
-};
-
-struct PackedPathTracerSurfaceData
-{
-    float3 _posW;
-    uint _faceNCorrected;                   // fp16[3]
-    uint2 _mtl;                             // Falcor::MaterialDefinition
-    uint2 _V;                               // fp16[3]
-
-    // misc (mostly subset of struct ShadingData)
-    uint _T;                                // octFp16
-    uint _N;                                // octFp16
-    uint _viewDepth_planeHash_isEmpty_frontFacing;	// (fp16) | u15 | u1
-
-    // StandardBSDFData (All fields nessesary)
-    uint _diffuse;							// R11G11B10_FLOAT
-    uint _specular;							// R11G11B10_FLOAT
-    uint _roughnessMetallicEta;				// R11G11B10_FLOAT
-    uint _transmission;						// R11G11B10_FLOAT
-    uint _diffuseSpecularTransmission;		// fp16 | fp16
 };
 
 #endif // SHADER_PARAMETERS_H

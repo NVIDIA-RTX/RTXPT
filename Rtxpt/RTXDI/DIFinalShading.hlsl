@@ -8,6 +8,8 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
+#define NON_PATH_TRACING_PASS 1
+
 #include "ShaderParameters.h"
 #include "RtxdiApplicationBridge.hlsli"
 #include <Rtxdi/DI/TemporalResampling.hlsli>
@@ -147,7 +149,7 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
         }
         else
         {
-            u_Output[pixelPos] += float4(diffuseContribution + specularContribution, 0);
+            u_OutputColor[pixelPos] += float4(diffuseContribution + specularContribution, 0);
         }
     }
 

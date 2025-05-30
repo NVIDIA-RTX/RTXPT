@@ -10,29 +10,27 @@
 
 #pragma once
 
-#include "PathTracer/Config.h"
+#include "Shaders/PathTracer/Config.h"
 #include "SampleCommon.h"
 
-#include "CommandLine.h"
+#include "Misc/CommandLine.h"
 #include "SampleUI.h"
 
 #include <donut/app/ApplicationBase.h>
 #include <donut/core/vfs/VFS.h>
-#include <donut/render/GBufferFillPass.h>
-#include <donut/render/PixelReadbackPass.h>
-#include <donut/render/DrawStrategy.h>
+#include <donut/render/BloomPass.h>
 #include <donut/app/Camera.h>
 
 #include "RTXDI/RtxdiPass.h"
 #include "NRD/NrdIntegration.h"
-#include "PathTracer/StablePlanes.hlsli"
+//#include "PathTracer/StablePlanes.hlsli"
 #if DONUT_WITH_STREAMLINE
 #include <donut/app/StreamlineInterface.h>
 #endif
 
 #include "RenderTargets.h"
 #include "PostProcess.h"
-#include "SampleConstantBuffer.h"
+#include "Shaders/SampleConstantBuffer.h"
 #include "AccumulationPass.h"
 #include "ExtendedScene.h"
 
@@ -40,6 +38,8 @@
 #include "Lighting/LightsBaker.h"
 
 #include "ShaderDebug.h"
+
+#include <map>
 
 // can be upgraded for special normalmap type (i.e. DXGI_FORMAT_BC5_UNORM) or single channel masks (i.e. DXGI_FORMAT_BC4_UNORM)
 enum class TextureCompressionType
@@ -49,24 +49,9 @@ enum class TextureCompressionType
     GenericLinear,      // maps to BC7_UNORM
 };
 
-struct MaterialShadingProperties
-{
-    bool AlphaTest;
-    bool HasTransmission;
-    bool NoTransmission;
-    bool OnlyDeltaLobes;
-    bool NoTextures;
-    bool ExcludeFromNEE;
-
-    bool operator==(const MaterialShadingProperties& other) const { return AlphaTest==other.AlphaTest && HasTransmission==other.HasTransmission && NoTransmission==other.NoTransmission && OnlyDeltaLobes==other.OnlyDeltaLobes && NoTextures==other.NoTextures && ExcludeFromNEE==other.ExcludeFromNEE; };
-    bool operator!=(const MaterialShadingProperties& other) const { return !(*this==other); }
-
-    static MaterialShadingProperties Compute(const struct MaterialPT & material);
-};
-
 class Sample : public donut::app::ApplicationBase
 {
-    static constexpr uint32_t c_PathTracerVariants   = 6; // see shaders.cfg and CreatePTPipeline for details on variants
+    // static constexpr uint32_t c_PathTracerVariants   = 6; // see shaders.cfg and CreatePTPipeline for details on variants
 
 public:
     using ApplicationBase::ApplicationBase;
@@ -83,6 +68,7 @@ public:
     const DeltaTreeVizPathVertex *          GetDebugDeltaPathTree() const           { return m_debugDeltaPathTree; }
     uint                                    GetSceneCameraCount() const             { return (uint)m_scene->GetSceneGraph()->GetCameras().size() + 1; }
     uint &                                  SelectedCameraIndex()                   { return m_selectedCameraIndex; }   // 0 is default fps free flight, above (if any) will just use current scene camera
+    const std::unique_ptr<class SampleGame> &     GetGame() const                   { return m_sampleGame; }
 
     void                                    UpdateSubInstanceContents();
     void                                    UploadSubInstanceData(nvrhi::ICommandList* commandList);
@@ -115,6 +101,7 @@ public:
     virtual bool                            MouseScrollUpdate(double xoffset, double yoffset) override;
     virtual void                            Animate(float fElapsedTimeSeconds) override;
 
+    void                                    FillPTPipelineGlobalMacros(std::vector<donut::engine::ShaderMacro> & macros);
     bool                                    CreatePTPipeline(donut::engine::ShaderFactory& shaderFactory);
     void                                    DestroyOpacityMicromaps(nvrhi::ICommandList* commandList);
     void                                    CreateOpacityMicromaps();
@@ -151,17 +138,24 @@ public:
 
     void                                    ResetSceneTime( ) { m_sceneTime = 0.; }
 
-    bool                                    IsEnvMapLoaded() const { return true; } // with the new EnvMapBaker it's always present (just black)
+    bool                                    IsEnvMapLoaded() const      { return true; } // with the new EnvMapBaker it's always present (just black)
+    const std::string &                     GetEnvMapLocalPath()        { return m_envMapLocalPath; }
+    const std::string &                     GetEnvMapOverrideSource()   { return m_envMapOverride; }
+    void                                    SetEnvMapOverrideSource(const std::string & envMapOverride) { m_envMapOverride = envMapOverride; }
+    const std::vector<std::filesystem::path> & GetEnvMapMediaList()     { return m_envMapMediaList; }
 
     const std::shared_ptr<EnvMapBaker> &    GetEnvMapBaker() const { return m_envMapBaker; }
     const std::shared_ptr<LightsBaker> &    GetLightsBaker() const { return m_lightsBaker; }
     const std::shared_ptr<MaterialsBaker> & GetMaterialsBaker() const { return m_materialsBaker; }
     const std::shared_ptr<class OmmBaker> & GetOMMBaker() const { return m_ommBaker; }
+    const std::unique_ptr<class ZoomTool> & GetZoomTool() const { return m_zoomTool; }
 
 private:
     void                                    UpdateCameraFromScene( const std::shared_ptr<donut::engine::PerspectiveCamera> & sceneCamera );
     void                                    UpdateViews( nvrhi::IFramebuffer* framebuffer );
     void                                    DenoisedScreenshot( nvrhi::ITexture * framebufferTexture ) const;
+    void                                    PostProcessPreToneMapping(nvrhi::ICommandList* commandList, const donut::engine::ICompositeView& compositeView);
+    void                                    PostProcessPostToneMapping(nvrhi::ICommandList* commandList, const donut::engine::ICompositeView& compositeView);
 
 private:
     std::shared_ptr<donut::vfs::RootFileSystem> m_RootFS;
@@ -170,10 +164,10 @@ private:
     std::vector<std::string>                    m_sceneFilesAvailable;
     std::string                                 m_currentSceneName;
     std::filesystem::path                       m_currentScenePath;
-    std::shared_ptr<donut::engine::ExtendedScene>   m_scene;
+    std::shared_ptr<ExtendedScene>              m_scene;
     double                                      m_sceneTime = 0.;           // if m_ui.LoopLongestAnimation then it loops with longest animation
+    float                                       m_lastDeltaTime = 0.0f;
     uint                                        m_selectedCameraIndex = 0;  // 0 is first person camera, the rest (if any) are scene cameras
-
 
     // device setup
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
@@ -189,6 +183,7 @@ private:
     // rendering
     std::unique_ptr<RenderTargets>              m_renderTargets;
     std::vector <std::shared_ptr<donut::engine::Light>> m_lights;
+    std::unique_ptr<donut::render::BloomPass>   m_bloomPass;
     std::unique_ptr<ToneMappingPass>            m_toneMappingPass;
     nvrhi::BufferHandle                         m_constantBuffer;
 
@@ -198,18 +193,29 @@ private:
 
     // lighting
     std::string                                 m_envMapLocalPath;
+    
+    std::filesystem::path                       m_envMapMediaFolder;
+    std::vector<std::filesystem::path>          m_envMapMediaList;
+
+    std::string                                 m_envMapOverride;
+
     std::shared_ptr<EnvMapBaker>                m_envMapBaker;
     EnvMapSceneParams                           m_envMapSceneParams;
     std::shared_ptr<LightsBaker>                m_lightsBaker;
     std::shared_ptr<class MaterialsBaker>       m_materialsBaker;
     std::shared_ptr<class OmmBaker>             m_ommBaker;
+    std::shared_ptr<class PTPipelineBaker>      m_ptPipelineBaker;
+
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineReference;
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineBuildStablePlanes;
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineFillStablePlanes;
+    
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineTestRaygenPPHDR;
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineEdgeDetection;
+
 
     // utility
     std::shared_ptr<class GPUSort>              m_gpuSort;
-
-#if USE_PRECOMPUTED_SOBOL_BUFFER
-    nvrhi::BufferHandle                         m_precomputedSobolBuffer;
-#endif
 
     // raytracing basics
     nvrhi::rt::AccelStructHandle                m_topLevelAS;
@@ -262,9 +268,9 @@ private:
     CommandLineOptions                          m_cmdLine;
 
     // path tracing
-    nvrhi::ShaderLibraryHandle                  m_PTShaderLibrary[c_PathTracerVariants];
-    nvrhi::rt::PipelineHandle                   m_PTPipeline[c_PathTracerVariants];
-    nvrhi::rt::ShaderTableHandle                m_PTShaderTable[c_PathTracerVariants];
+    // nvrhi::ShaderLibraryHandle                  m_PTShaderLibrary[c_PathTracerVariants];
+    // nvrhi::rt::PipelineHandle                   m_PTPipeline[c_PathTracerVariants];
+    // nvrhi::rt::ShaderTableHandle                m_PTShaderTable[c_PathTracerVariants];
     int                                         m_accumulationSampleIndex = 0;  // accumulated so far in the past, so if 0 this is the first.
     int                                         m_accumulationSampleTarget = 0; // the target to how many we want accumulated (set by UI)
 
@@ -298,5 +304,14 @@ private:
 
     std::string                                 m_fpsInfo;
     bool                                        m_windowIsInFocus = true;
+
+    std::unique_ptr<class SampleGame>           m_sampleGame;
+
+    ProgressBar                                 m_progressLoading;
+    ProgressBar                                 m_progressInitializingRenderer;
+
+    std::unique_ptr<class ZoomTool>             m_zoomTool;
+
+
 };
 

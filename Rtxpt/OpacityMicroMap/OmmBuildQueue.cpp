@@ -30,7 +30,7 @@ namespace
         const uint32_t indexOffset = mesh.indexOffset + meshGeometry->indexOffsetInMesh;
         const uint32_t vertexOffset = (mesh.vertexOffset + meshGeometry->vertexOffsetInMesh);
 
-        MaterialPT & materialPT = *MaterialPT::FromDonut(meshGeometry->material);
+        PTMaterial & materialPT = *PTMaterial::FromDonut(meshGeometry->material);
 
         omm::GpuBakeNvrhi::Input params;
         params.operation = op;

@@ -17,11 +17,11 @@
 
 #include <donut/core/math/math.h>
 
-#include "../PathTracer/Lighting/LightingTypes.h"
+#include "../Shaders/PathTracer/Lighting/LightingTypes.h"
 
 #include "../ComputePass.h"
 
-#include "../SubInstanceData.h"
+#include "../Shaders/SubInstanceData.h"
 
 #include <filesystem>
 
@@ -29,7 +29,6 @@ using namespace donut::math;
 
 namespace donut::engine
 {
-    class ExtendedScene;
     class FramebufferFactory;
     class TextureCache;
     class TextureHandle;
@@ -40,6 +39,7 @@ namespace donut::engine
 
 class ShaderDebug;
 class EnvMapBaker;
+class ExtendedScene;
 
 // This prepares all scene lighting (including environment map already partially processed by EnvMapBaker) for sampling in path tracing.
 // Supported sampling approaches are Uniform, Power and NEE-AT. All NEE-AT baking logic is included here.
@@ -56,11 +56,10 @@ public:
         bool    GlobalTemporalFeedbackEnabled       = false;    // <- remove, just use
         float   GlobalTemporalFeedbackRatio         = 0.65f;    // 0.0 - use no feedback, 0.95 use almost feedback only (some power-based input always needed to bring in new lights)
         bool    NarrowTemporalFeedbackEnabled       = false;    // <- remove, just use
-        float   NarrowTemporalFeedbackRatio         = 0.5f;     // 0.0 - use no feedback, 1.0 use feedback only
+        float   NarrowTemporalFeedbackRatio         = 0.65f;     // 0.0 - use no feedback, 1.0 use feedback only
         float   LightSampling_MIS_Boost             = 1.0f;     // boost light sampling when doing MIS vs BSDF
 
         // frame/global settings
-        uint    SampleIndex = 0;
         bool    ResetFeedback = false;
         float2  ViewportSize                        = {0,0};
         float2  PrevViewportSize                    = {0,0};
@@ -80,9 +79,9 @@ public:
     void                            CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::shared_ptr<ShaderDebug> shaderDebug, const uint2 screenResolution);
 
     // this update can happen in parallel with any other ray preparatory tracing work - anything from BVH building to laying down denoising layers
-    void                            Update(nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, const std::shared_ptr<donut::engine::ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, std::vector<SubInstanceData> & subInstanceData);
+    void                            Update(nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, std::vector<SubInstanceData> & subInstanceData);
     // this update must happen before main path tracing (that uses NEE) but ideally after motion vectors are available for reprojection
-    void                            UpdateLate(nvrhi::ICommandList * commandList, const std::shared_ptr<donut::engine::ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
+    void                            UpdateLate(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
 
     nvrhi::BufferHandle             GetControlBuffer() const                { return m_controlBuffer; }
     nvrhi::BufferHandle             GetLightBuffer() const                  { return m_lightsBuffer; }              // this is the list of lights
@@ -101,15 +100,18 @@ public:
     bool                            InfoGUI(float indent);
     bool                            DebugGUI(float indent);
 
+    void                            SetGlobalShaderMacros(std::vector<donut::engine::ShaderMacro> & macros);
+
 private:
 
     // output goes into m_scratchLightBuffer and 
     static void                     CollectEnvmapLightPlaceholders(const BakeSettings & settings, LightingControlData & ctrlBuff, std::vector<PolymorphicLightInfo> & outLightBuffer, std::vector<PolymorphicLightInfoEx> & outLightExBuffer, std::vector<uint> & outLightHistoryRemapCurrentToPastBuffer, std::vector<uint> & outLightHistoryRemapPastToCurrent);
-    static void                     CollectAnalyticLightsCPU(const BakeSettings & settings, const std::shared_ptr<donut::engine::ExtendedScene> & scene, LightingControlData & ctrlBuff, std::vector<PolymorphicLightInfo> & outLightBuffer, std::vector<PolymorphicLightInfoEx> & outLightExBuffer, std::unordered_map<size_t, uint32_t> & inoutHistoryRemapAnalyticLightIndices, std::vector<uint> & outLightHistoryRemapCurrentToPast, std::vector<uint> & outLightHistoryRemapPastToCurrent);
+    static void                     CollectAnalyticLightsCPU(const BakeSettings & settings, const std::shared_ptr<ExtendedScene> & scene, LightingControlData & ctrlBuff, std::vector<PolymorphicLightInfo> & outLightBuffer, std::vector<PolymorphicLightInfoEx> & outLightExBuffer, std::unordered_map<size_t, uint32_t> & inoutHistoryRemapAnalyticLightIndices, std::vector<uint> & outLightHistoryRemapCurrentToPast, std::vector<uint> & outLightHistoryRemapPastToCurrent);
 
-    uint                            CreateEmissiveTriangleProcTasks( const BakeSettings & settings, const std::shared_ptr<donut::engine::ExtendedScene> & scene, std::vector<SubInstanceData> & subInstanceData, LightingControlData & ctrlBuff, std::vector<struct EmissiveTrianglesProcTask> & tasks );
+    // this creates emissive triangle proc tasks and also does any required geometry instance (subInstance) processing such as analyt light proxies; has to happen AFTER CollectAnalyticLightsCPU
+    uint                            ProcessGeometry( const BakeSettings & settings, const std::shared_ptr<ExtendedScene> & scene, std::vector<SubInstanceData> & subInstanceData, LightingControlData & ctrlBuff, std::vector<struct EmissiveTrianglesProcTask> & tasks, std::unordered_map<size_t, uint32_t> & inoutHistoryRemapAnalyticLightIndices );
 
-    void                            FillBindings(nvrhi::BindingSetDesc& outBindingSetDesc, const std::shared_ptr<donut::engine::ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
+    void                            FillBindings(nvrhi::BindingSetDesc& outBindingSetDesc, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
 
 
 private:
@@ -122,19 +124,24 @@ private:
 
     std::shared_ptr<EnvMapBaker>    m_envMapBaker;
 
+    ComputePass                     m_resetPastToCurrentHistory;
+
     ComputePass                     m_envLightsBackupPast;
-    ComputePass                     m_envLightsBake;
+    ComputePass                     m_envLightsSubdivideBase;
+    ComputePass                     m_envLightsSubdivideBoost;
     ComputePass                     m_envLightsFillLookupMap;
     ComputePass                     m_envLightsMapPastToCurrent;
 
     ComputePass                     m_bakeEmissiveTriangles;
 
     ComputePass                     m_clearFeedbackHistory;
+    ComputePass                     m_updateFeedbackIndices;
     ComputePass                     m_processFeedbackHistoryP0;
     ComputePass                     m_processFeedbackHistoryP1;
     ComputePass                     m_processFeedbackHistoryP2;
     ComputePass                     m_processFeedbackHistoryP3a;
     ComputePass                     m_processFeedbackHistoryP3b;
+    ComputePass                     m_processFeedbackHistoryP3c;
     ComputePass                     m_processFeedbackHistoryDebugViz;
 
     ComputePass                     m_resetLightProxyCounters;
@@ -194,7 +201,6 @@ private:
     std::vector<PolymorphicLightInfoEx> m_scratchLightExBuffer;                         // these are for scene lights filled in on CPU side
     std::vector<uint>                   m_scratchLightHistoryRemapCurrentToPastBuffer;  // these are for scene lights filled in on CPU side
     std::vector<uint>                   m_scratchLightHistoryRemapPastToCurrentBuffer;  // these are for scene lights filled in on CPU side
-    std::vector<uint>                   m_scratchLightHistoryReset;                     // TODO: this is a leftover and should be replaced by proper reset in the shader
     std::shared_ptr<std::vector<struct EmissiveTrianglesProcTask>>  m_scratchTaskBuffer;
     uint                                m_historicTotalLightCount;
 
@@ -206,6 +212,7 @@ private:
     uint2                           m_localJitter           = {0, 0};
     uint                            m_updateCounter         = 0;
 
+
     bool                            m_dbgDebugDrawLights    = false;
     bool                            m_dbgDebugDrawTileLightConnections = false;
     bool                            m_dbgFreezeUpdates      = false;
@@ -215,6 +222,7 @@ private:
     bool                            m_dbgDebugDisableJitter = false;
 
     float                           m_advSetting_DirectVsIndirectThreshold = 0.3f;
+    bool                            m_advSetting_SampleBakedEnvironment = true;
 
     bool                            m_deviceHas32ThreadWaves = false;
 };

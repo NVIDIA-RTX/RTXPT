@@ -19,10 +19,9 @@
 
 using namespace donut::math;
 
-#include "PathTracer/PathTracerShared.h"
 #include "RenderTargets.h"
 #include "PostProcess.hlsl"
-#include "SampleConstantBuffer.h"
+#include "Shaders/SampleConstantBuffer.h"
 
 namespace donut::engine
 {

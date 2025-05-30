@@ -18,14 +18,15 @@
 #include "Materials\MaterialsBaker.h"
 
 #include "ToneMapper/ToneMappingPasses.h"
-#include "Korgi.h"
+#include "Misc/Korgi.h"
 
 #include "OpacityMicroMap/OmmBaker.h"
 
+#include "SampleGame/SampleGame.h"
+#include "ZoomTool.h"
+
 using namespace donut::app;
 using namespace donut::engine;
-
-extern const char* g_assetsFolder;
 
 std::filesystem::path GetLocalPath(std::string subfolder);
 
@@ -40,28 +41,28 @@ KORGI_TOGGLE(g_sampleUIData.ToneMappingParams.autoExposure, 0, S1 )
 KORGI_INT_TOGGLE(g_sampleUIData.ToneMappingParams.toneMapOperator, 0, M1, ToneMapperOperator::Linear, ToneMapperOperator::HableUc2)
 KORGI_KNOB(g_sampleUIData.ToneMappingParams.exposureCompensation, 0, Slider1, -8.f, 8.f)
 
-#define IMAGE_QUALITY_OPTION(code) do{if (code) m_ui.ResetAccumulation = true;} while(false)
+#define RESET_ON_CHANGE(code) do{if (code) m_ui.ResetAccumulation = true;} while(false)
 
-SampleUI::SampleUI(DeviceManager* deviceManager, Sample& app, SampleUIData& ui, bool SERSupported)
+SampleUI::SampleUI(DeviceManager* deviceManager, Sample& app, SampleUIData& ui, bool NVAPI_SERSupported)
         : ImGui_Renderer(deviceManager)
         , m_app(app)
         , m_ui(ui)
-        , m_SERSupported(SERSupported)
+        , m_NVAPI_SERSupported(NVAPI_SERSupported)
 {
     m_commandList = GetDevice()->createCommandList();
 
     auto nativeFS = std::make_shared<donut::vfs::NativeFileSystem>(); // *(app.GetRootFs())
 
-    // // auto fontPath = GetLocalPath(g_assetsFolder) / "fonts/OpenSans/OpenSans-Regular.ttf";
-    auto fontPath = GetLocalPath(g_assetsFolder) / "fonts/DroidSans/DroidSans-Mono.ttf";
+    // // auto fontPath = GetLocalPath(c_AssetsFolder) / "fonts/OpenSans/OpenSans-Regular.ttf";
+    auto fontPath = GetLocalPath(c_AssetsFolder) / "fonts/DroidSans/DroidSans-Mono.ttf";
     // float baseFontSize = 15.0f;
     // 
-    m_defaultFont = this->CreateFontFromFile(*nativeFS, GetLocalPath(g_assetsFolder) / "fonts/DroidSans/DroidSans-Mono.ttf", 16.0f);
+    m_defaultFont = this->CreateFontFromFile(*nativeFS, GetLocalPath(c_AssetsFolder) / "fonts/DroidSans/DroidSans-Mono.ttf", 16.0f);
 
     ImGui::GetIO().IniFilename = nullptr;
 
-    m_ui.DXRHitObjectExtension = SERSupported;  // no need to check for or attempt using HitObjectExtension if SER not supported
-    m_ui.ShaderExecutionReordering = SERSupported;
+    m_ui.NVAPIHitObjectExtension    = NVAPI_SERSupported;  // no need to check for or attempt using HitObjectExtension if SER not supported
+    //m_ui.DXHitObjectExtension = true;
 
 #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
     m_ImNodesContext = ImNodes::Ez::CreateContext();
@@ -97,6 +98,24 @@ std::string TrimTogglable(const std::string text)
         return text.substr(0, tog);
     return text;
 }
+std::string TrimSkyDisplayName(std::string text)
+{
+    if (text == c_EnvMapSceneDefault)
+        return "default";
+    else if (text == c_EnvMapProcSky)
+        return "procedural";
+    else if (text == c_EnvMapProcSky_Morning)
+        return "morning";
+    else if (text == c_EnvMapProcSky_Midday)
+        return "midday";
+    else if (text == c_EnvMapProcSky_Evening)
+        return "evening";
+    else if (text == c_EnvMapProcSky_Dawn)
+        return "dawn";
+    else if (text == c_EnvMapProcSky_PitchBlack)
+        return "pitch black";
+    return "unknown";
+}
 
 void SampleUI::Animate(float elapsedTimeSeconds)
 {
@@ -109,6 +128,7 @@ void SampleUI::Animate(float elapsedTimeSeconds)
     m_showSceneWidgets = dm::clamp(m_showSceneWidgets + elapsedTimeSeconds * 8.0f * ((io.MousePos.y >= 0 && io.MousePos.y < h * 0.1f) ? (1) : (-1)), 0.0f, 1.0f);
 }
 
+#if DONUT_WITH_STREAMLINE
 SI::DLSSMode DLSSModeUI(SI::DLSSMode dlssModeCurrent)
 {
     int current = -1;
@@ -136,6 +156,7 @@ SI::DLSSMode DLSSModeUI(SI::DLSSMode dlssModeCurrent)
     }
     ImGui::Text("(DLSS setting also apply to Ray Reconstruction)");
 }
+#endif
 
 bool SampleUI::BuildUIScriptsAndEtc(void)
 {
@@ -223,7 +244,7 @@ void SampleUI::buildUI(void)
                 {
                     RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
 
-                    if (ImGui::Button("Save screenshot", ImVec2(-FLT_MIN,0.0f)))
+                    if (ImGui::Button("Save screenshot(s)", ImVec2(-FLT_MIN,0.0f)))
                     {
                         std::string fileName;
                         if (FileDialog(false, "PNG files\0*.png\0BMP files\0*.bmp\0All files\0*.*\0\0", fileName))
@@ -254,9 +275,10 @@ void SampleUI::buildUI(void)
                         ImGui::PopItemWidth();
                     }
 
+                    ImGui::Separator();
                     ImGui::TextColored(categoryColor, "[experimental] Save stable animation sequence, path:");
                     ImGui::Text(" '%s'", m_ui.ScreenshotSequencePath.c_str()); 
-                    if (ImGui::Checkbox("Save screenshot sequence", &m_ui.ScreenshotSequenceCaptureActive))
+                    if (ImGui::Checkbox("Save animation sequence", &m_ui.ScreenshotSequenceCaptureActive))
                         if (m_ui.ScreenshotSequenceCaptureActive)
                             m_ui.FPSLimiter = 60;
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip(  "Example to convert to movie: \nffmpeg -r 60 -i frame_%%05d.bmp -vcodec libx265 -crf 13 -vf scale=1920:1080  outputvideo-1080p-60fps.mp4\n"
@@ -301,6 +323,15 @@ void SampleUI::buildUI(void)
         ImGui::PopID(); //"SceneComboID"
         ImGui::PopItemWidth();
 
+        if (m_app.GetGame() && m_app.GetGame()->IsEnabled() )
+        {
+            if (ImGui::CollapsingHeader("Sample Game"/*, ImGuiTreeNodeFlags_DefaultOpen*/))
+            {
+                RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
+                m_app.GetGame()->DebugGUI(indent);
+            }
+        }
+
         if (ImGui::CollapsingHeader("Scene"/*, ImGuiTreeNodeFlags_DefaultOpen*/))
         {
             RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
@@ -319,6 +350,7 @@ void SampleUI::buildUI(void)
                 ImGui::Checkbox("Enable animations", &m_ui.EnableAnimations);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Animations are not available in reference mode");
             }
+            ImGui::SameLine();
             if (ImGui::Button("Reset animation time"))
             {
                 m_app.ResetSceneTime();
@@ -342,20 +374,66 @@ void SampleUI::buildUI(void)
             if (ImGui::CollapsingHeader("Environment Map"))
             {
                 RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
-                if (m_app.IsEnvMapLoaded())
-                {
-                    if (ImGui::InputFloat3("Tint Color", (float*)&m_ui.EnvironmentMapParams.TintColor.x))
-                        m_ui.ResetAccumulation = true;
-                    if (ImGui::InputFloat("Intensity", &m_ui.EnvironmentMapParams.Intensity))
-                        m_ui.ResetAccumulation = true;
-                    if (ImGui::InputFloat3("Rotation XYZ", (float*)&m_ui.EnvironmentMapParams.RotationXYZ.x))
-                        m_ui.ResetAccumulation = true;
-                    if (ImGui::Checkbox("Enabled", &m_ui.EnvironmentMapParams.Enabled))
-                        m_ui.ResetAccumulation = true;
-                }
+
+                RESET_ON_CHANGE(ImGui::Checkbox("Enabled", &m_ui.EnvironmentMapParams.Enabled));
+
+                if (m_app.GetEnvMapLocalPath() != "==PROCEDURAL_SKY==")
+                    ImGui::TextWrapped("Source: `%s`", m_app.GetEnvMapLocalPath().c_str());
                 else
+                    ImGui::TextWrapped("Source: Procedural Sky");
+
+                std::string overrideSource = m_app.GetEnvMapOverrideSource();
+                const std::vector<std::filesystem::path> & envMapMediaList = m_app.GetEnvMapMediaList();
+
+                RAII_SCOPE( ImGui::PushItemWidth(-65.0f*m_currentScale);, ImGui::PopItemWidth(); );
+                if (ImGui::BeginCombo("Override", overrideSource.c_str()))
                 {
-                    ImGui::Text("No envmap loaded");
+                    for (int i = -7; i < (int)envMapMediaList.size(); i++)
+                    {
+                        std::string itemName;
+                        if (i == -7)
+                            itemName = c_EnvMapSceneDefault;
+                        else if (i == -6)
+                            itemName = c_EnvMapProcSky;
+                        else if (i == -5)
+                            itemName = c_EnvMapProcSky_Morning;
+                        else if (i == -4)
+                            itemName = c_EnvMapProcSky_Midday;
+                        else if (i == -3)
+                            itemName = c_EnvMapProcSky_Evening;
+                        else if (i == -2)
+                            itemName = c_EnvMapProcSky_Dawn;
+                        else if (i == -1)
+                            itemName = c_EnvMapProcSky_PitchBlack;
+                        else
+                            itemName = envMapMediaList[i].filename().string();
+
+                        bool is_selected = itemName == overrideSource;
+                        if (ImGui::Selectable(itemName.c_str(), is_selected))
+                            overrideSource = itemName;
+                        if (is_selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overrides scene's default environment map");
+                if (m_app.GetEnvMapOverrideSource() != overrideSource)
+                {
+                    m_ui.ResetAccumulation = true;
+                    m_app.SetEnvMapOverrideSource(overrideSource);
+                }
+
+                ImGui::Separator();
+                RESET_ON_CHANGE( ImGui::InputFloat3("Tint Color", (float*)&m_ui.EnvironmentMapParams.TintColor.x) );
+                RESET_ON_CHANGE( ImGui::InputFloat("Intensity", &m_ui.EnvironmentMapParams.Intensity) );
+                RESET_ON_CHANGE( ImGui::InputFloat3("Rotation XYZ", (float*)&m_ui.EnvironmentMapParams.RotationXYZ.x) );
+                ImGui::Separator();
+
+                if (m_app.GetEnvMapBaker() != nullptr && m_app.GetEnvMapBaker()->IsProcedural() && m_app.GetEnvMapBaker()->GetProceduralSky() != nullptr) // one frame delay for these settings
+                {
+                    RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
+                    ImGui::TextColored(categoryColor, "Procedural Sky settings:");
+                    m_app.GetEnvMapBaker()->GetProceduralSky()->DebugGUI(indent);
                 }
             }
 
@@ -396,12 +474,10 @@ void SampleUI::buildUI(void)
             }
 
     #if 1
-            if (ImGui::InputFloat("Aperture", &m_ui.CameraAperture, 0.001f, 0.01f, "%.4f"))
-                m_ui.ResetAccumulation = true;
+            RESET_ON_CHANGE( ImGui::InputFloat("Aperture", &m_ui.CameraAperture, 0.001f, 0.01f, "%.4f") );
             m_ui.CameraAperture = dm::clamp(m_ui.CameraAperture, 0.0f, 1.0f);
 
-            if (ImGui::InputFloat("Focal Distance", &m_ui.CameraFocalDistance, 0.1f))
-                m_ui.ResetAccumulation = true;
+            RESET_ON_CHANGE( ImGui::InputFloat("Focal Distance", &m_ui.CameraFocalDistance, 0.1f) );
             m_ui.CameraFocalDistance = dm::clamp(m_ui.CameraFocalDistance, 0.001f, 1e16f);
             ImGui::SliderFloat("Keyboard move speed", &m_ui.CameraMoveSpeed, 0.1f, 10.0f);
 
@@ -412,6 +488,9 @@ void SampleUI::buildUI(void)
                 m_ui.ResetAccumulation = true;
                 m_app.SetCameraVerticalFOV(dm::radians(cameraFOV / 2.0f));
             }
+
+            RESET_ON_CHANGE( ImGui::InputFloat("CameraAntiRRSleepJitter", &m_ui.CameraAntiRRSleepJitter, 0.001f ) );
+            m_ui.CameraAntiRRSleepJitter = clamp( m_ui.CameraAntiRRSleepJitter, 0.0f, 1.0f );
     #endif
         }
 
@@ -451,20 +530,20 @@ void SampleUI::buildUI(void)
                         ImGui::TextColored(categoryColor, "NEE-AT settings:");
                         {
                             RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
-                            IMAGE_QUALITY_OPTION(ImGui::Checkbox("Global temporal feedback", &m_ui.NEEAT_GlobalTemporalFeedbackEnabled));
+                            RESET_ON_CHANGE(ImGui::Checkbox("Global temporal feedback", &m_ui.NEEAT_GlobalTemporalFeedbackEnabled));
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Increase sampling importance for most influential lights from previous frame.");
                             if (m_ui.NEEAT_GlobalTemporalFeedbackEnabled)
                             {
                                 RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
-                                IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Global feedback ratio", &m_ui.NEEAT_GlobalTemporalFeedbackRatio, 0.0f, 0.95f));
+                                RESET_ON_CHANGE(ImGui::SliderFloat("Global feedback ratio", &m_ui.NEEAT_GlobalTemporalFeedbackRatio, 0.0f, 0.95f));
                             }
 
-                            IMAGE_QUALITY_OPTION(ImGui::Checkbox("Narrow temporal feedback", &m_ui.NEEAT_NarrowTemporalFeedbackEnabled));
+                            RESET_ON_CHANGE(ImGui::Checkbox("Narrow temporal feedback", &m_ui.NEEAT_NarrowTemporalFeedbackEnabled));
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Increase sampling importance for most influential lights from previous frame, within a per-screen-tile.");
                             if (m_ui.NEEAT_NarrowTemporalFeedbackEnabled)
                             {
                                 RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent););
-                                IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Narrow feedback ratio", &m_ui.NEEAT_NarrowTemporalFeedbackRatio, 0.0f, 0.95f));
+                                RESET_ON_CHANGE(ImGui::SliderFloat("Narrow feedback ratio", &m_ui.NEEAT_NarrowTemporalFeedbackRatio, 0.0f, 0.95f));
                     
                                 uint samplesBoosted = std::min(RTXPT_LIGHTING_NEEAT_MAX_TOTAL_SAMPLE_COUNT, m_ui.NEEFullSamples+m_ui.NEEBoostSamplingOnDominantPlane);
 
@@ -478,7 +557,7 @@ void SampleUI::buildUI(void)
                             }
                             if (m_ui.NEEAT_GlobalTemporalFeedbackEnabled || m_ui.NEEAT_NarrowTemporalFeedbackEnabled)
                             {
-                                ImGui::SliderFloat("NEE-AT vs BSDF MIS boost", &m_ui.NEEAT_MIS_Boost, 0.0f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                                ImGui::SliderFloat("BSDF vs NEE-AT MIS boost", &m_ui.NEEAT_MIS_Boost, 0.0f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
                                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tweak the MIS to give more power to NEE-AT (>1) or to BSDF sampled emissives (<1);\nuseful since NEE-AT is shadow aware and boosting it can provide better overall sampling quality");
                             }
                             ImGui::SliderFloat("Distant vs Local initial importance", &m_ui.NEEAT_Distant_vs_Local_Importance, 0.01f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
@@ -540,75 +619,52 @@ void SampleUI::buildUI(void)
                     ImGui::Text("Accumulated samples: %d (out of %d target)", m_ui.AccumulationIndex, m_ui.AccumulationTarget);
                     ImGui::Text("(avg frame time: %.3fms)", m_app.GetAvgTimePerFrame() * 1000.0f);
 
-                    IMAGE_QUALITY_OPTION(ImGui::Checkbox("Jitter anti-aliasing", &m_ui.AccumulationAA));
+                    RESET_ON_CHANGE(ImGui::Checkbox("Jitter anti-aliasing", &m_ui.AccumulationAA));
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each sample will have a random, per pixel jitter emulating box filter\nTODO: add option for Gaussian distribution for better AA");
                 }
 
-                IMAGE_QUALITY_OPTION(ImGui::InputInt("Max bounces", &m_ui.BounceCount));
+                RESET_ON_CHANGE(ImGui::InputInt("Max bounces", &m_ui.BounceCount));
                 m_ui.BounceCount = dm::clamp(m_ui.BounceCount, 0, MAX_BOUNCE_COUNT);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Max number of all bounces (including NEE and diffuse bounces)");
                 if (m_ui.RealtimeMode)
-                    IMAGE_QUALITY_OPTION(ImGui::InputInt("Max diffuse bounces (realtime)", &m_ui.RealtimeDiffuseBounceCount));
+                    RESET_ON_CHANGE(ImGui::InputInt("Max diffuse bounces (realtime)", &m_ui.RealtimeDiffuseBounceCount));
                 else
-                    IMAGE_QUALITY_OPTION(ImGui::InputInt("Max diffuse bounces (reference)", &m_ui.ReferenceDiffuseBounceCount));
+                    RESET_ON_CHANGE(ImGui::InputInt("Max diffuse bounces (reference)", &m_ui.ReferenceDiffuseBounceCount));
                 m_ui.RealtimeDiffuseBounceCount = dm::clamp(m_ui.RealtimeDiffuseBounceCount, 0, MAX_BOUNCE_COUNT);
                 m_ui.ReferenceDiffuseBounceCount = dm::clamp(m_ui.ReferenceDiffuseBounceCount, 0, MAX_BOUNCE_COUNT);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Max number of diffuse bounces (diffuse lobe and specular with roughness > 0.25 or similar depending on settings)");
 
                 if (m_ui.RealtimeMode)
                 {
-                    if (ImGui::Checkbox("FireflyFilter (realtime)", &m_ui.RealtimeFireflyFilterEnabled))
-                        m_ui.ResetAccumulation = true;
+                    RESET_ON_CHANGE( ImGui::Checkbox("FireflyFilter (realtime)", &m_ui.RealtimeFireflyFilterEnabled) );
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enable smart firefly filter that clamps max radiance based on probability heuristic.");
                     if (m_ui.RealtimeFireflyFilterEnabled)
                     {
                         RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
-                        if (ImGui::InputFloat("FF Threshold", &m_ui.RealtimeFireflyFilterThreshold, 0.01f, 0.1f, "%.5f"))
-                            m_ui.ResetAccumulation = true;
+                        RESET_ON_CHANGE( ImGui::InputFloat("FF Threshold", &m_ui.RealtimeFireflyFilterThreshold, 0.01f, 0.1f, "%.5f") );
                         m_ui.RealtimeFireflyFilterThreshold = dm::clamp(m_ui.RealtimeFireflyFilterThreshold, 0.00001f, 1000.0f);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Better light importance sampling allows for setting higher firefly filter threshold and conversely.");
                     }
                 }
                 else
                 {
-                    if (ImGui::Checkbox("FireflyFilter (reference *)", &m_ui.ReferenceFireflyFilterEnabled))
-                        m_ui.ResetAccumulation = true;
+                    RESET_ON_CHANGE( ImGui::Checkbox("FireflyFilter (reference *)", &m_ui.ReferenceFireflyFilterEnabled) );
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enable smart firefly filter that clamps max radiance based on probability heuristic.\n* when both tonemapping autoexposure and firefly filter are enabled\nin reference mode, results are no longer deterministic!");
                     if (m_ui.ReferenceFireflyFilterEnabled)
                     {
                         RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
-                        if (ImGui::InputFloat("FF Threshold", &m_ui.ReferenceFireflyFilterThreshold, 0.1f, 0.2f, "%.5f"))
-                            m_ui.ResetAccumulation = true;
+                        RESET_ON_CHANGE( ImGui::InputFloat("FF Threshold", &m_ui.ReferenceFireflyFilterThreshold, 0.1f, 0.2f, "%.5f") );
                         m_ui.ReferenceFireflyFilterThreshold = dm::clamp(m_ui.ReferenceFireflyFilterThreshold, 0.01f, 1000.0f);
                     }
                 }
 
-                if (ImGui::InputFloat("Texture MIP bias", &m_ui.TexLODBias))
-                    m_ui.ResetAccumulation = true;
+                RESET_ON_CHANGE( ImGui::InputFloat("Texture MIP bias", &m_ui.TexLODBias) );
 
-                IMAGE_QUALITY_OPTION(ImGui::InputInt("Diffuse sample envmap MIP level", &m_ui.EnvironmentMapDiffuseSampleMIPLevel));    m_ui.EnvironmentMapDiffuseSampleMIPLevel = dm::clamp(m_ui.EnvironmentMapDiffuseSampleMIPLevel, 0, 16);
+                RESET_ON_CHANGE(ImGui::InputInt("Diffuse sample envmap MIP level", &m_ui.EnvironmentMapDiffuseSampleMIPLevel));    m_ui.EnvironmentMapDiffuseSampleMIPLevel = dm::clamp(m_ui.EnvironmentMapDiffuseSampleMIPLevel, 0, 16);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use the specific MIP level to sample environment map texture during light sampling and for main path terminating\ninto sky after a diffuse scatter. Only 0 produces unbiased results.");
 
-                IMAGE_QUALITY_OPTION(ImGui::Checkbox("Use Russian Roulette early out", &m_ui.EnableRussianRoulette));
+                RESET_ON_CHANGE(ImGui::Checkbox("Use Russian Roulette early out", &m_ui.EnableRussianRoulette));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("This enables stochastic path termination for low throughput diffuse paths");
-
-                if (m_SERSupported)
-                {
-                    if (ImGui::Checkbox("DXR HitObject Extension codepath", &m_ui.DXRHitObjectExtension))
-                        m_ui.ResetAccumulation = true; // <- while there's no need to reset accumulation since this is a performance only feature, leaving the reset in for testing correctness
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("If disabled, traditional TraceRay path is used.\nIf enabled, TraceRayInline->MakeHit->ReorderThread->InvokeHit approach is used!");
-                    if (m_ui.DXRHitObjectExtension)
-                    {
-                        RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
-                        ImGui::Checkbox("Shader Execution Reordering", &m_ui.ShaderExecutionReordering);
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("This enables/disables the actual ReorderThread call in the shader.");
-                    }
-                }
-                else
-                {
-                    ImGui::Text("<DXR Hit Object Extension not supported>");
-                    m_ui.DXRHitObjectExtension = false;
-                }
             }
 
             ImGui::TextColored(categoryColor, "Post processing:");
@@ -619,7 +675,7 @@ void SampleUI::buildUI(void)
                 {
     #if DONUT_WITH_STREAMLINE
                     const bool dlssAvailable = m_ui.IsDLSSSuported;
-                    const bool dlssRRAvailable = m_ui.IsDLSSRRSupported;
+                    const bool dlssRRAvailable = m_ui.IsDLSSRRSupported; 
     #else
                     const bool dlssAvailable = false;
                     const bool dlssRRAvailable = false;
@@ -656,11 +712,13 @@ void SampleUI::buildUI(void)
                         "\nIndividual DLSS options available under global `DLSS` options"
                     );
 
+#if DONUT_WITH_STREAMLINE
                     if (m_ui.RealtimeAA == 2 || m_ui.RealtimeAA == 3)
                     {
                         RAII_SCOPE(ImGui::Indent(indent); ImGui::PushID("PPDLSSQual");,  ImGui::Unindent(indent); ImGui::PopID(););
                         m_ui.DLSSMode = DLSSModeUI(m_ui.DLSSMode);
                     }
+#endif
 
                     {
                         UI_SCOPED_DISABLE(!m_ui.RealtimeMode || m_ui.RealtimeAA==3);
@@ -693,23 +751,27 @@ void SampleUI::buildUI(void)
                 if (m_ui.RealtimeMode || m_ui.AllowRTXDIInReferenceMode)
                 {
                     {
-                        UI_SCOPED_DISABLE(!m_ui.UseNEE || (m_ui.RealtimeAA==3 && m_ui.DisableReSTIRsWithDLSSRR) );
-                        IMAGE_QUALITY_OPTION(ImGui::Checkbox("Use ReSTIR DI (RTXDI)", &m_ui.UseReSTIRDI));
+                        bool nullCheckbox = false;
+                        bool disabled = !m_ui.UseNEE || (m_ui.RealtimeAA==3 && m_ui.DisableReSTIRsWithDLSSRR);
+                        UI_SCOPED_DISABLE(disabled);
+                        RESET_ON_CHANGE(ImGui::Checkbox("Use ReSTIR DI (RTXDI)", (disabled)?&nullCheckbox:&m_ui.UseReSTIRDI));
                         if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                             m_ui.DisableReSTIRsWithDLSSRR = !m_ui.DisableReSTIRsWithDLSSRR;
                     }
                     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("ReSTIR DI (RTXDI) requires Next Event Estimation to be enabled\nand this implementation is currently not tuned to work with DLSS-RR");
 
                     {
-                        UI_SCOPED_DISABLE( m_ui.RealtimeAA==3 && m_ui.DisableReSTIRsWithDLSSRR );
-                        IMAGE_QUALITY_OPTION(ImGui::Checkbox("Use ReSTIR GI (RTXDI)", &m_ui.UseReSTIRGI));
+                        bool nullCheckbox = false;
+                        bool disabled = m_ui.RealtimeAA==3 && m_ui.DisableReSTIRsWithDLSSRR;
+                        UI_SCOPED_DISABLE( disabled );
+                        RESET_ON_CHANGE(ImGui::Checkbox("Use ReSTIR GI (RTXDI)", (disabled)?&nullCheckbox:&m_ui.UseReSTIRGI));
                         if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                             m_ui.DisableReSTIRsWithDLSSRR = !m_ui.DisableReSTIRsWithDLSSRR;
                     }
                     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("ReSTIR GI (RTXDI) is currently not tuned to work well with DLSS-RR\nUse middle mouse button to enable anyway");
                 }
 
-                IMAGE_QUALITY_OPTION(ImGui::Checkbox("Use Next Event Estimation", &m_ui.UseNEE));
+                RESET_ON_CHANGE(ImGui::Checkbox("Use Next Event Estimation", &m_ui.UseNEE));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("This enables NEE a.k.a. direct light importance sampling (this includes ReSTIR DI but not ReSTIR GI)\nNote: analytic lights currently only come out of NEE so they will be missing when NEE is disabled");
 
                 if (m_ui.UseNEE)
@@ -718,23 +780,60 @@ void SampleUI::buildUI(void)
                     {
                         RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
     #ifndef LIGHTS_IMPORTANCE_SAMPLING_TYPE
-                        IMAGE_QUALITY_OPTION(ImGui::Combo("Sampling technique", (int*)&m_ui.NEEType, "Uniform\0Power\0NEE-AT\0\0"));
+                        RESET_ON_CHANGE(ImGui::Combo("Sampling technique", (int*)&m_ui.NEEType, "Uniform\0Power\0NEE-AT\0\0"));
                         m_ui.NEEType = dm::clamp(m_ui.NEEType, 0, 2);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Light importance sampling technique to use for NEE.\nNote: Additional NEE-AT settings are exposed in 'Lighting -> NEE-AT' UI section.");
     #else
                         ImGui::TextWrapped("Undefine LIGHTS_IMPORTANCE_SAMPLING_TYPE for dynamic control over local light importance sampling approach type");
     #endif
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("Candidate samples", &m_ui.NEECandidateSamples, 1));
+                        RESET_ON_CHANGE(ImGui::InputInt("Candidate samples", &m_ui.NEECandidateSamples, 1));
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("This is the number of light samples weighted with BSDF used to pick each full sample\nNote: increasing the number of these can oversample shadowed lights in shadow edge areas");
                         m_ui.NEECandidateSamples = dm::clamp(m_ui.NEECandidateSamples, 1, 16);
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("Full samples", &m_ui.NEEFullSamples, 1));
+                        RESET_ON_CHANGE(ImGui::InputInt("Full samples", &m_ui.NEEFullSamples, 1));
                         m_ui.NEEFullSamples = dm::clamp(m_ui.NEEFullSamples, 0, 63);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("This is the number of light samples to shadow test and integrate\nNote: Maximum total number of samples is 63");
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("Boost samples on dominant surface", &m_ui.NEEBoostSamplingOnDominantPlane, 1));
+                        RESET_ON_CHANGE(ImGui::InputInt("Boost samples on dominant surface", &m_ui.NEEBoostSamplingOnDominantPlane, 1));
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of additional distant and local samples added on\nthe dominant denoising surface (usually primary surface).\nThis setting is ignored when RTXDI is enabled as it handles the dominant surface.\nThis setting is ignored in Reference mode.\nThis approach could be extended to allow per-material boosting for tricky surfaces.\nNote: Maximum total number of samples is 63");
                         m_ui.NEEBoostSamplingOnDominantPlane = std::clamp(m_ui.NEEBoostSamplingOnDominantPlane, 0, 16);
                     }
                 }
+            }
+
+            ImGui::TextColored(categoryColor, "Performance:");
+            {
+                if (m_NVAPI_SERSupported)
+                {
+                    RESET_ON_CHANGE(ImGui::Checkbox("NVAPI HitObject codepath", &m_ui.NVAPIHitObjectExtension)); // <- while there's no need to reset accumulation since this is a performance only feature, leaving the reset in for testing correctness
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("If disabled, traditional TraceRay path is used.\nIf enabled, TraceRayInline->MakeHit->ReorderThread->InvokeHit approach is used!");
+                    if (m_ui.NVAPIHitObjectExtension)
+                    {
+                        RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
+                        ImGui::Checkbox("NVAPI ReorderThreads", &m_ui.NVAPIReorderThreads);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("This enables/disables the actual ReorderThread call in the shader.");
+                    }
+                    if (m_ui.NVAPIHitObjectExtension)
+                        m_ui.DXHitObjectExtension = false;
+                }
+                else
+                {
+                    ImGui::Text("<NVAPI Hit Object Extension not supported>");
+                    m_ui.NVAPIHitObjectExtension = false;
+                }
+
+#if RTXPT_D3D_AGILITY_SDK_VERSION >= 717
+                {
+                    ImGui::TextColored(warnColor, "!!AgilitySDK717+!!");
+                    RESET_ON_CHANGE(ImGui::Checkbox("dx::HitObject codepath", &m_ui.DXHitObjectExtension));
+                    if (m_ui.DXHitObjectExtension)
+                    {
+                        RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
+                        RESET_ON_CHANGE(ImGui::Checkbox("dx::MaybeReorderThreads ", &m_ui.DXMaybeReorderThreads));
+                    }
+                    if (m_ui.DXHitObjectExtension)
+                        m_ui.NVAPIHitObjectExtension = false;
+                    ImGui::TextColored(warnColor, "!!AgilitySDK717+!!");
+                }
+#endif
             }
 
             ImGui::TextColored(categoryColor, "Debugging:");
@@ -748,16 +847,16 @@ void SampleUI::buildUI(void)
                 }
                 else
                 {
-                    IMAGE_QUALITY_OPTION(ImGui::Checkbox("Enable StablePlanes (*)", &m_ui.UseStablePlanes));
+                    RESET_ON_CHANGE(ImGui::Checkbox("Enable StablePlanes (*)", &m_ui.UseStablePlanes));
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use to test (should be identical before/after)\nUseStablePlanes is always on when RTXDI is enabled or in realtime mode");
 
                     {
                         UI_SCOPED_DISABLE(true);
-                        IMAGE_QUALITY_OPTION(ImGui::Checkbox("Allow RTXDI in reference mode", &m_ui.AllowRTXDIInReferenceMode));
+                        RESET_ON_CHANGE(ImGui::Checkbox("Allow RTXDI in reference mode", &m_ui.AllowRTXDIInReferenceMode));
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("!!CURRENTLY BROKEN AND DISABLED!!");
                     }
                 }
-                IMAGE_QUALITY_OPTION(ImGui::Checkbox("Suppress Primary NEE", &m_ui.SuppressPrimaryNEE));
+                RESET_ON_CHANGE(ImGui::Checkbox("Suppress Primary NEE", &m_ui.SuppressPrimaryNEE));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("NOTE: works only in realtime mode at the moment!");
             }
         }
@@ -810,7 +909,12 @@ void SampleUI::buildUI(void)
                     m_ui.DLSSMode = DLSSModeUI(m_ui.DLSSMode);
     
                 if (m_ui.RealtimeAA == 3)
+                {
                     ImGui::SliderFloat("DLSS-RR micro jitter", &m_ui.DLSSRRMicroJitter, 0.0f, 1.0f);
+
+                    ImGui::Combo("DLSS-RR Preset", (int*)&m_ui.DLSRRPreset, "Default\0PresetA\0PresetB\0PresetC\0PresetD\0PresetE\0PresetF\0PresetG\0");
+                    m_ui.DLSRRPreset = clamp(m_ui.DLSRRPreset, SI::DLSSRRPreset::eDefault, SI::DLSSRRPreset::ePresetG);
+                }
     #endif    
                 ImGui::Combo("AA Camera Jitter", (int*)&m_ui.TemporalAntiAliasingJitter, "MSAA\0Halton\0R2\0White Noise\0");
 
@@ -931,10 +1035,10 @@ void SampleUI::buildUI(void)
                 {
 		            ImGui::PushItemWidth(defItemWidth);
        
-		            IMAGE_QUALITY_OPTION(ImGui::InputInt("Number of Build Samples", (int*)&m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples));
+		            RESET_ON_CHANGE(ImGui::InputInt("Number of Build Samples", (int*)&m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples));
 		            m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples = dm::clamp(m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples, 0u, 128u);
-                    IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Cell Size", &m_ui.RTXDI.regir.regirDynamicParameters.regirCellSize, 0.1f, 2.f));
-                    IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Sampling Jitter", &m_ui.RTXDI.regir.regirDynamicParameters.regirSamplingJitter, 0.f, 1.f));
+                    RESET_ON_CHANGE(ImGui::SliderFloat("Cell Size", &m_ui.RTXDI.regir.regirDynamicParameters.regirCellSize, 0.1f, 2.f));
+                    RESET_ON_CHANGE(ImGui::SliderFloat("Sampling Jitter", &m_ui.RTXDI.regir.regirDynamicParameters.regirSamplingJitter, 0.f, 1.f));
 
                     ImGui::PopItemWidth();
                 }
@@ -949,21 +1053,21 @@ void SampleUI::buildUI(void)
                 {
                     ImGui::PushItemWidth(defItemWidth);
 
-                    IMAGE_QUALITY_OPTION(ImGui::Combo("Resampling Mode", (int*)&m_ui.RTXDI.restirDI.resamplingMode,
+                    RESET_ON_CHANGE(ImGui::Combo("Resampling Mode", (int*)&m_ui.RTXDI.restirDI.resamplingMode,
                         "Disabled\0Temporal\0Spatial\0Temporal & Spatial\0Fused\0\0"));
        
-                    IMAGE_QUALITY_OPTION(ImGui::Combo("Spatial Bias Correction", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.spatialBiasCorrection,
+                    RESET_ON_CHANGE(ImGui::Combo("Spatial Bias Correction", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.spatialBiasCorrection,
                         "Off\0Basic\0Pairwise\0Ray Traced\0\0"));
 		
-                    IMAGE_QUALITY_OPTION(ImGui::Combo("Temporal Bias Correction", (int*)&m_ui.RTXDI.restirDI.temporalResamplingParams.temporalBiasCorrection,
+                    RESET_ON_CHANGE(ImGui::Combo("Temporal Bias Correction", (int*)&m_ui.RTXDI.restirDI.temporalResamplingParams.temporalBiasCorrection,
                         "Off\0Basic\0Pairwise\0Ray Traced\0\0"));
 		
-		            IMAGE_QUALITY_OPTION(ImGui::Combo("Local Light Sampling Mode", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.localLightSamplingMode,
+		            RESET_ON_CHANGE(ImGui::Combo("Local Light Sampling Mode", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.localLightSamplingMode,
 			            "Uniform\0Power RIS\0ReGIR RIS\0\0"));
 
                     if (m_ui.RTXDI.restirDI.initialSamplingParams.localLightSamplingMode == ReSTIRDI_LocalLightSamplingMode::ReGIR_RIS)
                     {
-                        IMAGE_QUALITY_OPTION(ImGui::Combo("ReGIR Mode", (int*)&m_ui.RTXDI.regir.regirStaticParams.Mode,
+                        RESET_ON_CHANGE(ImGui::Combo("ReGIR Mode", (int*)&m_ui.RTXDI.regir.regirStaticParams.Mode,
                             "Disabled\0Grid\0Onion\0\0"));
                     }
         
@@ -976,15 +1080,15 @@ void SampleUI::buildUI(void)
                     {
                         RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
 
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("ReGir", (int*)&m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples));
+                        RESET_ON_CHANGE(ImGui::InputInt("ReGir", (int*)&m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples));
                         m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples = dm::clamp(m_ui.RTXDI.regir.regirDynamicParameters.regirNumBuildSamples, 0u, 32u);
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("Local Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryLocalLightSamples));
+                        RESET_ON_CHANGE(ImGui::InputInt("Local Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryLocalLightSamples));
 		                m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryLocalLightSamples = dm::clamp(m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryLocalLightSamples, 0u, 32u);
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("BRDF", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryBrdfSamples));
+                        RESET_ON_CHANGE(ImGui::InputInt("BRDF", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryBrdfSamples));
 		                m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryBrdfSamples = dm::clamp(m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryBrdfSamples, 0u, 32u);
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("Infinite Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryInfiniteLightSamples));
+                        RESET_ON_CHANGE(ImGui::InputInt("Infinite Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryInfiniteLightSamples));
 		                m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryInfiniteLightSamples = dm::clamp(m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryInfiniteLightSamples, 0u, 32u);
-                        IMAGE_QUALITY_OPTION(ImGui::InputInt("Environment Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples));
+                        RESET_ON_CHANGE(ImGui::InputInt("Environment Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples));
 		                m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples = dm::clamp(m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples, 0u, 32u);
                     }
     
@@ -992,22 +1096,22 @@ void SampleUI::buildUI(void)
                     {
                         RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
                         ImGui::PushItemWidth(defItemWidth);
-                        IMAGE_QUALITY_OPTION(ImGui::SliderFloat("BRDF Cut-off", &m_ui.RTXDI.restirDI.initialSamplingParams.brdfCutoff, 0.0f, 1.0f));
+                        RESET_ON_CHANGE(ImGui::SliderFloat("BRDF Cut-off", &m_ui.RTXDI.restirDI.initialSamplingParams.brdfCutoff, 0.0f, 1.0f));
                         ImGui::Separator();
-                        IMAGE_QUALITY_OPTION(ImGui::Checkbox("Use Permutation Sampling", (bool*)&m_ui.RTXDI.restirDI.temporalResamplingParams.enablePermutationSampling));
-                        IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Temporal Depth Threshold", &m_ui.RTXDI.restirDI.temporalResamplingParams.temporalDepthThreshold, 0.f, 1.f));
-                        IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Temporal Normal Threshold", &m_ui.RTXDI.restirDI.temporalResamplingParams.temporalNormalThreshold, 0.f, 1.f));
-			            IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Boiling Filter Strength", &m_ui.RTXDI.restirDI.temporalResamplingParams.boilingFilterStrength, 0.f, 1.f));
+                        RESET_ON_CHANGE(ImGui::Checkbox("Use Permutation Sampling", (bool*)&m_ui.RTXDI.restirDI.temporalResamplingParams.enablePermutationSampling));
+                        RESET_ON_CHANGE(ImGui::SliderFloat("Temporal Depth Threshold", &m_ui.RTXDI.restirDI.temporalResamplingParams.temporalDepthThreshold, 0.f, 1.f));
+                        RESET_ON_CHANGE(ImGui::SliderFloat("Temporal Normal Threshold", &m_ui.RTXDI.restirDI.temporalResamplingParams.temporalNormalThreshold, 0.f, 1.f));
+			            RESET_ON_CHANGE(ImGui::SliderFloat("Boiling Filter Strength", &m_ui.RTXDI.restirDI.temporalResamplingParams.boilingFilterStrength, 0.f, 1.f));
                         ImGui::Separator();
-                        IMAGE_QUALITY_OPTION(ImGui::SliderInt("Spatial Samples", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.numSpatialSamples, 0, 8));
-			            IMAGE_QUALITY_OPTION(ImGui::SliderInt("Disocclusion Samples", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.numDisocclusionBoostSamples, 0, 8));
-                        IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Spatial Sampling Radius", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialSamplingRadius, 0.f, 64.f));
-                        IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Spatial Depth Threshold", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialDepthThreshold, 0.f, 1.f));
-                        IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Spatial Normal Threshold", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialNormalThreshold, 0.f, 1.f));
-			            IMAGE_QUALITY_OPTION(ImGui::Checkbox("Discount Naive Samples", (bool*)&m_ui.RTXDI.restirDI.spatialResamplingParams.discountNaiveSamples));
+                        RESET_ON_CHANGE(ImGui::SliderInt("Spatial Samples", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.numSpatialSamples, 0, 8));
+			            RESET_ON_CHANGE(ImGui::SliderInt("Disocclusion Samples", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.numDisocclusionBoostSamples, 0, 8));
+                        RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Sampling Radius", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialSamplingRadius, 0.f, 64.f));
+                        RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Depth Threshold", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialDepthThreshold, 0.f, 1.f));
+                        RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Normal Threshold", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialNormalThreshold, 0.f, 1.f));
+			            RESET_ON_CHANGE(ImGui::Checkbox("Discount Naive Samples", (bool*)&m_ui.RTXDI.restirDI.spatialResamplingParams.discountNaiveSamples));
 			            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Prevents samples which are from the current frame or have no reasonable temporal history merged being spread to neighbors");
                         ImGui::Separator();
-                        IMAGE_QUALITY_OPTION(ImGui::DragFloat("Ray Epsilon", &m_ui.RTXDI.rayEpsilon, 0.0001f, 0.0001f, 0.01f, "%.4f"));
+                        RESET_ON_CHANGE(ImGui::DragFloat("Ray Epsilon", &m_ui.RTXDI.rayEpsilon, 0.0001f, 0.0001f, 0.01f, "%.4f"));
                         ImGui::PopItemWidth();
                     }
 
@@ -1024,23 +1128,23 @@ void SampleUI::buildUI(void)
                 {
                     RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
                     ImGui::PushItemWidth(defItemWidth);
-		            IMAGE_QUALITY_OPTION(ImGui::Combo("Resampling Mode", (int*)&m_ui.RTXDI.restirGI.resamplingMode,
+		            RESET_ON_CHANGE(ImGui::Combo("Resampling Mode", (int*)&m_ui.RTXDI.restirGI.resamplingMode,
 			            "Disabled\0Temporal\0Spatial\0Temporal & Spatial\0Fused\0\0"));
                     ImGui::Separator();
-                    IMAGE_QUALITY_OPTION(ImGui::SliderInt("History Length ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.maxHistoryLength, 0, 64));
-                    IMAGE_QUALITY_OPTION(ImGui::SliderInt("Max Reservoir Age ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.maxReservoirAge, 0, 100));
-                    IMAGE_QUALITY_OPTION(ImGui::Checkbox("Permutation Sampling ##GI", (bool*)&m_ui.RTXDI.restirGI.temporalResamplingParams.enablePermutationSampling));
-                    IMAGE_QUALITY_OPTION(ImGui::Checkbox("Fallback Sampling ##GI", (bool*)&m_ui.RTXDI.restirGI.temporalResamplingParams.enableFallbackSampling));
-                    IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Boiling Filter Strength##GI", &m_ui.RTXDI.restirGI.temporalResamplingParams.boilingFilterStrength, 0.f, 1.f));
-                    IMAGE_QUALITY_OPTION(ImGui::Combo("Temporal Bias Correction ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.temporalBiasCorrectionMode,
+                    RESET_ON_CHANGE(ImGui::SliderInt("History Length ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.maxHistoryLength, 0, 64));
+                    RESET_ON_CHANGE(ImGui::SliderInt("Max Reservoir Age ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.maxReservoirAge, 0, 100));
+                    RESET_ON_CHANGE(ImGui::Checkbox("Permutation Sampling ##GI", (bool*)&m_ui.RTXDI.restirGI.temporalResamplingParams.enablePermutationSampling));
+                    RESET_ON_CHANGE(ImGui::Checkbox("Fallback Sampling ##GI", (bool*)&m_ui.RTXDI.restirGI.temporalResamplingParams.enableFallbackSampling));
+                    RESET_ON_CHANGE(ImGui::SliderFloat("Boiling Filter Strength##GI", &m_ui.RTXDI.restirGI.temporalResamplingParams.boilingFilterStrength, 0.f, 1.f));
+                    RESET_ON_CHANGE(ImGui::Combo("Temporal Bias Correction ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.temporalBiasCorrectionMode,
                         "Off\0Basic\0Ray Traced\0"));
                     ImGui::Separator();
-                    IMAGE_QUALITY_OPTION(ImGui::SliderInt("Spatial Samples ##GI", (int*)&m_ui.RTXDI.restirGI.spatialResamplingParams.numSpatialSamples, 0, 8));
-                    IMAGE_QUALITY_OPTION(ImGui::SliderFloat("Spatial Sampling Radius ##GI", &m_ui.RTXDI.restirGI.spatialResamplingParams.spatialSamplingRadius, 1.f, 64.f));
-                    IMAGE_QUALITY_OPTION(ImGui::Combo("Spatial Bias Correction ##GI", (int*)&m_ui.RTXDI.restirGI.spatialResamplingParams.spatialBiasCorrectionMode, "Off\0Basic\0Ray Traced\0"));
+                    RESET_ON_CHANGE(ImGui::SliderInt("Spatial Samples ##GI", (int*)&m_ui.RTXDI.restirGI.spatialResamplingParams.numSpatialSamples, 0, 8));
+                    RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Sampling Radius ##GI", &m_ui.RTXDI.restirGI.spatialResamplingParams.spatialSamplingRadius, 1.f, 64.f));
+                    RESET_ON_CHANGE(ImGui::Combo("Spatial Bias Correction ##GI", (int*)&m_ui.RTXDI.restirGI.spatialResamplingParams.spatialBiasCorrectionMode, "Off\0Basic\0Ray Traced\0"));
                     ImGui::Separator();
-                    IMAGE_QUALITY_OPTION(ImGui::Checkbox("Final Visibility ##GI", (bool*)&m_ui.RTXDI.restirGI.finalShadingParams.enableFinalVisibility));
-                    IMAGE_QUALITY_OPTION(ImGui::Checkbox("Final MIS ##GI", (bool*)&m_ui.RTXDI.restirGI.finalShadingParams.enableFinalMIS));
+                    RESET_ON_CHANGE(ImGui::Checkbox("Final Visibility ##GI", (bool*)&m_ui.RTXDI.restirGI.finalShadingParams.enableFinalVisibility));
+                    RESET_ON_CHANGE(ImGui::Checkbox("Final MIS ##GI", (bool*)&m_ui.RTXDI.restirGI.finalShadingParams.enableFinalMIS));
 
                     ImGui::PopItemWidth();
                 }
@@ -1236,14 +1340,111 @@ void SampleUI::buildUI(void)
             }
         }
 
+        if (ImGui::CollapsingHeader("Post-process"))
+        {
+            RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
+
+            if (ImGui::CollapsingHeader("Early (HDR) post-process"))
+            {
+                RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
+                ImGui::Checkbox("PostProcessTestPass", &m_ui.PostProcessTestPassHDR );
+                
+                ImGui::Separator();
+
+                if (ImGui::CollapsingHeader("Bloom"))
+                {
+                    ImGui::Checkbox("Enable Bloom", &m_ui.EnableBloom);
+                    ImGui::SliderFloat("Bloom Width (Pixels)", &m_ui.BloomRadius, 0.f, 64.f);
+                    ImGui::SliderFloat("Bloom Intensity", &m_ui.BloomIntensity, 0.f, 0.1f);
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Tone Mapping"))
+            {
+                RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
+                ImGui::Checkbox("Enable", &m_ui.EnableToneMapping);
+
+                const std::string currentOperator = tonemapOperatorToString.at(m_ui.ToneMappingParams.toneMapOperator);
+                if (ImGui::BeginCombo("Operator", currentOperator.c_str()))
+                {
+                    for (auto it = tonemapOperatorToString.begin(); it != tonemapOperatorToString.end(); it++)
+                    {
+                        bool is_selected = it->first == m_ui.ToneMappingParams.toneMapOperator;
+                        if (ImGui::Selectable(it->second.c_str(), is_selected))
+                            m_ui.ToneMappingParams.toneMapOperator = it->first;
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::Checkbox("Auto Exposure", &m_ui.ToneMappingParams.autoExposure);
+
+                if (m_ui.ToneMappingParams.autoExposure)
+                {
+                    ImGui::InputFloat("Auto Exposure Min", &m_ui.ToneMappingParams.exposureValueMin);
+                    m_ui.ToneMappingParams.exposureValueMin = dm::min(m_ui.ToneMappingParams.exposureValueMax, m_ui.ToneMappingParams.exposureValueMin);
+                    ImGui::InputFloat("Auto Exposure Max", &m_ui.ToneMappingParams.exposureValueMax);
+                    m_ui.ToneMappingParams.exposureValueMax = dm::max(m_ui.ToneMappingParams.exposureValueMin, m_ui.ToneMappingParams.exposureValueMax);
+                }
+
+                const std::string currentMode = ExposureModeToString.at(m_ui.ToneMappingParams.exposureMode);
+                if (ImGui::BeginCombo("Exposure Mode", currentMode.c_str()))
+                {
+                    for (auto it = ExposureModeToString.begin(); it != ExposureModeToString.end(); it++)
+                    {
+                        bool is_selected = it->first == m_ui.ToneMappingParams.exposureMode;
+                        if (ImGui::Selectable(it->second.c_str(), is_selected))
+                            m_ui.ToneMappingParams.exposureMode = it->first;
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::InputFloat("Exposure Compensation", &m_ui.ToneMappingParams.exposureCompensation);
+                m_ui.ToneMappingParams.exposureCompensation = dm::clamp(m_ui.ToneMappingParams.exposureCompensation, -12.0f, 12.0f);
+
+                ImGui::InputFloat("Exposure Value", &m_ui.ToneMappingParams.exposureValue);
+                m_ui.ToneMappingParams.exposureValue = dm::clamp(m_ui.ToneMappingParams.exposureValue, dm::log2f(0.1f * 0.1f * 0.1f), dm::log2f(100000.f * 100.f * 100.f));
+
+                ImGui::InputFloat("Film Speed", &m_ui.ToneMappingParams.filmSpeed);
+                m_ui.ToneMappingParams.filmSpeed = dm::clamp(m_ui.ToneMappingParams.filmSpeed, 1.0f, 6400.0f);
+
+                ImGui::InputFloat("fNumber", &m_ui.ToneMappingParams.fNumber);
+                m_ui.ToneMappingParams.fNumber = dm::clamp(m_ui.ToneMappingParams.fNumber, 0.1f, 100.0f);
+
+                ImGui::InputFloat("Shutter", &m_ui.ToneMappingParams.shutter);
+                m_ui.ToneMappingParams.shutter = dm::clamp(m_ui.ToneMappingParams.shutter, 0.1f, 10000.0f);
+
+                ImGui::Checkbox("Enable White Balance", &m_ui.ToneMappingParams.whiteBalance);
+
+                ImGui::InputFloat("White Point", &m_ui.ToneMappingParams.whitePoint);
+                m_ui.ToneMappingParams.whitePoint = dm::clamp(m_ui.ToneMappingParams.whitePoint, 1905.0f, 25000.0f);
+
+                ImGui::InputFloat("White Max Luminance", &m_ui.ToneMappingParams.whiteMaxLuminance);
+                m_ui.ToneMappingParams.whiteMaxLuminance = dm::clamp(m_ui.ToneMappingParams.whiteMaxLuminance, 0.1f, FLT_MAX);
+
+                ImGui::InputFloat("White Scale", &m_ui.ToneMappingParams.whiteScale);
+                m_ui.ToneMappingParams.whiteScale = dm::clamp(m_ui.ToneMappingParams.whiteScale, 0.f, 100.f);
+
+                ImGui::Checkbox("Enable Clamp", &m_ui.ToneMappingParams.clamped);
+            }
+
+            if (ImGui::CollapsingHeader("Late (LDR) post-process"))
+            {
+                RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
+
+                ImGui::Checkbox("EdgeDetection", &m_ui.PostProcessEdgeDetection);
+                ImGui::SliderFloat("EdgeDetectionThreshold", &m_ui.PostProcessEdgeDetectionThreshold, 0.0f, 1.0f );
+                ImGui::Separator();
+            }
+        }
+
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.5, 1.0f));
         bool debuggingIsOpen = ImGui::CollapsingHeader("Debugging"); //, ImGuiTreeNodeFlags_DefaultOpen ) )
         ImGui::PopStyleColor(1);
         if (debuggingIsOpen)
         {
-            RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
-    #if ENABLE_DEBUG_VIZUALISATION
-            if( ImGui::Combo( "Debug view", (int*)&m_ui.DebugView,
+            RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
+#if ENABLE_DEBUG_VIZUALISATIONS
+            if (ImGui::Combo("Debug view", (int*)&m_ui.DebugView,
                 "Disabled\0"
                 "ImagePlaneRayLength\0DominantStablePlaneIndex\0"
                 "StablePlaneVirtualRayLength\0StablePlaneMotionVectors\0"
@@ -1253,19 +1454,18 @@ void SampleUI::buildUI(void)
                 "FirstHitBarycentrics\0FirstHitFaceNormal\0FirstHitGeometryNormal\0FirstHitShadingNormal\0FirstHitShadingTangent\0FirstHitShadingBitangent\0FirstHitFrontFacing\0FirstHitThinSurface\0FirstHitShaderPermutation\0"
                 "FirstHitDiffuse\0FirstHitSpecular\0FirstHitRoughness\0FirstHitMetallic\0"
                 "VBufferMotionVectors\0VBufferDepth\0"
-                "FirstHitOpacityMicroMapInWorld\0FirstHitOpacityMicroMapOverlay\0"
                 "SecondarySurfacePosition\0SecondarySurfaceRadiance\0ReSTIRGIOutput\0"
                 "ReSTIRDIInitialOutput\0ReSTIRDITemporalOutput\0ReSTIRDISpatialOutput\0ReSTIRDIFinalOutput\0ReSTIRDIFinalContribution\0"
-			    "ReGIRIndirectOutput\0"
-                "\0\0") )
+                "ReGIRIndirectOutput\0"
+                "\0\0"))
                 m_ui.ResetAccumulation = true;
-            m_ui.DebugView = dm::clamp( m_ui.DebugView, (DebugViewType)0, DebugViewType::MaxCount );
+            m_ui.DebugView = dm::clamp(m_ui.DebugView, (DebugViewType)0, DebugViewType::MaxCount);
 
-            if( m_ui.DebugView >= DebugViewType::StablePlaneVirtualRayLength && m_ui.DebugView <= DebugViewType::StablePlaneDenoiserValidation )
+            if (m_ui.DebugView >= DebugViewType::StablePlaneVirtualRayLength && m_ui.DebugView <= DebugViewType::StablePlaneDenoiserValidation)
             {
-                m_ui.DebugViewStablePlaneIndex = dm::clamp( m_ui.DebugViewStablePlaneIndex, -1, (int)m_ui.StablePlanesActiveCount-1 );
-                RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
-                float3 spcolor = (m_ui.DebugViewStablePlaneIndex>=0)?(StablePlaneDebugVizColor(m_ui.DebugViewStablePlaneIndex)):(float3(1,1,0)); spcolor = spcolor * 0.7f + float3(0.2f, 0.2f, 0.2f);
+                m_ui.DebugViewStablePlaneIndex = dm::clamp(m_ui.DebugViewStablePlaneIndex, -1, (int)m_ui.StablePlanesActiveCount - 1);
+                RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
+                float3 spcolor = (m_ui.DebugViewStablePlaneIndex >= 0) ? (StablePlaneDebugVizColor(m_ui.DebugViewStablePlaneIndex)) : (float3(1, 1, 0)); spcolor = spcolor * 0.7f + float3(0.2f, 0.2f, 0.2f);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(spcolor.x, spcolor.y, spcolor.z, 1.0f));
                 ImGui::InputInt("Stable Plane index", &m_ui.DebugViewStablePlaneIndex);
                 ImGui::PopStyleColor(1);
@@ -1278,138 +1478,68 @@ void SampleUI::buildUI(void)
 
             ImGui::Checkbox("Continuous feedback", &m_ui.ContinuousDebugFeedback);
 
-            {
-                UI_SCOPED_DISABLE(ENABLE_DEBUG_LINES_VIZUALISATION == 0);
-                ImGui::Checkbox("Show debug lines", &m_ui.ShowDebugLines);
-            }
-            if (ENABLE_DEBUG_LINES_VIZUALISATION == 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) 
-                ImGui::SetTooltip("To enable debug lines, set ENABLE_DEBUG_LINES_VIZUALISATION to 1 in Config.h");
-        
+            ImGui::Checkbox("Show debug lines", &m_ui.ShowDebugLines);
+
             if (ImGui::Checkbox("Show material editor", &m_ui.ShowMaterialEditor) && m_ui.ShowMaterialEditor)
             {
-    #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
+#if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
                 m_ui.ShowDeltaTree = false; // no space for both
-    #endif
+#endif
                 //m_app.SetUIPick();
             }
 
-    #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
-            if( !m_ui.ActualUseStablePlanes() )
+#if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
+            if (!m_ui.ActualUseStablePlanes())
             {
                 ImGui::Text("Enable Stable Planes for delta tree viz!");
                 m_ui.ShowDeltaTree = false;
             }
             else
             {
-                if( ImGui::Checkbox("Show delta tree window", &m_ui.ShowDeltaTree) && m_ui.ShowDeltaTree )
+                if (ImGui::Checkbox("Show delta tree window", &m_ui.ShowDeltaTree) && m_ui.ShowDeltaTree)
                 {
                     m_ui.ShowMaterialEditor = false; // no space for both
                     m_app.SetUIPick();
                 }
             }
-    #else
+#else
             ImGui::Text("Delta tree debug viz disabled; to enable set ENABLE_DEBUG_DELTA_TREE_VIZUALISATION to 1");
-    #endif
+#endif
             ImGui::Separator();
 
             for (int i = 0; i < MAX_DEBUG_PRINT_SLOTS; i++)
                 ImGui::Text("debugPrint %d: %f, %f, %f, %f", i, feedback.debugPrint[i].x, feedback.debugPrint[i].y, feedback.debugPrint[i].z, feedback.debugPrint[i].w);
             ImGui::Text("Debug line count: %d", feedback.lineVertexCount / 2);
             ImGui::InputFloat("Debug Line Scale", &m_ui.DebugLineScale);
-    #else
-            ImGui::TextWrapped("Debug visualization disabled; to enable set ENABLE_DEBUG_VIZUALISATION to 1");
-    #endif 
+#else
+            ImGui::TextWrapped("Debug visualization disabled; to enable set ENABLE_DEBUG_VIZUALISATIONS to 1");
+#endif 
+
+            if (m_app.GetZoomTool() != nullptr && ImGui::CollapsingHeader("Zoom Tool"))
+                m_app.GetZoomTool()->DebugGUI(indent);
         }
 
-        if (ImGui::CollapsingHeader("Tone Mapping"))
-        {
-            RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
-            ImGui::Checkbox("Enable", &m_ui.EnableToneMapping);
-
-            const std::string currentOperator = tonemapOperatorToString.at(m_ui.ToneMappingParams.toneMapOperator);
-            if (ImGui::BeginCombo("Operator", currentOperator.c_str()))
-            {
-                for (auto it = tonemapOperatorToString.begin(); it != tonemapOperatorToString.end(); it++)
-                {
-                    bool is_selected = it->first == m_ui.ToneMappingParams.toneMapOperator;
-                    if (ImGui::Selectable(it->second.c_str(), is_selected))
-                        m_ui.ToneMappingParams.toneMapOperator = it->first;
-                }
-                ImGui::EndCombo();
-            }
-
-            ImGui::Checkbox("Auto Exposure", &m_ui.ToneMappingParams.autoExposure);
-
-            if (m_ui.ToneMappingParams.autoExposure)
-            {
-                ImGui::InputFloat("Auto Exposure Min", &m_ui.ToneMappingParams.exposureValueMin);
-                m_ui.ToneMappingParams.exposureValueMin = dm::min(m_ui.ToneMappingParams.exposureValueMax, m_ui.ToneMappingParams.exposureValueMin);
-                ImGui::InputFloat("Auto Exposure Max", &m_ui.ToneMappingParams.exposureValueMax);
-                m_ui.ToneMappingParams.exposureValueMax = dm::max(m_ui.ToneMappingParams.exposureValueMin, m_ui.ToneMappingParams.exposureValueMax);
-            }
-
-            const std::string currentMode = ExposureModeToString.at(m_ui.ToneMappingParams.exposureMode);
-            if (ImGui::BeginCombo("Exposure Mode", currentMode.c_str()))
-            {
-                for (auto it = ExposureModeToString.begin(); it != ExposureModeToString.end(); it++)
-                {
-                    bool is_selected = it->first == m_ui.ToneMappingParams.exposureMode;
-                    if (ImGui::Selectable(it->second.c_str(), is_selected))
-                        m_ui.ToneMappingParams.exposureMode = it->first;
-                }
-                ImGui::EndCombo();
-            }
-
-            ImGui::InputFloat("Exposure Compensation", &m_ui.ToneMappingParams.exposureCompensation);
-            m_ui.ToneMappingParams.exposureCompensation = dm::clamp(m_ui.ToneMappingParams.exposureCompensation, -12.0f, 12.0f);
-
-            ImGui::InputFloat("Exposure Value", &m_ui.ToneMappingParams.exposureValue);
-            m_ui.ToneMappingParams.exposureValue = dm::clamp(m_ui.ToneMappingParams.exposureValue, dm::log2f(0.1f * 0.1f * 0.1f), dm::log2f(100000.f * 100.f * 100.f));
-
-            ImGui::InputFloat("Film Speed", &m_ui.ToneMappingParams.filmSpeed);
-            m_ui.ToneMappingParams.filmSpeed = dm::clamp(m_ui.ToneMappingParams.filmSpeed, 1.0f, 6400.0f);
-
-            ImGui::InputFloat("fNumber", &m_ui.ToneMappingParams.fNumber);
-            m_ui.ToneMappingParams.fNumber = dm::clamp(m_ui.ToneMappingParams.fNumber, 0.1f, 100.0f);
-
-            ImGui::InputFloat("Shutter", &m_ui.ToneMappingParams.shutter);
-            m_ui.ToneMappingParams.shutter = dm::clamp(m_ui.ToneMappingParams.shutter, 0.1f, 10000.0f);
-
-            ImGui::Checkbox("Enable White Balance", &m_ui.ToneMappingParams.whiteBalance);
-
-            ImGui::InputFloat("White Point", &m_ui.ToneMappingParams.whitePoint);
-            m_ui.ToneMappingParams.whitePoint = dm::clamp(m_ui.ToneMappingParams.whitePoint, 1905.0f, 25000.0f);
-
-            ImGui::InputFloat("White Max Luminance", &m_ui.ToneMappingParams.whiteMaxLuminance);
-            m_ui.ToneMappingParams.whiteMaxLuminance = dm::clamp(m_ui.ToneMappingParams.whiteMaxLuminance, 0.1f, FLT_MAX);
-
-            ImGui::InputFloat("White Scale", &m_ui.ToneMappingParams.whiteScale);
-            m_ui.ToneMappingParams.whiteScale = dm::clamp(m_ui.ToneMappingParams.whiteScale, 0.f, 100.f);
-
-            ImGui::Checkbox("Enable Clamp", &m_ui.ToneMappingParams.clamped);
-        }
-        else
         {
             // quick tonemapping settings
-            ImGui::PushItemWidth(defItemWidth*0.7f);
-            const char * tooltipInfo = "Detailed exposure settings are in Tone Mapping section";
+            ImGui::PushItemWidth(defItemWidth * 0.7f);
+            const char* tooltipInfo = "Detailed exposure settings are in Tone Mapping section";
             ImGui::PushID("QS");
-            ImGui::Checkbox("AutoExposure", &m_ui.ToneMappingParams.autoExposure); if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tooltipInfo);
+            ImGui::Checkbox("AutoExposure", &m_ui.ToneMappingParams.autoExposure); if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltipInfo);
             ImGui::SameLine();
-            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); 
+            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
             ImGui::SameLine();
-            ImGui::SliderFloat("Brightness", &m_ui.ToneMappingParams.exposureCompensation, -18.0f, 8.0f, "%.2f");  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tooltipInfo);
+            ImGui::SliderFloat("Brightness", &m_ui.ToneMappingParams.exposureCompensation, -18.0f, 8.0f, "%.2f");  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltipInfo);
             ImGui::SameLine();
             if (ImGui::Button("0"))
                 m_ui.ToneMappingParams.exposureCompensation = 0;
-             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tooltipInfo);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltipInfo);
             ImGui::PopID();
             ImGui::PopItemWidth();
         }
     }
 
-    std::shared_ptr<MaterialPT> material = MaterialPT::FromDonut(m_ui.SelectedMaterial);
-    if (material != nullptr && m_ui.ShowMaterialEditor)
+    std::shared_ptr<PTMaterial> material = PTMaterial::FromDonut(m_ui.SelectedMaterial);
+    if (material != nullptr && m_ui.ShowMaterialEditor && m_app.GetMaterialsBaker() != nullptr)
     {
         ImGui::SetNextWindowPos(ImVec2(float(scaledWidth) - 10.f, 10.f), 0, ImVec2(1.f, 0.f));
         ImGui::SetNextWindowSize(ImVec2(defWindowWidth, 0), ImGuiCond_Appearing);
@@ -1423,7 +1553,7 @@ void SampleUI::buildUI(void)
         const float alphaCutoffBefore = material->AlphaCutoff;
         MaterialShadingProperties matPropsBefore = MaterialShadingProperties::Compute(*material);
 
-        bool dirty = material->EditorGUI();
+        bool dirty = material->EditorGUI(*m_app.GetMaterialsBaker());
 
         MaterialShadingProperties matPropsAfter = MaterialShadingProperties::Compute(*material);
         const bool excludeFromNEEAfter = material->ExcludeFromNEE;
@@ -1478,25 +1608,52 @@ void SampleUI::buildUI(void)
 #endif
         )
     {
+
+        std::string envMapOverrideSource = m_app.GetEnvMapOverrideSource();
+        std::vector<std::string> envOptions;
+        envOptions.push_back( c_EnvMapSceneDefault );
+        //envOptions.push_back( c_EnvMapProcSky );
+        envOptions.push_back( c_EnvMapProcSky_Morning );
+        envOptions.push_back( c_EnvMapProcSky_Midday );
+        envOptions.push_back( c_EnvMapProcSky_Evening );
+        envOptions.push_back( c_EnvMapProcSky_Dawn );
+        envOptions.push_back( c_EnvMapProcSky_PitchBlack );
+        int envOptionsCurrentIndex = -1; for (int i = 0; i < envOptions.size(); i++) if (envOptions[i]==envMapOverrideSource) envOptionsCurrentIndex = i;
+
         // collect toggles
-        struct LocalToggle
+        struct BigButton
         {
             std::string                 Name;
             std::optional<std::string>  HoverText;
-            bool *                      PropVar;
-            TogglableNode *             PropNode;
+
+            bool *                      PropVar         = nullptr; // type 1
+            TogglableNode *             PropNode        = nullptr; // type 2
+            std::vector<std::string> *  PropOptions     = nullptr; // type 3
+            int *                       PropOptionIndex = nullptr; // type 3
+
             bool                        Enabled;
-            LocalToggle( const std::string & name, bool & prop ) : Name(name), PropVar(&prop), PropNode(nullptr), Enabled(true) {}
-            LocalToggle( const std::string & name, bool & prop, const std::string& hoverText, bool enabled ) : Name(name), PropVar(&prop), PropNode(nullptr), HoverText(hoverText), Enabled(enabled) {}
-            LocalToggle( const std::string & name, TogglableNode * prop ) : Name(TrimTogglable(name)), PropVar(nullptr), PropNode(prop), Enabled(true) {}
-            bool                IsSelected() const            { return (PropVar != nullptr)?(*PropVar):(PropNode->IsSelected()); }
-            void                SetSelected( bool selected )  { if( PropVar != nullptr ) *PropVar = selected; else PropNode->SetSelected(selected); }
+
+            BigButton( const std::string & name, bool & prop ) : Name(name), PropVar(&prop), PropNode(nullptr), Enabled(true) {}
+            BigButton( const std::string & name, bool & prop, const std::string& hoverText, bool enabled ) : Name(name), PropVar(&prop), PropNode(nullptr), HoverText(hoverText), Enabled(enabled) {}
+            BigButton( const std::string & name, TogglableNode * prop ) : Name(TrimTogglable(name)), PropVar(nullptr), PropNode(prop), Enabled(true) {}
+            BigButton( const std::string & name, std::vector<std::string>* propOptions, int* propOptionIndex, const std::string& hoverText ) : Name(name), PropOptions(propOptions), PropOptionIndex(propOptionIndex), HoverText(hoverText), Enabled(true) { assert(PropOptions->size()>0); }
+            bool                IsSelected() const            { return (PropOptions != nullptr)?(true):((PropVar != nullptr)?(*PropVar):(PropNode->IsSelected())); }
+            void                SetSelected( bool selected )  { if( PropVar != nullptr ) *PropVar = selected; else if (PropNode != nullptr ) PropNode->SetSelected(selected); else *PropOptionIndex = ( ((*PropOptionIndex)+1) % PropOptions->size() ); }
+            std::string         GetText() const 
+            {
+                if (PropOptions != nullptr)
+                    return Name + (((*PropOptionIndex)>=0)?(TrimSkyDisplayName((*PropOptions)[*PropOptionIndex])):(std::string("other")));
+                else
+                    return Name;
+            }
+
         };
-        std::vector<LocalToggle> buttons;
-        buttons.push_back(LocalToggle("Animations", m_ui.EnableAnimations, "Animations are not available in reference mode", m_ui.RealtimeMode));
-        buttons.push_back(LocalToggle("AutoExposure", m_ui.ToneMappingParams.autoExposure ) );
+        std::vector<BigButton> buttons;
+        buttons.push_back(BigButton("Animations", m_ui.EnableAnimations, "Animations are not available in reference mode", m_ui.RealtimeMode));
+        buttons.push_back(BigButton("AutoExposure", m_ui.ToneMappingParams.autoExposure ) );
+        buttons.push_back(BigButton("Sky: ", &envOptions, &envOptionsCurrentIndex, "For more options see Scene/Environment in the main UI" ));
         for (int i = 0; m_ui.TogglableNodes != nullptr && i < m_ui.TogglableNodes->size(); i++)
-            buttons.push_back(LocalToggle((*m_ui.TogglableNodes)[i].SceneNode->GetName(), &(*m_ui.TogglableNodes)[i]));
+            buttons.push_back(BigButton((*m_ui.TogglableNodes)[i].SceneNode->GetName(), &(*m_ui.TogglableNodes)[i]));
 
         if( buttons.size() > 0 )
         {
@@ -1525,7 +1682,7 @@ void SampleUI::buildUI(void)
                     ImGui::PushStyleColor(ImGuiCol_Button, (ImVec4)ImColor::HSV(h, 0.6f * b, 0.6f * b));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (ImVec4)ImColor::HSV(h, 0.7f * b, 0.7f * b));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, (ImVec4)ImColor::HSV(h, 0.8f * b, 0.8f * b));
-                    if (ImGui::Button(buttons[i].Name.c_str(), ImVec2(buttonWidth, texSizeA.y * 2)))
+                    if (ImGui::Button(buttons[i].GetText().c_str(), ImVec2(buttonWidth, texSizeA.y * 2)))
                     {
                         buttons[i].SetSelected(!selected);
                         m_ui.ResetAccumulation = true;
@@ -1541,6 +1698,11 @@ void SampleUI::buildUI(void)
                 }
             }
             ImGui::End();
+        }
+
+        if (envOptionsCurrentIndex >= 0 && envOptionsCurrentIndex < envOptions.size() && envOptions[envOptionsCurrentIndex] != envMapOverrideSource )
+        {
+            m_app.SetEnvMapOverrideSource(envOptions[envOptionsCurrentIndex]);
         }
     }
 

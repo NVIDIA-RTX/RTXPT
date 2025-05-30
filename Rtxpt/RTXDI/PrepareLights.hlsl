@@ -14,13 +14,13 @@
 #include <donut/shaders/binding_helpers.hlsli>
 #include "../../External/Rtxdi/Include/Rtxdi/Utils/Math.hlsli"
 #include "ShaderParameters.h"
-#include "../PathTracer/PathTracerDebug.hlsli"
-#include "../PathTracer/Utils/Utils.hlsli"
+#include "../Shaders/PathTracer/PathTracerDebug.hlsli"
+#include "../Shaders/PathTracer/Utils/Utils.hlsli"
 
-#include "../SubInstanceData.h"
-#include "../PathTracer/Materials/MaterialPT.h"
+#include "../Shaders/SubInstanceData.h"
+#include "../Shaders/PathTracer/Materials/MaterialPT.h"
 
-#include "../OpacityMicroMap/OmmGeometryDebugData.hlsli"
+
 
 ConstantBuffer<PrepareLightsConstants> g_Const                  : register(b0);
 RWStructuredBuffer<PolymorphicLightInfoFull> u_LightDataBuffer  : register(u0);
@@ -30,8 +30,8 @@ StructuredBuffer<PrepareLightsTask> t_TaskBuffer                : register(t0);
 StructuredBuffer<SubInstanceData> t_SubInstanceData             : register(t1);
 StructuredBuffer<InstanceData> t_InstanceData                   : register(t2);
 StructuredBuffer<GeometryData> t_GeometryData                   : register(t3);
-StructuredBuffer<GeometryDebugData> t_GeometryDebugData         : register(t4);
-StructuredBuffer<MaterialPTData> t_MaterialPTData               : register(t5);
+// StructuredBuffer<GeometryDebugData> t_GeometryDebugData         : register(t4);  // #include "../Shaders/Misc/OmmGeometryDebugData.hlsli"
+StructuredBuffer<PTMaterialData> t_PTMaterialData               : register(t5);
 TextureCube<float4> t_EnvironmentMap                            : register(t6);
 Texture2D<float> t_EnvironmentMapImportanceMap                  : register(t7);
 StructuredBuffer<PolymorphicLightInfoFull> t_PrimitiveLights    : register(t8);
@@ -102,8 +102,8 @@ void main(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_G
         InstanceData instance = t_InstanceData[(task.instanceAndGeometryIndex >> 12) & 0x7FFFF];
         GeometryData geometry = t_GeometryData[instance.firstGeometryIndex + (task.instanceAndGeometryIndex & 0xfff)];
 
-        uint materialIndex = t_SubInstanceData[instance.firstGeometryInstanceIndex + (task.instanceAndGeometryIndex & 0xfff)].GlobalGeometryIndex_MaterialPTDataIndex & 0xFFFF;
-        MaterialPTData material = t_MaterialPTData[materialIndex];
+        uint materialIndex = t_SubInstanceData[instance.firstGeometryInstanceIndex + (task.instanceAndGeometryIndex & 0xfff)].GlobalGeometryIndex_PTMaterialDataIndex & 0xFFFF;
+        PTMaterialData material = t_PTMaterialData[materialIndex];
 
         // DebugPrint( "RTXDI: ii {0}; gi {1}, gii {2}, ti {3}, T0{4}, T1{5}, T2{6}", instanceIndex, geometryIndex, geometryInstanceIndex, triangleIdx, instance.transform[0], instance.transform[1], instance.transform[2] );
         //DebugPrint( "ii {0}; t0 {1}, t1 {2}, t2 {3}", instanceIndex, instance.transform[0], instance.transform[1], instance.transform[2] );
@@ -129,7 +129,7 @@ void main(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_G
 
         float3 radiance = material.EmissiveColor;
 
-        if ((material.EmissiveTextureIndex != 0xFFFFFFFF) && (geometry.texCoord1Offset != ~0u) && ((material.Flags & MaterialPTFlags_UseEmissiveTexture) != 0))
+        if ((material.EmissiveTextureIndex != 0xFFFFFFFF) && (geometry.texCoord1Offset != ~0u) && ((material.Flags & PTMaterialFlags_UseEmissiveTexture) != 0))
         {
             Texture2D emissiveTexture = t_BindlessTextures[NonUniformResourceIndex(material.EmissiveTextureIndex & 0xFFFF)];
 

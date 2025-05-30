@@ -33,7 +33,7 @@ const ReSTIRDI_TemporalResamplingParameters getReSTIRDITemporalResamplingParams(
 	params.boilingFilterStrength = 0.2f;
 	params.discardInvisibleSamples = false;
 	params.enableBoilingFilter = true;
-	params.enablePermutationSampling = false;
+	params.enablePermutationSampling = true;
 	params.maxHistoryLength = 20;
 	params.permutationSamplingThreshold = 0.9f;
 	params.temporalBiasCorrection = ReSTIRDI_TemporalBiasCorrectionMode::Raytraced;
@@ -47,7 +47,7 @@ const ReSTIRDI_SpatialResamplingParameters getReSTIRDISpatialResamplingParams()
 {
 	ReSTIRDI_SpatialResamplingParameters params = {};
 	params.numDisocclusionBoostSamples = 8;
-	params.numSpatialSamples = 1;
+	params.numSpatialSamples = 2;
 	params.spatialBiasCorrection = ReSTIRDI_SpatialBiasCorrectionMode::Raytraced;
 	params.spatialDepthThreshold = 0.1f;
 	params.spatialNormalThreshold = 0.5f;
@@ -74,15 +74,14 @@ const rtxdi::ReSTIRGI_ResamplingMode GetReSTIRGI_ResamplingMode() { return rtxdi
 const ReSTIRGI_TemporalResamplingParameters getReSTIRGITemporalResamplingParams()
 {
 	ReSTIRGI_TemporalResamplingParameters params = {};
-	params.boilingFilterStrength = 0.6f;
+	params.boilingFilterStrength = 0.2f;
 	params.depthThreshold = 0.1f;
 	params.enableBoilingFilter = true;
 	params.enableFallbackSampling = true;
-	params.enablePermutationSampling = false;
+	params.enablePermutationSampling = true;
 	params.maxHistoryLength = 10;
 	params.maxReservoirAge = 30;
 	params.normalThreshold = 0.6f;
-    params.enablePermutationSampling = true;
 	params.temporalBiasCorrectionMode = ResTIRGI_TemporalBiasCorrectionMode::Basic;
 
 	return params;

@@ -16,6 +16,7 @@
 VK_PUSH_CONSTANT ConstantBuffer<AccumulationConstants> g_Const : register(b0);
 
 RWTexture2D<float4> u_AccumulatedColor : register(u0);
+RWTexture2D<float4> u_OutputColor : register(u1);
 
 Texture2D<float4> t_InputColor : register(t0);
 
@@ -48,5 +49,7 @@ void main(uint2 globalIdx : SV_DispatchThreadID)
     else
         outputColor = compositedColor;
 
-    u_AccumulatedColor[globalIdx] = outputColor;
+    if (g_Const.blendFactor > 0)
+        u_AccumulatedColor[globalIdx] = outputColor;
+    u_OutputColor[globalIdx]  = outputColor; // often lower precision
 }

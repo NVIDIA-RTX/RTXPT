@@ -10,7 +10,7 @@
 
 #define USE_DENOISING_NRD 1     // <- this define should come from elsewhere
 
-#include "PathTracer/Config.h"
+#include "Shaders/PathTracer/Config.h"
 
 #include "RenderTargets.h"
 
@@ -18,9 +18,8 @@
 
 #include <donut/core/math/math.h>
 using namespace donut::math;
-#include "PathTracer/PathTracerShared.h"
 
-#include "PathTracer/StablePlanes.hlsli"
+#include "Shaders/PathTracer/StablePlanes.hlsli"
 
 #include "RTXDI/ShaderParameters.h"
 #include <donut/core/log.h>
@@ -113,7 +112,7 @@ void RenderTargets::Init(
 
     desc.format = nvrhi::Format::RGBA16_FLOAT;
     desc.clearValue = nvrhi::Color(0.0f, 0.0f, 0.0f, 0.0f);   // avoid the debug layer warnings... not actually cleared except for debug purposes
-#if ENABLE_DEBUG_VIZUALISATION
+#if ENABLE_DEBUG_VIZUALISATIONS
     desc.format = nvrhi::Format::RGBA8_UNORM;
     desc.debugName = "DenoiserOutValidation";
     DenoiserOutValidation = device->createTexture(desc);
@@ -195,13 +194,20 @@ void RenderTargets::Init(
     TemporalFeedback2 = device->createTexture(desc);
 
     desc.format = nvrhi::Format::SRGBA8_UNORM;
-    desc.isUAV = false;
+    desc.isUAV = true;
+    desc.isTypeless = true;
     desc.debugName = "LdrColor";
     LdrColor = device->createTexture(desc);
+    desc.debugName = "LdrColorScratch";
+    LdrColorScratch = device->createTexture(desc);
+    desc.isTypeless = false;
+
+    desc.isUAV = false;
 
     desc.debugName = "PreUIColor";
     PreUIColor = device->createTexture(desc);
 
+#if 0
     if (desc.isVirtual)
     {
         uint64_t heapSize = 0;
@@ -241,6 +247,10 @@ void RenderTargets::Init(
             offset += memReq.size;
         }
     }
+#endif
+
+    ProcessedOutputFramebuffer = std::make_shared<donut::engine::FramebufferFactory>(device);
+    ProcessedOutputFramebuffer->RenderTargets = { ProcessedOutputColor };
 
     LdrFramebuffer = std::make_shared<donut::engine::FramebufferFactory>(device);
     LdrFramebuffer->RenderTargets = { LdrColor };

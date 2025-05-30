@@ -53,11 +53,13 @@ public:
     nvrhi::TextureHandle            GetCloudsTexture() const;
     nvrhi::TextureHandle            GetNoiseTexture() const;
 
-    bool                            Update( double sceneTime, ProceduralSkyConstants & outConstants );
+    bool                            Update( double sceneTime, ProceduralSkyConstants & outConstants, const std::string & presetType, bool forceInstantUpdate );
 
     void                            DebugGUI(float indent);
 
 private:
+    double                          m_lastSceneTime = 0.0;
+
     nvrhi::DeviceHandle                             m_device;
     std::shared_ptr<donut::engine::TextureCache>    m_textureCache;
 
@@ -68,16 +70,20 @@ private:
     std::shared_ptr<donut::engine::LoadedTexture>   m_noiseTexture;
 
     float3                          m_colorTint                 = float3(1.45f, 1.29f, 1.27f);
-    float                           m_brightness                = 0.7f;
+    float                           m_brightness                = 1.0f;
     float                           m_sunBrightness             = 5.0f;
     float                           m_cloudsMovementSpeed       = 0.8f;
     float                           m_timeOfDayMovementSpeed    = 300.0f;
     float                           m_sunTimeOfDayOffset        = -0.4f;
     float                           m_sunEastWestRotation       = 0.0f;
+    float                           m_sunAngularDiameterDeg     = 0.5332f;
 
     float                           m_cloudDensityOffset        = 0.75f;
     float                           m_cloudTransmittance        = 2.5f;
     float                           m_cloudScattering           = 2.0f;
+
+    float                           m_timeOfDayL2               = 0.0f;
+    float                           m_timeOfDayL1               = 0.0f;
 
     ProceduralSkyConstants          m_lastConstants;
 };

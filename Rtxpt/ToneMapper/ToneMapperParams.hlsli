@@ -9,7 +9,7 @@
 */
 
 #pragma once
-#include "../PathTracer/Utils/HostDeviceShared.hlsli"
+#include "../Shaders/PathTracer/Utils/HostDeviceShared.hlsli"
 
 enum class ToneMapperOperator : uint32_t
 {

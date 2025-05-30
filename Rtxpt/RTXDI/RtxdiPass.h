@@ -16,11 +16,11 @@
 #include <unordered_map>
 #include <rtxdi/ImportanceSamplingContext.h>
 #include "../ComputePass.h"
-#include "../RayTracingPass.h"
+#include "RayTracingPass.h"
 #include "RtxdiResources.h"
 #include "RtxdiApplicationSettings.h"
 
-#include "../PathTracer/Lighting/LightingTypes.h"
+#include "../Shaders/PathTracer/Lighting/LightingTypes.h"
 
 class RenderTargets;
 class PrepareLightsPass;
@@ -31,12 +31,13 @@ class ShaderDebug;
 
 namespace donut::engine
 {
-	class ExtendedScene;
 	class ShaderFactory;
 	class CommonRenderPasses;
 	struct ShaderMacro;
 	class PlanarView;
 }
+
+class ExtendedScene;
 
 struct RtxdiUserSettings
 {
@@ -101,7 +102,7 @@ public:
         const RenderTargets& renderTargets,
         std::shared_ptr<EnvMapBaker> envMap,
         EnvMapSceneParams envMapSceneParams,
-        const std::shared_ptr<donut::engine::ExtendedScene> scene,
+        const std::shared_ptr<ExtendedScene> scene,
         std::shared_ptr<class MaterialsBaker> materialsBaker,
         std::shared_ptr<class OmmBaker> ommBaker,
         nvrhi::BufferHandle subInstanceDataBuffer,
@@ -139,7 +140,7 @@ private:
 	nvrhi::DeviceHandle m_device; 
 	std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
 	std::shared_ptr<donut::engine::CommonRenderPasses> m_CommonRenderPasses;
-	std::shared_ptr<donut::engine::ExtendedScene> m_Scene;
+	std::shared_ptr<ExtendedScene> m_Scene;
 	nvrhi::BindingLayoutHandle m_bindingLayout;
 	nvrhi::BindingLayoutHandle m_bindlessLayout;
 	nvrhi::BindingSetHandle m_bindingSet;

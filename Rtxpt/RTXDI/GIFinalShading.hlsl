@@ -170,7 +170,7 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
         }
         else
         {
-            u_Output[pixelPosition] += float4(diffuseContribution + specularContribution, 0);
+            u_OutputColor[pixelPosition] += float4(diffuseContribution + specularContribution, 0);
         }
     }
 }

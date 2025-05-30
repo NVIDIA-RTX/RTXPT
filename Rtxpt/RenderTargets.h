@@ -17,7 +17,7 @@
 #include <memory>
 #include <donut/render/GBuffer.h>
 
-#include "PathTracer/Config.h"
+#include "Shaders/PathTracer/Config.h"
 
 namespace donut::engine
 {
@@ -33,6 +33,7 @@ class RenderTargets// : public donut::render::GBufferRenderTargets
 public:
     nvrhi::TextureHandle AccumulatedRadiance;   // used only in non-realtime mode
     nvrhi::TextureHandle LdrColor;              // final, post-tonemapped color
+    nvrhi::TextureHandle LdrColorScratch;       // used for ping-ponging post-process stuff vs LdrColor
     nvrhi::TextureHandle OutputColor;           // raw path tracing output goes here (in both realtime and non-realtime modes); this can be input to TAA/DLSS
     nvrhi::TextureHandle ProcessedOutputColor;  // for when post-processing OutputColor (i.e. TAA) (previously ResolvedColor); this is the output of TAA/DLSS in full res, but before tonemapping and without ImGUI
     nvrhi::TextureHandle TemporalFeedback1;     // used by TAA
@@ -77,7 +78,8 @@ public:
     donut::math::uint2 m_renderSize;// size of render targets pre-DLSS
     donut::math::uint2 m_displaySize; // size of render targets post-DLSS
 
-    // in theory we shouldn't need this but it seems to still be used by tonemapper
+    // Framebuffers are used by the bloom and tone mapping passes
+    std::shared_ptr<donut::engine::FramebufferFactory> ProcessedOutputFramebuffer;
     std::shared_ptr<donut::engine::FramebufferFactory> LdrFramebuffer;
 
     void Init(nvrhi::IDevice* device, donut::math::uint2 renderSize, donut::math::uint2 displaySize, bool enableMotionVectors, bool useReverseProjection, int backbufferCount);// override;

@@ -83,8 +83,8 @@ donut_compile_shaders(
     CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/Nrd.cfg
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Include
     FOLDER "NRD"
-    DXIL ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/nrd/dxil
-    SPIRV_DXC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/nrd/spirv
+    DXIL ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/nrd/dxil
+    SPIRV_DXC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/nrd/spirv
     CFLAGS "-WX -O3 -enable-16bit-types -all_resources_bound"
     INCLUDES ${CMAKE_BINARY_DIR}/_deps/mathlib-src ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Include ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Resources
 )
@@ -115,8 +115,8 @@ donut_compile_shaders(
     CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/Omm.cfg
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Omm/libraries/omm-lib/include
     FOLDER "Opacity Micro-Map SDK"
-    DXIL ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/omm/dxil
-    SPIRV_DXC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/omm/spirv
+    DXIL ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/omm/dxil
+    SPIRV_DXC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/omm/spirv
 )
 
 ##########################################################################

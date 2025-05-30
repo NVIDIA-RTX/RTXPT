@@ -12,7 +12,7 @@
 
 #include <string>
 
-#include "PathTracer/Config.h"
+#include "Shaders/PathTracer/Config.h"
 
 class Sample;
 struct SampleUIData;

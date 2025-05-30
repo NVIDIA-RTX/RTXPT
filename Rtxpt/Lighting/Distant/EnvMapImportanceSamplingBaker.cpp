@@ -76,6 +76,7 @@ void EnvMapImportanceSamplingBaker::CreateRenderPasses()
             nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
             nvrhi::BindingLayoutItem::Texture_SRV(0),
             nvrhi::BindingLayoutItem::Texture_UAV(0),
+            nvrhi::BindingLayoutItem::Texture_UAV(1),
             nvrhi::BindingLayoutItem::Sampler(0),
             nvrhi::BindingLayoutItem::Sampler(1)
         };
@@ -165,12 +166,17 @@ void EnvMapImportanceSamplingBaker::CreateImportanceMap()
     texDesc.mipLevels = mips;
     texDesc.isRenderTarget = true;
     texDesc.isUAV = true;
-    texDesc.debugName = "ImportanceMap";
+    texDesc.debugName = "EnvImportanceMap";
     texDesc.setInitialState(nvrhi::ResourceStates::UnorderedAccess);
     texDesc.keepInitialState = true;
     m_importanceMapTexture = m_device->createTexture(texDesc);
 
+    texDesc.format = nvrhi::Format::RGBA16_FLOAT;
+    texDesc.debugName = "EnvRadianceMap";
+    m_radianceMapTexture = m_device->createTexture(texDesc);
+
     m_MIPMapPass = std::make_unique<donut::render::MipMapGenPass>(m_device, m_shaderFactory, m_importanceMapTexture, donut::render::MipMapGenPass::MODE_COLOR);
+    m_MIPMapPassRad = std::make_unique<donut::render::MipMapGenPass>(m_device, m_shaderFactory, m_radianceMapTexture, donut::render::MipMapGenPass::MODE_COLOR);
 }
 
 void EnvMapImportanceSamplingBaker::FillBakerConsts(EnvMapImportanceSamplingBakerConstants & constants, nvrhi::TextureHandle sourceCubemap, int sampleIndex)
@@ -204,6 +210,7 @@ void EnvMapImportanceSamplingBaker::PreUpdate(nvrhi::TextureHandle sourceCubemap
             nvrhi::BindingSetItem::ConstantBuffer(0, m_builderConstants),
             nvrhi::BindingSetItem::Texture_SRV(0, sourceCubemap),
             nvrhi::BindingSetItem::Texture_UAV(0, m_importanceMapTexture),
+            nvrhi::BindingSetItem::Texture_UAV(1, m_radianceMapTexture),
             nvrhi::BindingSetItem::Sampler(0, m_pointClampSampler),
             nvrhi::BindingSetItem::Sampler(1, m_linearWrapSampler),
         };
@@ -232,6 +239,7 @@ void EnvMapImportanceSamplingBaker::GenerateImportanceMap(nvrhi::CommandListHand
     {
         //RAII_SCOPE(commandList->beginMarker("GenMIPs");, commandList->endMarker(); );
         m_MIPMapPass->Dispatch(commandList);
+        m_MIPMapPassRad->Dispatch(commandList);
     }
 
     commandList->setTextureState(m_importanceMapTexture, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);

@@ -57,7 +57,7 @@ namespace bvh
             triangles.vertexStride = sizeof(donut::math::float3);
             triangles.vertexCount = geometry->numVertices;
 
-            MaterialPT & materialPT = *MaterialPT::FromDonut(geometry->material);
+            PTMaterial & materialPT = *PTMaterial::FromDonut(geometry->material);
 
             if (cfg.excludeTransmissive &&
                 geometry->material->domain == donut::engine::MaterialDomain::Transmissive)

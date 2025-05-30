@@ -39,7 +39,7 @@ PrepareLightsPass::PrepareLightsPass(
     nvrhi::IDevice* device, 
     std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, 
     std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses,
-    std::shared_ptr<donut::engine::ExtendedScene> scene,
+    std::shared_ptr<ExtendedScene> scene,
     std::shared_ptr<MaterialsBaker> materialsBaker,
     std::shared_ptr<OmmBaker> ommBaker,
 
@@ -93,7 +93,7 @@ PrepareLightsPass::PrepareLightsPass(
 }
 
 
-void PrepareLightsPass::SetScene(std::shared_ptr<donut::engine::ExtendedScene> scene,
+void PrepareLightsPass::SetScene(std::shared_ptr<ExtendedScene> scene,
     std::shared_ptr<EnvMapBaker> environmentMap, EnvMapSceneParams envMapSceneParams)
 {
     m_Scene = scene;
@@ -128,7 +128,7 @@ void PrepareLightsPass::CreateBindingSet(RtxdiResources& resources, const Render
         nvrhi::BindingSetItem::StructuredBuffer_SRV(4, m_ommBaker->GetGeometryDebugBuffer()),
         nvrhi::BindingSetItem::StructuredBuffer_SRV(5, m_materialsBaker->GetMaterialDataBuffer()),
         nvrhi::BindingSetItem::Texture_SRV(6, m_EnvironmentMap ? m_EnvironmentMap->GetEnvMapCube() : m_commonPasses->m_BlackCubeMapArray),
-        nvrhi::BindingSetItem::Texture_SRV(7, m_EnvironmentMap ? m_EnvironmentMap->GetImportanceSampling()->GetImportanceMap() : m_commonPasses->m_BlackTexture),
+        nvrhi::BindingSetItem::Texture_SRV(7, m_EnvironmentMap ? m_EnvironmentMap->GetImportanceSampling()->GetImportanceMapOnly() : m_commonPasses->m_BlackTexture),
         nvrhi::BindingSetItem::StructuredBuffer_SRV(8, resources.PrimitiveLightBuffer),
         nvrhi::BindingSetItem::Texture_UAV(50, m_shaderDebug->GetDebugVizTexture()), // TODO: move to shader debug uav
 
@@ -158,7 +158,7 @@ void PrepareLightsPass::CountLightsInScene(uint32_t& numEmissiveMeshes, uint32_t
     {
         for (const auto& geometry : instance->GetMesh()->geometries)
         {
-            MaterialPT & materialPT = *MaterialPT::FromDonut(geometry->material);
+            PTMaterial & materialPT = *PTMaterial::FromDonut(geometry->material);
             if (materialPT.IsEmissive())
             {
                 numEmissiveMeshes += 1;
@@ -403,7 +403,7 @@ RTXDI_LightBufferParameters PrepareLightsPass::Process(nvrhi::ICommandList* comm
             nvrhi::hash_combine(instanceHash, instance.get());
             nvrhi::hash_combine(instanceHash, geometryIndex);
 
-            MaterialPT & materialPT = *MaterialPT::FromDonut(geometry->material);
+            PTMaterial & materialPT = *PTMaterial::FromDonut(geometry->material);
             if (!materialPT.IsEmissive())
             {
                 // remove the info about this instance, just in case it was emissive and now it's not
