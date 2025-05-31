@@ -19,6 +19,7 @@
 
 #include <filesystem>
 
+#include "../../SampleCommon.h"
 
 using namespace donut::math;
 
@@ -54,8 +55,7 @@ public:
     };
 
     constexpr static uint           c_MaxDirLights  = EMB_MAXDIRLIGHTS;    // Can't have any more than this number of directional lights baked into cubemap, sorry.
-    constexpr static const char *   c_ProcSkyName   = "==PROCEDURAL_SKY==";
-    constexpr static const char *   c_SceneDefault  = "==SCENE_DEFAULT==";
+    
 
 public:
     EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses );
@@ -67,7 +67,7 @@ public:
 
     void                            PreUpdate( nvrhi::ICommandList* commandList, std::string envMapBackgroundPath );    // use to update to figure out GetTargetCubeResolution() default cubemap resolution and needed before Update; Ignore return if not needed.
     // Returns 'true' if contents changed; note: directionalLights must be transformed to Environment map local space. 
-    bool                            Update( nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount );
+    bool                            Update( nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate );
 
     nvrhi::TextureHandle            GetEnvMapCube() const           { return (m_outputIsCompressed)?(m_cubemapBC6H):(m_cubemap); }
     nvrhi::SamplerHandle            GetEnvMapCubeSampler() const    { return m_linearSampler; }
@@ -76,7 +76,9 @@ public:
 
     bool                            DebugGUI(float indent);
 
-    bool                            IsProcedural() const            { return m_dbgOverrideSource == std::string(c_ProcSkyName) || m_loadedSourceBackgroundPath == std::string(c_ProcSkyName); }
+    bool                            IsProcedural() const            { return IsProceduralSky( m_loadedSourceBackgroundPath.c_str() ); }
+    const std::shared_ptr<SampleProceduralSky> &
+                                    GetProceduralSky() const        { return m_proceduralSky; }
 
     void                            SetTargetCubeResolution(uint res)   { m_targetResolution = res; }
     int                             GetTargetCubeResolution() const;
@@ -153,9 +155,6 @@ private:
     std::shared_ptr<SampleProceduralSky>
                                     m_proceduralSky;
     bool                            m_dbgForceDynamic = false;
-    std::filesystem::path           m_dbgLocalMediaFolder;
-    std::vector<std::filesystem::path> m_dbgLocalMediaEnvironmentMaps;
-    std::string                     m_dbgOverrideSource = c_SceneDefault;
 
     std::string                     m_dbgSaveBaked = "";
 

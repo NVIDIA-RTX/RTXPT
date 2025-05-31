@@ -26,13 +26,11 @@ using namespace donut::engine;
 
 std::filesystem::path GetLocalPath(std::string subfolder);  // defined in Sample.cpp
 
-extern const char* g_assetsFolder;
-
 SampleProceduralSky::SampleProceduralSky( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, nvrhi::ICommandList* commandList )
     : m_device(device)
     , m_textureCache(textureCache)
 {
-    auto path = GetLocalPath(g_assetsFolder);
+    auto path = GetLocalPath(c_AssetsFolder);
 
     m_transmittanceTexture  = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/transmittance_earth.dds", false, commonPasses.get(), commandList);
     m_scatterringTexture    = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/inscatter_earth.dds", false, commonPasses.get(), commandList);
@@ -61,7 +59,13 @@ nvrhi::TextureHandle SampleProceduralSky::GetIrradianceTexture() const { return 
 nvrhi::TextureHandle SampleProceduralSky::GetCloudsTexture() const { return m_cloudsTexture->texture; }
 nvrhi::TextureHandle SampleProceduralSky::GetNoiseTexture() const { return m_noiseTexture->texture; }
 
-bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & outConstants )
+// Time independent lerp function. The bigger the lerpRate, the faster the lerp! (based on continuously compounded interest rate I think)
+inline float TimeIndependentLerpF(float deltaTime, float lerpRate)
+{
+    return 1.0f - expf(-fabsf(deltaTime * lerpRate));
+}
+
+bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & outConstants, const std::string & presetType, bool forceInstantUpdate )
 {
     memset(&outConstants, 0, sizeof(outConstants));
 
@@ -72,11 +76,11 @@ bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & out
 
     outConstants.CloudsTime = cloudsTime;
 
-    outConstants.GroundAlbedo       = 0.3f, 0.15f, 0.14f;
-    outConstants.SunAngularRadius   = 0.00930609557f;    // avg angular radius of 0.5332 degrees
+    outConstants.GroundAlbedo           = 0.3f, 0.15f, 0.14f;
+    outConstants.SunAngularDiameter     = m_sunAngularDiameterDeg / 180.0f * PI_f; // avg angular diameter of 0.5332 degrees
 
     outConstants.SkyParams.StarIrradiance                   = float3(1.47399998f, 1.85039997f, 1.91198003f) * m_sunBrightness;
-    outConstants.SkyParams.StarAngularRadius                = outConstants.SunAngularRadius;
+    outConstants.SkyParams.StarAngularDiameter               = outConstants.SunAngularDiameter;
     outConstants.SkyParams.RayleightScatteringRGB           = float3(0.00580233941f, 0.0135577619f, 0.0331000052f);
     outConstants.SkyParams.PlanetSurfaceRadius              = 6360.00000f;
     outConstants.SkyParams.MieScatteringRGB                 = float3(0.00149850000f, 0.00149850000f, 0.00149850000f);
@@ -86,9 +90,7 @@ bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & out
     outConstants.SkyParams.AtmosphereHeight                 = 60.0f;
     outConstants.SkyParams.reserved                         = 0.0f;
 
-    outConstants.sun_tan_half_angle = tan(outConstants.SunAngularRadius * 0.5f);
-    outConstants.sun_cos_half_angle = cos(outConstants.SunAngularRadius * 0.5f);
-    outConstants.sun_solid_angle    = 2 * PI_f * (float)(1.0 - cos(0.5 * outConstants.SunAngularRadius)); // use double for precision
+    outConstants.sun_solid_angle    = 2 * PI_f * (float)(1.0 - cos(0.5 * outConstants.SunAngularDiameter)); // using double for precision
 
     outConstants.cloud_density_offset = m_cloudDensityOffset;
     outConstants.sky_transmittance  = m_cloudTransmittance;
@@ -100,6 +102,41 @@ bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & out
     // All this needs rework - stars need to rotate too :)
 
     float timeOfTheDay = (float)fmod((sceneTime*m_timeOfDayMovementSpeed) / float(60 * 60 * 24) + m_sunTimeOfDayOffset + 1.0f, 2.0f) - 1.0f;
+
+    if (presetType != c_EnvMapProcSky)
+    {
+        float deltaTime = (float)donut::math::clamp(sceneTime - m_lastSceneTime, 0.0, 0.3);
+
+        float timeOfDayTarget = -FLT_MAX;
+        if (presetType == c_EnvMapProcSky_Morning)
+            timeOfDayTarget = -0.25f;
+        else if (presetType == c_EnvMapProcSky_Midday)
+            timeOfDayTarget = 0.1f;
+        else if (presetType == c_EnvMapProcSky_Evening)
+            timeOfDayTarget = 0.51f;
+        else if (presetType == c_EnvMapProcSky_Dawn)
+            timeOfDayTarget = 0.63f;
+        else if (presetType == c_EnvMapProcSky_PitchBlack)
+        {
+            timeOfDayTarget = 1.0f;
+            outConstants.FinalRadianceMultiplier = 0.0f;
+        }
+        assert( timeOfDayTarget != -FLT_MAX );
+
+        float lerpK = TimeIndependentLerpF(deltaTime, 0.5f);
+
+        if (forceInstantUpdate)
+            lerpK = 1.0f;
+
+        m_timeOfDayL1 = lerp( m_timeOfDayL1, timeOfDayTarget, lerpK );
+        m_timeOfDayL2 = lerp( m_timeOfDayL2, m_timeOfDayL1, lerpK );
+        
+        timeOfTheDay = (abs(timeOfDayTarget-m_timeOfDayL2)<1e-4f)?timeOfDayTarget:m_timeOfDayL2;
+    }
+    else
+    {
+        m_timeOfDayL1 = m_timeOfDayL2 = timeOfTheDay;
+    }
     
     float3 sunDir = normalize( float3( std::cos(timeOfTheDay * PI_f), 0, std::sin(timeOfTheDay * PI_f) ) );
 
@@ -118,19 +155,17 @@ bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & out
 
 void SampleProceduralSky::DebugGUI(float indent)
 {
-    if (ImGui::CollapsingHeader("Procedural Sky", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::TextWrapped("This is a simple procedural sky used to stress test environment map sampling; See https://www.shadertoy.com/view/tdSXzD for the original effect.");
-        RAII_SCOPE( ImGui::Indent( indent );, ImGui::Unindent( indent ); );
-        ImGui::InputFloat("Brightness", &m_brightness); m_brightness = dm::clamp(m_brightness, 0.0f, 32768.0f);
-        ImGui::InputFloat("Sun Brightness", &m_sunBrightness); m_sunBrightness = dm::clamp(m_sunBrightness, 0.0f, 32768.0f);
-        ImGui::InputFloat("Cloud movement speed", &m_cloudsMovementSpeed); m_cloudsMovementSpeed = dm::clamp(m_cloudsMovementSpeed, 0.0f, 10000.0f);
-        ImGui::InputFloat("Sun movement speed", &m_timeOfDayMovementSpeed); m_timeOfDayMovementSpeed = dm::clamp(m_timeOfDayMovementSpeed, 0.0f, 10000.0f);
-        ImGui::SliderFloat("Sun time of day offset", &m_sunTimeOfDayOffset, -1.0f, 1.0f, "%.3f"); m_sunTimeOfDayOffset = dm::clamp(m_sunTimeOfDayOffset, -1.0f, 1.0f);
-        ImGui::SliderFloat("Sun east west rotation", &m_sunEastWestRotation, -180.0f, 180.0f, "%.3f"); m_sunEastWestRotation = dm::clamp(m_sunEastWestRotation, -180.0f, 180.0f);
+    ImGui::TextWrapped("This is a simple example procedural sky used to stress test dynamic environment map sampling.");
+    RAII_SCOPE( ImGui::Indent( indent );, ImGui::Unindent( indent ); );
+    ImGui::InputFloat("Brightness", &m_brightness); m_brightness = dm::clamp(m_brightness, 0.0f, 32768.0f);
+    ImGui::InputFloat("Sun Brightness", &m_sunBrightness); m_sunBrightness = dm::clamp(m_sunBrightness, 0.0f, 32768.0f);
+    ImGui::InputFloat("Cloud movement speed", &m_cloudsMovementSpeed); m_cloudsMovementSpeed = dm::clamp(m_cloudsMovementSpeed, 0.0f, 10000.0f);
+    ImGui::InputFloat("Sun movement speed", &m_timeOfDayMovementSpeed); m_timeOfDayMovementSpeed = dm::clamp(m_timeOfDayMovementSpeed, 0.0f, 10000.0f);
+    ImGui::SliderFloat("Sun time of day offset", &m_sunTimeOfDayOffset, -1.0f, 1.0f, "%.3f"); m_sunTimeOfDayOffset = dm::clamp(m_sunTimeOfDayOffset, -1.0f, 1.0f);
+    ImGui::SliderFloat("Sun east west rotation", &m_sunEastWestRotation, -180.0f, 180.0f, "%.3f"); m_sunEastWestRotation = dm::clamp(m_sunEastWestRotation, -180.0f, 180.0f);
+    ImGui::InputFloat("Sun angular diameter (deg)", &m_sunAngularDiameterDeg ); m_sunAngularDiameterDeg = dm::clamp(m_sunAngularDiameterDeg, 0.01f, 180.0f);
         
-         ImGui::SliderFloat("Cloud density offset", &m_cloudDensityOffset, 0.0f, 1.0f);
-        // ImGui::SliderFloat("Cloud transmittance", &m_cloudTransmittance, 0.0f, 10.0f);
-        // ImGui::SliderFloat("Cloud scattering", &m_cloudScattering, 0.0f, 10.0f );
-    }
+        ImGui::SliderFloat("Cloud density offset", &m_cloudDensityOffset, 0.0f, 1.0f);
+    // ImGui::SliderFloat("Cloud transmittance", &m_cloudTransmittance, 0.0f, 10.0f);
+    // ImGui::SliderFloat("Cloud scattering", &m_cloudScattering, 0.0f, 10.0f );
 }

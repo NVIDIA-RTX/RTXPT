@@ -1,4 +1,4 @@
-# RTX Path Tracing v1.5.1
+# RTX Path Tracing v1.6.0
 
 ![Title](./Docs/r-title.png)
 
@@ -18,25 +18,25 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 * Reference and real-time modes
 * Simple BSDF model that is easy(ish) to extend
 * Simple asset pipeline based on glTF 2.0 (support for a subset of glTF extensions including animation)
-* Basic volumes and nested dielectrics with priority
+* Volumes and nested dielectrics with priority
 * Support for analytic lights (directional, spot, point), emissive triangles and environment map lighting
 * NEE lighting with feedback-based, temporaly adaptive importance sampling
-* Basic path tracing features scuh as: Low-discrepancy sample generator based on [Practical Hash-based Owen Scrambling](https://jcgt.org/published/0009/04/01/paper.pdf); [RayCones](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones) for texture MIP selection, early ray termination and similar 
-* Basic rasterization features such as: Basic TAA, tone mapping, and similar
-* Reference mode 'photo-mode screenshot' with basic [OptiX denoiser](https://developer.nvidia.com/optix-denoiser) integration
+* Path tracing features such as: Low-discrepancy sample generator based on [Practical Hash-based Owen Scrambling](https://jcgt.org/published/0009/04/01/paper.pdf), use of [RayCones](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones) for texture MIP selection, RR early ray termination, firefly filter and similar 
+* Basic post-processing features such as: TAA, tone mapping, bloom and similar
+* Reference mode 'photo-mode screenshot' with simple [OptiX denoiser](https://developer.nvidia.com/optix-denoiser) integration
 * [Shader Execution Reordering](https://developer.nvidia.com/blog/improve-shader-performance-and-in-game-frame-rates-with-shader-execution-reordering/) for significant increase in execution performance
 * [RTXDI](https://github.com/NVIDIA-RTX/RTXDI) integration for ReSTIR DI (light importance sampling) and and ReSTIR GI (indirect lighting)
 * [OMM](https://github.com/NVIDIA-RTX/OMM) integration for fast ray traced alpha testing
 * [NRD](https://github.com/NVIDIA-RTX/NRD) ReLAX and ReBLUR denoiser integration with up to 3-layer path space decomposition
 * [RTXTF](https://github.com/NVIDIA-RTX/RTXTF) integration for Stochastic Texture Filtering
-* [Streamline](https://github.com/NVIDIAGameWorks/Streamline/) integration for DLSS 4.0 (DLSS SR, DLSS AA, DLSS FG & MFG)
+* [Streamline](https://github.com/NVIDIAGameWorks/Streamline/) integration for DLSS 4.0 (DLSS RR, DLSS SR, DLSS AA, DLSS FG & MFG)
 
 
 ## Requirements
 
 - Windows 10 20H1 (version 2004-10.0.19041) or newer
 - DXR Capable GPU (DirectX Raytracing 1.1 API, or higher)
-- GeForce Game Ready Driver 572.70 or newer
+- GeForce Game Ready Driver 576.52 or newer
 - DirectX 12 or Vulkan API
 - CMake v3.14+
 - Visual Studio 2022 (v143 build tools) or later with Windows 10 SDK version 10.0.20348.0 or 10.0.26100.0 or later
@@ -60,7 +60,7 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 | /Assets				| models, textures, scene files  
 | /Docs					| documentation 
 | /External				| external libraries and SDKs, including Donut, Streamline, NRD, RTXDI, and OMM
-| /Tools				| optional command line tools (denoiser, texture compressor, etc)
+| /Support				| optional command line tools (denoiser, texture compressor, etc)
 | /Rtxpt				| **RTX Path Tracing core; Sample.cpp/.h/.hlsl contain entry points**
 | /Rtxpt/PathTracer		| **Core path tracing shaders**
 
@@ -86,9 +86,9 @@ At the moment, only Windows builds are fully supported. We are going to add Linu
 
    In example, if using Visual Studio, open the generated solution `build/RTXPathTracing.sln` and build it.
 
-4. Select and run the `rtxpt` project. Binaries get built to the `bin` folder. Assets/media are loaded from `assets` folder.
+4. Select and run the `Rtxpt` project. Binaries get built to the `bin` folder. Assets/media are loaded from `Assets` folder.
 
-   If making a binary build, the `assets` and `tools` folders can be placed into `bin` next to executable and packed up together (i.e. the sample app will search for both `Assets/` and `../Assets/`).
+   If making a binary build, the `Assets` and `Support` folders can be placed into `bin` next to executable and packed up together (i.e. the sample app will search for both `Assets/` and `../Assets/`).
 
 
 ## Building Vulkan
@@ -99,6 +99,13 @@ Due to interaction with various included libraries, Vulkan support is not enable
  * Disable streamline integration by setting DONUT_WITH_STREAMLINE CMake variable to OFF
  * To run with Vulkan use `--vk` command line parameter
  
+
+ ## DirectX 12 Agility SDK
+ RTX PT optionally integrates [DirectX 12 Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/). If RTXPT_DOWNLOAD_AND_ENABLE_AGILITY_SDK CMake variable is set to TRUE, the version 717-preview will be automatically downloaded via CMake script and required build variables will be set. If different version is required, please set correct RTXPT_D3D_AGILITY_SDK_PATH and RTXPT_D3D_AGILITY_SDK_VERSION.
+
+Version 717-preview enables native DirectX support for [Shader Execution Reordering](https://devblogs.microsoft.com/directx/ser/). For testing this on Nvidia hardware, a preview driver is required and can be downloaded from https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver 
+
+
 
  ## User Interface
 
@@ -134,6 +141,7 @@ Many thanks to the developers of the following open-source libraries or projects
  * DirectX Shader Compiler (https://github.com/microsoft/DirectXShaderCompiler)
  * cgltf, Single-file glTF 2.0 loader (https://github.com/jkuhlmann/cgltf)
  * Krzysztof Narkowicz's Real-time BC6H compression on GPU (https://github.com/knarkowicz/GPURealTimeBC6H)
+ * okdshin's https://github.com/okdshin/PicoSHA2
  * ...and any we might have forgotten (please let us know) :)
 
 ## Citation

@@ -12,11 +12,11 @@
 #define POLYMORPHIC_LIGHT_RTXDI_HLSLI
 
 #include "HelperFunctions.hlsli"
-#include "../PathTracer/Utils/Utils.hlsli"
-#include "../PathTracer/Lighting/LightShaping.hlsli"
-#include "../PathTracer/Utils/ColorHelpers.hlsli"
-#include "../PathTracer/Lighting/EnvMap.hlsli"
-#include "../PathTracer/PathTracerHelpers.hlsli"
+#include "../Shaders/PathTracer/Utils/Utils.hlsli"
+#include "../Shaders/PathTracer/Lighting/LightShaping.hlsli"
+#include "../Shaders/PathTracer/Utils/ColorHelpers.hlsli"
+#include "../Shaders/PathTracer/Lighting/EnvMap.hlsli"
+#include "../Shaders/PathTracer/PathTracerHelpers.hlsli"
 #include <Rtxdi/Utils/Checkerboard.hlsli>
 
 // This is a adapter for PolymorphicLight, enabling features as needed by RTXDI
@@ -30,7 +30,7 @@
 #define POLYLIGHT_QT_ENV_ENABLE         0   // environment map quad tree in equal area octahedral mapping
 #define POLYLIGHT_CONFIGURED
 
-#include "../PathTracer/Lighting/PolymorphicLight.hlsli"
+#include "../Shaders/PathTracer/Lighting/PolymorphicLight.hlsli"
 
 
 PolymorphicLightSample EnvironmentLight::CalcSample(in const float2 random, in const float3 viewerPosition)

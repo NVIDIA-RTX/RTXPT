@@ -23,7 +23,7 @@
 using namespace donut::math;
 
 #include "ToneMapper/ToneMappingPasses.h"
-#include "PathTracer/PathTracerDebug.hlsli"
+#include "Shaders/PathTracer/PathTracerDebug.hlsli"
 
 #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
 #include "ImNodesEz.h"
@@ -100,6 +100,20 @@ enum class StfMagnificationMethod
 
 struct SampleUIData
 {
+    bool                                ActualUseStablePlanes() const { return UseStablePlanes || RealtimeMode || ((AllowRTXDIInReferenceMode) && (UseReSTIRDI || UseReSTIRGI)); }
+    //bool                                ActualSkipIndirectNoisePlane0() const       { return StablePlanesSkipIndirectNoisePlane0 && StablePlanesActiveCount > 2; }
+
+    bool                                ActualUseRTXDIPasses() const { return (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRDI || UseReSTIRGI); }
+    bool                                ActualUseReSTIRDI() const { return UseNEE && (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRDI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
+    bool                                ActualUseReSTIRGI() const { return (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRGI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
+    uint                                ActualSamplesPerPixel() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSamplesPerPixel : 1u; }
+    bool                                ActualUseStandaloneDenoiser() const { return (RealtimeMode && RealtimeAA < 3) ? StandaloneDenoiser : false; }
+
+#if DONUT_WITH_STREAMLINE
+    int                                 ActualReflexMode() const { return (RealtimeMode && IsReflexSupported) ? (ReflexMode) : (SI::ReflexMode::eOff); }
+    SI::DLSSGMode                       ActualDLSSGMode() const { return (RealtimeMode && IsDLSSGSupported) ? (DLSSGMode) : (SI::DLSSGMode::eOff); }
+#endif
+
     bool                                ShowUI = true;
     int                                 FPSLimiter = 0; // 0 - no limit, otherwise limit fps to FPSLimiter and fix scene update deltaTime to 1./FPSLimiter
     bool                                RenderWhenOutOfFocus = false; // if window is out of focus window render loop is paused
@@ -133,7 +147,7 @@ struct SampleUIData
     bool                                NEEAT_GlobalTemporalFeedbackEnabled     = true;
     float                               NEEAT_GlobalTemporalFeedbackRatio       = 0.65f;
     bool                                NEEAT_NarrowTemporalFeedbackEnabled     = true;
-    float                               NEEAT_NarrowTemporalFeedbackRatio       = 0.5f;
+    float                               NEEAT_NarrowTemporalFeedbackRatio       = 0.65f;
     float                               NEEAT_MIS_Boost                         = 1.0f;
     float                               NEEAT_Distant_vs_Local_Importance       = 1.0f;
     int                                 NEEBoostSamplingOnDominantPlane = 0;    // Boost light sampling only on the dominant denoising surface
@@ -155,6 +169,7 @@ struct SampleUIData
     float                               CameraAperture = 0.0f;
     float                               CameraFocalDistance = 10000.0f;
     float                               CameraMoveSpeed = 1.0f;
+    float                               CameraAntiRRSleepJitter = 0.0f;
     float                               TexLODBias = -1.0f;                 // as small as possible without reducing performance!
     bool                                SuppressPrimaryNEE = false;   
 #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
@@ -171,7 +186,7 @@ struct SampleUIData
     bool                                ShowDebugLines = false;
     donut::math::uint2                  DebugPixel = { 0, 0 };
     donut::math::uint2                  MousePos = { 0, 0 };
-    float                               DebugLineScale = 0.2f;
+    float                               DebugLineScale = 0.05f;
 
     bool                                EnableShaderDebug = true;   // see ShaderDebug.hlsli/.h/.cpp
 
@@ -189,7 +204,7 @@ struct SampleUIData
     bool                                ReferenceFireflyFilterEnabled = true;
     float                               ReferenceFireflyFilterThreshold = 2.5f;
     bool                                RealtimeFireflyFilterEnabled = true;
-    float                               RealtimeFireflyFilterThreshold = 0.05f;
+    float                               RealtimeFireflyFilterThreshold = 0.1f;
 
     float                               DenoiserRadianceClampK = 8.0f;
 
@@ -197,8 +212,12 @@ struct SampleUIData
 
     int                                 EnvironmentMapDiffuseSampleMIPLevel = 2;
 
-    bool                                DXRHitObjectExtension = true;
-    bool                                ShaderExecutionReordering = true;
+    bool                                NVAPIHitObjectExtension = false;    // initialized in constructor
+    bool                                NVAPIReorderThreads     = true;
+
+    bool                                DXHitObjectExtension    = false;
+    bool                                DXMaybeReorderThreads   = true;
+
     AccelerationStructureUIData         AS;
 
     RtxdiUserSettings                   RTXDI;
@@ -241,9 +260,10 @@ struct SampleUIData
 
     // DLSS-RR specific parameters
     bool                                IsDLSSRRSupported = false;
-    float                               DLSSRRMicroJitter = 0.1f;
+    SI::DLSSRRPreset                    DLSRRPreset = SI::DLSSRRPreset::ePresetE;
+#endif // DONUT_WITH_STREAMLINE
 
-#endif
+    float                               DLSSRRMicroJitter = 0.1f;
 
     // See UI tooltips for more info (or search code for ImGui::SetTooltip()!)
     int                                 StablePlanesActiveCount             = cStablePlaneCount;
@@ -259,20 +279,6 @@ struct SampleUIData
 
     std::shared_ptr<std::vector<TogglableNode>> TogglableNodes = nullptr;
 
-    bool                                ActualUseStablePlanes() const               { return UseStablePlanes || RealtimeMode || ((AllowRTXDIInReferenceMode) && (UseReSTIRDI || UseReSTIRGI)); }
-    //bool                                ActualSkipIndirectNoisePlane0() const       { return StablePlanesSkipIndirectNoisePlane0 && StablePlanesActiveCount > 2; }
-
-    bool                                ActualUseRTXDIPasses() const                { return (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRDI || UseReSTIRGI); }
-    bool                                ActualUseReSTIRDI() const                   { return UseNEE && (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRDI) && (RealtimeAA<3 || !DisableReSTIRsWithDLSSRR); }
-    bool                                ActualUseReSTIRGI() const                   { return (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRGI) && (RealtimeAA<3 || !DisableReSTIRsWithDLSSRR); }
-    uint                                ActualSamplesPerPixel() const               { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI()))?RealtimeSamplesPerPixel:1u; }
-    bool                                ActualUseStandaloneDenoiser() const         { return (RealtimeMode && RealtimeAA<3)?StandaloneDenoiser:false; }
-
-#if DONUT_WITH_STREAMLINE
-    int                                 ActualReflexMode() const                    { return (RealtimeMode && IsReflexSupported)?(ReflexMode):(SI::ReflexMode::eOff); }
-    SI::DLSSGMode                       ActualDLSSGMode() const                     { return (RealtimeMode && IsDLSSGSupported)?(DLSSGMode):(SI::DLSSGMode::eOff); }
-#endif
-
     // Denoiser
     bool                                NRDModeChanged = false;
     NrdConfig::DenoiserMethod           NRDMethod = NrdConfig::DenoiserMethod::RELAX;
@@ -282,6 +288,14 @@ struct SampleUIData
     nrd::RelaxSettings                  RelaxSettings;
     nrd::ReblurSettings                 ReblurSettings;
     //nrd::ReferenceSettings              NRDReferenceSettings;
+
+    bool                                PostProcessTestPassHDR = false;
+    bool                                PostProcessEdgeDetection = false;
+    float                               PostProcessEdgeDetectionThreshold = 0.1f;
+
+    bool                                EnableBloom = true;
+    float                               BloomRadius = 8.0f;
+    float                               BloomIntensity = 0.008f;
 };
 
 extern SampleUIData g_sampleUIData;
@@ -289,7 +303,7 @@ extern SampleUIData g_sampleUIData;
 class SampleUI : public donut::app::ImGui_Renderer
 {
 public:
-    SampleUI(donut::app::DeviceManager* deviceManager, class Sample & app, SampleUIData& ui, bool SERSupported);
+    SampleUI(donut::app::DeviceManager* deviceManager, class Sample & app, SampleUIData& ui, bool NVAPI_SERSupported);
     virtual ~SampleUI();
 protected:
     virtual void buildUI(void) override;
@@ -318,7 +332,7 @@ private:
     SampleUIData& m_ui;
     nvrhi::CommandListHandle m_commandList;
 
-    const bool m_SERSupported;
+    const bool m_NVAPI_SERSupported;
 
 #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
     ImNodes::Ez::Context* m_ImNodesContext;

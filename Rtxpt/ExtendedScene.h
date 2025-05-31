@@ -13,82 +13,95 @@
 #include <donut/engine/Scene.h>
 #include <string.h>
 
-namespace donut::engine
+constexpr int LightType_Environment = 1000;
+
+class EnvironmentLight : public donut::engine::Light
 {
-    constexpr int LightType_Environment = 1000;
+public:
+    dm::float3 radianceScale = 1.f;
+    int textureIndex = -1;
+    float rotation = 0.f;
+    std::string path;
 
-    class EnvironmentLight : public donut::engine::Light
-    {
-    public:
-        dm::float3 radianceScale = 1.f;
-        int textureIndex = -1;
-        float rotation = 0.f;
-        std::string path;
+    void Load(const Json::Value& node) override;
+    [[nodiscard]] int GetLightType() const override { return LightType_Environment; }
+    [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
+    void FillLightConstants(LightConstants& lightConstants) const override;
+    bool SetProperty(const std::string& name, const dm::float4& value) override { assert( false ); return false; }    // not yet implemented, never needed
+};
 
-        void Load(const Json::Value& node) override;
-        [[nodiscard]] int GetLightType() const override { return LightType_Environment; }
-        [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
-        void FillLightConstants(LightConstants& lightConstants) const override;
-        bool SetProperty(const std::string& name, const dm::float4& value) override { assert( false ); return false; }    // not yet implemented, never needed
-    };
+class PerspectiveCameraEx : public donut::engine::PerspectiveCamera
+{
+public:
+    std::optional<bool>     enableAutoExposure;
+    std::optional<float>    exposureCompensation;
+    std::optional<float>    exposureValue;
+    std::optional<float>    exposureValueMin;
+    std::optional<float>    exposureValueMax;
 
-    class PerspectiveCameraEx : public PerspectiveCamera
-    {
-    public:
-        std::optional<bool>     enableAutoExposure;
-        std::optional<float>    exposureCompensation;
-        std::optional<float>    exposureValue;
-        std::optional<float>    exposureValueMin;
-        std::optional<float>    exposureValueMax;
+    [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
+    void Load(const Json::Value& node) override;
+    bool SetProperty(const std::string& name, const dm::float4& value) override;
+};
 
-        [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
-        void Load(const Json::Value& node) override;
-        bool SetProperty(const std::string& name, const dm::float4& value) override;
-    };
+// used to setup initial sample scene settings
+class SampleSettings : public donut::engine::SceneGraphLeaf
+{
+public:
+    std::optional<bool>         realtimeMode;
+    std::optional<bool>         enableAnimations;
+    std::optional<bool>         enableReSTIRDI;
+    std::optional<bool>         enableReSTIRGI;
+    std::optional<int>          startingCamera;
+    std::optional<float>        realtimeFireflyFilter;
+    std::optional<int>          maxBounces;
+    std::optional<int>          realtimeMaxDiffuseBounces;
+    std::optional<int>          referenceMaxDiffuseBounces;
+    std::optional<float>        textureMIPBias;
 
-    // used to setup initial sample scene settings
-    class SampleSettings : public SceneGraphLeaf
-    {
-    public:
-        std::optional<bool>         realtimeMode;
-        std::optional<bool>         enableAnimations;
-        std::optional<bool>         enableReSTIRDI;
-        std::optional<bool>         enableReSTIRGI;
-        std::optional<int>          startingCamera;
-        std::optional<float>        realtimeFireflyFilter;
-        std::optional<int>          maxBounces;
-        std::optional<int>          realtimeMaxDiffuseBounces;
-        std::optional<int>          referenceMaxDiffuseBounces;
-        std::optional<float>        textureMIPBias;
+    [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
+    virtual void Load(const Json::Value& node) override;
+};
 
-        [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
-        void Load(const Json::Value& node) override;
-    };
+// used to setup initial sample game settings (if any)
+class GameSettings : public donut::engine::SceneGraphLeaf
+{
+    std::string                 jsonData;
 
-    class ExtendedSceneTypeFactory : public donut::engine::SceneTypeFactory
-    {
-    public:
-        std::shared_ptr<donut::engine::SceneGraphLeaf>  CreateLeaf(const std::string& type) override;
-        std::shared_ptr<donut::engine::Material>        CreateMaterial() override;
-        std::shared_ptr<donut::engine::MeshInfo>        CreateMesh() override;
-        std::shared_ptr<donut::engine::MeshGeometry>    CreateMeshGeometry() override;
-    };
+    virtual [[nodiscard]] std::shared_ptr<SceneGraphLeaf> Clone() override;
+    virtual void                Load(const Json::Value& node) override;
 
-    class ExtendedScene : public donut::engine::Scene
-    {
-    private:
-        std::shared_ptr<SampleSettings> m_loadedSettings = nullptr;
+public:
+    const std::string           GetJsonData() const { return jsonData; }
+};
 
-    public:
-        using Scene::Scene;
+class ExtendedSceneTypeFactory : public donut::engine::SceneTypeFactory
+{
+public:
+    std::shared_ptr<donut::engine::SceneGraphLeaf>  CreateLeaf(const std::string& type) override;
+    std::shared_ptr<donut::engine::Material>        CreateMaterial() override;
+    std::shared_ptr<donut::engine::MeshInfo>        CreateMesh() override;
+    std::shared_ptr<donut::engine::MeshGeometry>    CreateMeshGeometry() override;
+};
 
-        bool LoadWithExecutor(const std::filesystem::path& jsonFileName, tf::Executor* executor) override;
-        std::shared_ptr<SampleSettings> GetSampleSettingsNode() const { return m_loadedSettings; }
+class ExtendedScene : public donut::engine::Scene
+{
+private:
+    std::shared_ptr<SampleSettings> m_loadedSettings = nullptr;
+    std::shared_ptr<GameSettings>   m_loadedGameSettings = nullptr;
 
-    private:
-        // maybe switch to SceneGraphWalker?
-        void ProcessNodesRecursive(donut::engine::SceneGraphNode* node);
-    };
+public:
+    using Scene::Scene;
 
-    std::shared_ptr<EnvironmentLight> FindEnvironmentLight(std::vector <std::shared_ptr<Light>> lights);
-}
+    bool LoadWithExecutor(const std::filesystem::path& jsonFileName, tf::Executor* executor) override;
+    std::shared_ptr<SampleSettings> GetSampleSettingsNode() const   { return m_loadedSettings; }
+    std::shared_ptr<GameSettings>   GetGameSettingsNode() const     { return m_loadedGameSettings; }
+
+    const std::vector<donut::engine::SceneImportResult> & GetModels() const               { return m_Models; }
+
+private:
+    // maybe switch to SceneGraphWalker?
+    void ProcessNodesRecursive(donut::engine::SceneGraphNode* node);
+};
+
+std::shared_ptr<EnvironmentLight> FindEnvironmentLight(std::vector <std::shared_ptr<donut::engine::Light>> lights);

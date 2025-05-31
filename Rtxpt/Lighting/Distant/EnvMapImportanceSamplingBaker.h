@@ -21,7 +21,7 @@
 
 using namespace donut::math;
 
-#include "../../PathTracer/Lighting/LightingTypes.h"
+#include "../../Shaders/PathTracer/Lighting/LightingTypes.h"
 
 #include "EnvMapImportanceSamplingBaker.hlsl"
 
@@ -61,7 +61,8 @@ public:
 
     int                             GetImportanceMapResolution();
     int                             GetImportanceMapMIPLevels();
-    nvrhi::TextureHandle            GetImportanceMap() const { return m_importanceMapTexture; }
+    nvrhi::TextureHandle            GetImportanceMapOnly() const        { return m_importanceMapTexture; }
+    nvrhi::TextureHandle            GetRadianceAndImportanceMap() const { return m_radianceMapTexture; }
     
     // TODO: this will be obsolete and will be removed
     void                            ExecutePresampling(nvrhi::CommandListHandle commandList, nvrhi::TextureHandle sourceCubemap, int sampleIndex);
@@ -95,11 +96,13 @@ private:
 
     // MIP hierarchy needed for MIP descent importance sampling approach (always needed)
     nvrhi::TextureHandle            m_importanceMapTexture;
+    nvrhi::TextureHandle            m_radianceMapTexture;
     nvrhi::ShaderHandle             m_importanceMapComputeShader;
     nvrhi::BindingLayoutHandle      m_importanceMapBindingLayout;
     nvrhi::ComputePipelineHandle    m_importanceMapPipeline;
     nvrhi::BindingSetHandle         m_importanceMapBindingSet;
     std::shared_ptr<donut::render::MipMapGenPass> m_MIPMapPass;
+    std::shared_ptr<donut::render::MipMapGenPass> m_MIPMapPassRad;  // for m_radianceMapTexture - should be combined with importance map mip gen
 
 #if 0
     // Pre-sampling approach (faster for path tracing, but limited)

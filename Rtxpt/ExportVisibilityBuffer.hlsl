@@ -10,10 +10,10 @@
 
 #define NON_PATH_TRACING_PASS 1
 
-#include "Bindings/ShaderResourceBindings.hlsli"
+#include "Shaders/Bindings/ShaderResourceBindings.hlsli"
 
-#include "PathTracerBridgeDonut.hlsli"
-#include "PathTracer/PathTracer.hlsli"
+#include "Shaders/PathTracerBridgeDonut.hlsli"
+#include "Shaders/PathTracer/PathTracer.hlsli"
 #include "RTXDI/SurfaceData.hlsli"
 
 [numthreads(NUM_COMPUTE_THREADS_PER_DIM, NUM_COMPUTE_THREADS_PER_DIM, 1)]
@@ -29,8 +29,8 @@ void main( uint2 dispatchThreadID : SV_DispatchThreadID )
     uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
     uint stableBranchID = stablePlanes.GetBranchID(pixelPos, dominantStablePlaneIndex);
 	StablePlane sp = stablePlanes.LoadStablePlane(pixelPos, dominantStablePlaneIndex);
-    PackedHitInfo packedHitInfo; float3 rayDir; uint vertexIndex; uint SERSortKey; float sceneLength; float3 pathThp; float3 motionVectors;
-    StablePlanesContext::UnpackStablePlane(sp, vertexIndex, packedHitInfo, SERSortKey, rayDir, sceneLength, pathThp, motionVectors);
+    PackedHitInfo packedHitInfo; float3 rayDir; uint vertexIndex; float sceneLength; float3 pathThp; float3 motionVectors;
+    StablePlanesContext::UnpackStablePlane(sp, vertexIndex, packedHitInfo, rayDir, sceneLength, pathThp, motionVectors);
 
     u_MotionVectors[pixelPos]   = float4(motionVectors, 0);
 

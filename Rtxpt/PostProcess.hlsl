@@ -15,10 +15,12 @@
 
 #if defined(STABLE_PLANES_DEBUG_VIZ)
 
-#include "Bindings/ShaderResourceBindings.hlsli"
-#include "PathTracerBridgeDonut.hlsli"
-#include "PathTracer/PathTracer.hlsli"
-#include "PathTracer/Utils/Utils.hlsli"
+#define NON_PATH_TRACING_PASS 1
+
+#include "Shaders/Bindings/ShaderResourceBindings.hlsli"
+#include "Shaders/PathTracerBridgeDonut.hlsli"
+#include "Shaders/PathTracer/PathTracer.hlsli"
+#include "Shaders/PathTracer/Utils/Utils.hlsli"
 
 [numthreads(NUM_COMPUTE_THREADS_PER_DIM, NUM_COMPUTE_THREADS_PER_DIM, 1)]
 void main( uint3 dispatchThreadID : SV_DispatchThreadID )
@@ -33,7 +35,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     const Ray cameraRay = Bridge::computeCameraRay( pixelPos, 0 );
     StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
 
-#if ENABLE_DEBUG_VIZUALISATION
+#if ENABLE_DEBUG_VIZUALISATIONS
     debug.StablePlanesDebugViz(stablePlanes);
 #endif
 }
@@ -44,9 +46,11 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
 #if defined(DENOISER_PREPARE_INPUTS)
 
-#include "Bindings/ShaderResourceBindings.hlsli"
-#include "PathTracerBridgeDonut.hlsli"
-#include "PathTracer/PathTracer.hlsli"
+#define NON_PATH_TRACING_PASS 1
+
+#include "Shaders/Bindings/ShaderResourceBindings.hlsli"
+#include "Shaders/PathTracerBridgeDonut.hlsli"
+#include "Shaders/PathTracer/PathTracer.hlsli"
 #include "NRD/DenoiserNRD.hlsli"
 
 float ComputeNeighbourDisocclusionRelaxation(const StablePlanesContext stablePlanes, const int2 pixelPos, const int2 imageSize, const uint stablePlaneIndex, const float3 rayDirC, const int2 offset)
@@ -112,7 +116,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     if( any(pixelPos >= uint2(g_Const.ptConsts.imageWidth, g_Const.ptConsts.imageHeight) ) )
         return;
 
-    float3 combinedRadiance = u_Output[pixelPos].rgb; // we already have direct (non-noisy, stable) radiance in here
+    float3 combinedRadiance = u_OutputColor[pixelPos].rgb; // we already have direct (non-noisy, stable) radiance in here
 
 #define MIX_STABLE_RADIANCE 1 // stable radiance comes from emitters including sky; it is good to have it as guidance
 #define MIX_BY_THROUGHPUT   1 // mix guide buffers from layers based on layer throughputs
@@ -226,8 +230,9 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     }
 
 #if MIX_STABLE_RADIANCE 
-    diffAlbedo = lerp( diffAlbedo, stableAlbedo, stableAlbedoAvg / (average(diffAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
-    specAlbedo = lerp( specAlbedo, stableAlbedo, stableAlbedoAvg / (average(specAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
+    float3 stableAlbedoGreyMix = lerp(stableAlbedo, 0.5.xxx, 0.2);  // make sure guidance is never 0
+    diffAlbedo = lerp( diffAlbedo, stableAlbedoGreyMix, stableAlbedoAvg / (average(diffAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
+    specAlbedo = lerp( specAlbedo, stableAlbedoGreyMix, stableAlbedoAvg / (average(specAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
 #endif
 
     // must be in sane range
@@ -238,11 +243,18 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         guideNormals /= guideNormalsLength;
 
     // avoid settings both diff and spec albedo guides to 0
-    const float minAlbedo = 0.02;
+    const float minAlbedo = 0.05;
     if (average(diffAlbedo+specAlbedo) < minAlbedo )
         diffAlbedo += minAlbedo;
 
-    u_Output[pixelPos] = float4(combinedRadiance, 1.0);
+    u_OutputColor[pixelPos] = float4(combinedRadiance, 1.0);
+
+#if 0 // remove guide buffers (but not motion vectors and depth!)
+    diffAlbedo = 0.5.xxx;
+    specAlbedo = 0.5.xxx;
+    roughness = 0.5;
+    guideNormals = float3(0, 1, 0);
+#endif
 
     u_RRDiffuseAlbedo[pixelPos]         = float4(diffAlbedo, 1);
     u_RRSpecAlbedo[pixelPos]            = float4(specAlbedo, 1);
@@ -412,9 +424,9 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
 #pragma pack_matrix(row_major)
 #include <donut/shaders/binding_helpers.hlsli>
-#include "SampleConstantBuffer.h"
+#include "Shaders/SampleConstantBuffer.h"
 #include "NRD/DenoiserNRD.hlsli"
-#include "PathTracer/StablePlanes.hlsli"
+#include "Shaders/PathTracer/StablePlanes.hlsli"
 
 ConstantBuffer<SampleConstants>         g_Const             : register(b0);
 VK_PUSH_CONSTANT ConstantBuffer<SampleMiniConstants>     g_MiniConst         : register(b1);
@@ -466,7 +478,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         DenoiserNRD::PostDenoiseProcess(diffBSDFEstimate, specBSDFEstimate, diffRadiance, specRadiance);
     }
 
-#if ENABLE_DEBUG_VIZUALISATION
+#if ENABLE_DEBUG_VIZUALISATIONS
     if (g_Const.debug.debugViewType >= (int)DebugViewType::StablePlaneRelaxedDisocclusion && g_Const.debug.debugViewType <= ((int)DebugViewType::StablePlaneDenoiserValidation))
     {
         bool debugThisPlane = g_Const.debug.debugViewStablePlaneIndex == stablePlaneIndex;
@@ -516,7 +528,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             }
         }
     }
-#endif // #if ENABLE_DEBUG_VIZUALISATION
+#endif // #if ENABLE_DEBUG_VIZUALISATIONS
 
     if (hasSurface)
         u_InputOutput[pixelPos.xy].xyz += (diffRadiance.rgb + specRadiance.rgb);

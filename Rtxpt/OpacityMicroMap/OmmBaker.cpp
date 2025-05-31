@@ -31,7 +31,7 @@ using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
 
-#include "OmmGeometryDebugData.hlsli"
+#include "../Shaders/Misc/OmmGeometryDebugData.hlsli"
 
 OmmBaker::OmmBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::DescriptorTableManager> descriptorTableManager, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, nvrhi::CommandListHandle mainCommandList, bool enabled)
     : m_device(device)
@@ -153,7 +153,7 @@ void OmmBaker::CreateOpacityMicromaps(const std::shared_ptr<donut::engine::Scene
         for (uint32_t i = 0; i < mesh->geometries.size(); ++i)
         {
             const std::shared_ptr<donut::engine::MeshGeometry>& geometry = mesh->geometries[i];
-            std::shared_ptr<MaterialPT> material = MaterialPT::FromDonut(geometry->material);
+            std::shared_ptr<PTMaterial> material = PTMaterial::FromDonut(geometry->material);
             if (material == nullptr)
                 continue;
             if (!(material->EnableBaseTexture && material->BaseTexture.Loaded != nullptr && material->BaseTexture.Loaded->texture != nullptr))
@@ -285,12 +285,20 @@ void OmmBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<do
         WriteGeometryDebugBuffer(commandList);
 }
 
+void OmmBaker::SetGlobalShaderMacros(std::vector<donut::engine::ShaderMacro>& macros)
+{
+    if (m_uiData.DebugView == OpacityMicroMapDebugView::InWorld)
+        macros.push_back( { "OMM_DEBUG_VIEW_IN_WORLD", "1" } );
+    if (m_uiData.DebugView == OpacityMicroMapDebugView::Overlay)
+        macros.push_back( { "OMM_DEBUG_VIEW_OVERLAY", "1" } );
+}
+
 bool OmmBaker::DebugGUI(float indent, const std::shared_ptr<donut::engine::Scene>& scene)
 {
     RAII_SCOPE(ImGui::PushID("OmmBakerDebugGUI"); , ImGui::PopID(); );
     
     bool resetAccumulation = false;
-    #define IMAGE_QUALITY_OPTION(code) do{if (code) resetAccumulation = true;} while(false)
+    #define RESET_ON_CHANGE(code) do{if (code) resetAccumulation = true;} while(false)
     #define UI_SCOPED_INDENT(indent) RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); )
     #define UI_SCOPED_DISABLE(cond) RAII_SCOPE(ImGui::BeginDisabled(cond); , ImGui::EndDisabled(); )
 
@@ -433,33 +441,26 @@ bool OmmBaker::DebugGUI(float indent, const std::shared_ptr<donut::engine::Scene
         {
             UI_SCOPED_INDENT(indent);
 
-            {
-                ImGui::Checkbox("Compute Only", &m_uiData.DesiredState.ComputeOnly);
-            }
+#if ENABLE_DEBUG_VIZUALISATIONS
+            RESET_ON_CHANGE( ImGui::Combo("Debug View", (int*)&m_uiData.DebugView, "Disabled\0InWorld\0Overlay\0\0") );
+#else
+            ImGui::Text("Please enable ENABLE_DEBUG_VIZUALISATIONS for debug viz");
+            m_uiData.DebugView = OpacityMicroMapDebugView::Disabled;
+#endif
 
-            {
-                ImGui::Checkbox("Enable \"Level Line Intersection\"", &m_uiData.DesiredState.LevelLineIntersection);
-            }
+            ImGui::Checkbox("Compute Only", &m_uiData.DesiredState.ComputeOnly);
 
-            {
-                ImGui::Checkbox("Enable TexCoord deduplication", &m_uiData.DesiredState.EnableTexCoordDeduplication);
-            }
+            ImGui::Checkbox("Enable \"Level Line Intersection\"", &m_uiData.DesiredState.LevelLineIntersection);
 
-            {
-                ImGui::Checkbox("Force 32-bit indices", &m_uiData.DesiredState.Force32BitIndices);
-            }
+            ImGui::Checkbox("Enable TexCoord deduplication", &m_uiData.DesiredState.EnableTexCoordDeduplication);
 
-            {
-                ImGui::Checkbox("Enable Special Indices", &m_uiData.DesiredState.EnableSpecialIndices);
-            }
+            ImGui::Checkbox("Force 32-bit indices", &m_uiData.DesiredState.Force32BitIndices);
 
-            {
-                ImGui::SliderInt("Max memory per OMM", &m_uiData.DesiredState.MaxOmmArrayDataSizeInMB, 1, 1000, "%dMB", ImGuiSliderFlags_Logarithmic);
-            }
+            ImGui::Checkbox("Enable Special Indices", &m_uiData.DesiredState.EnableSpecialIndices);
 
-            {
-                ImGui::Checkbox("Enable NSight debug mode", &m_uiData.DesiredState.EnableNsightDebugMode);
-            }
+            ImGui::SliderInt("Max memory per OMM", &m_uiData.DesiredState.MaxOmmArrayDataSizeInMB, 1, 1000, "%dMB", ImGuiSliderFlags_Logarithmic);
+
+            ImGui::Checkbox("Enable NSight debug mode", &m_uiData.DesiredState.EnableNsightDebugMode);
         }
 
         ImGui::Separator();

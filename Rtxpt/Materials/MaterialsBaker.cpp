@@ -24,8 +24,6 @@
 #include "../SampleCommon.h"
 #include "../ExtendedScene.h"
 
-#include <filesystem>
-
 #include <donut/core/json.h>
 #include <json/json.h>
 #include <json/value.h>
@@ -42,7 +40,7 @@ using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
 
-void MaterialPT::Texture::InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTexture> & loaded, bool _sRGB, bool _normalMap, const std::filesystem::path & mediaPath)
+void PTTexture::InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTexture> & loaded, bool _sRGB, bool _normalMap, const std::filesystem::path & mediaPath)
 {
     if (loaded == nullptr)
     { LocalPath = ""; sRGB = false; Loaded = nullptr; return; }
@@ -53,17 +51,17 @@ void MaterialPT::Texture::InitFromLoadedTexture(std::shared_ptr<donut::engine::L
     NormalMap = _normalMap;
 }
 
-std::shared_ptr<MaterialPT> MaterialPT::FromDonut(const std::shared_ptr<Material>& donutMaterial)
+std::shared_ptr<PTMaterial> PTMaterial::FromDonut(const std::shared_ptr<Material>& donutMaterial)
 {
     if (donutMaterial == nullptr)
         return nullptr;
     assert(std::dynamic_pointer_cast<MaterialEx>(donutMaterial) != nullptr);
-    return std::static_pointer_cast<MaterialEx>(donutMaterial)->MaterialPT;
+    return std::static_pointer_cast<MaterialEx>(donutMaterial)->PTMaterial;
 }
 
-void MaterialPT::Write(Json::Value& output, const std::filesystem::path& mediaPath)
+void PTMaterial::Write(Json::Value& output)
 {
-    auto saveTexture = [ ](Json::Value& output, const MaterialPT::Texture & texture, const std::string& name)
+    auto saveTexture = [ ](Json::Value& output, const PTTexture & texture, const std::string& name)
     {
         if (texture.Loaded == nullptr)
             return;
@@ -119,20 +117,22 @@ void MaterialPT::Write(Json::Value& output, const std::filesystem::path& mediaPa
     STORE_FIELD(VolumeAttenuationColor);
 
     STORE_FIELD(ShadowNoLFadeout);
+
+    STORE_FIELD(EnableAsAnalyticLightProxy);
 }
 
-std::shared_ptr<MaterialPT> MaterialPT::FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache)
+bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache)
 {
-    std::shared_ptr<MaterialPT> material = std::make_shared<MaterialPT>();
+    // int version = -1;
+    // input["version"] >> version;
+    // if (version != 1)
+    // {
+    //     donut::log::warning("Unsupported/missing material version"); return nullptr;
+    // }
 
-    int version = -1;
-    input["version"] >> version;
-    if (version != 1)
-        { donut::log::warning("Unsupported/missing material version"); return nullptr; }
-
-    auto loadTexture = [ & ](Json::Value& input, MaterialPT::Texture & output, const std::string & name)
+    auto loadTexture = [ & ](Json::Value& input, PTTexture& output, const std::string& name)
     {
-        output = MaterialPT::Texture();
+        output = PTTexture();
         Json::Value texJ = input[name];
 
         if (texJ.empty())
@@ -141,7 +141,9 @@ std::shared_ptr<MaterialPT> MaterialPT::FromJson(Json::Value& input, const std::
         std::string localPath;
         texJ["path"] >> localPath; output.LocalPath = localPath;
         if (output.LocalPath == "")
-            { donut::log::warning("Path for texture is empty"); return; }
+        {
+            donut::log::warning("Path for texture is empty"); return;
+        }
         texJ["sRGB"] >> output.sRGB;
         texJ["NormalMap"] >> output.NormalMap;
 
@@ -151,12 +153,12 @@ std::shared_ptr<MaterialPT> MaterialPT::FromJson(Json::Value& input, const std::
         bool cSearchForDDS = true;
         std::string extension = fullPath.extension().string();
         std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
-        if ( cSearchForDDS && extension == ".png" )
+        if (cSearchForDDS && extension == ".png")
         {
             std::filesystem::path filePathDDS = fullPath;
             filePathDDS.replace_extension(".dds");
 
-            if ( std::filesystem::exists(filePathDDS) )
+            if (std::filesystem::exists(filePathDDS))
             {
                 fullPath = filePathDDS;
                 output.LocalPath.replace_extension(".dds");
@@ -166,17 +168,19 @@ std::shared_ptr<MaterialPT> MaterialPT::FromJson(Json::Value& input, const std::
         output.Loaded = textureCache->LoadTextureFromFileDeferred(fullPath, output.sRGB);
     };
 
-    input["name"] >> material->Name;
-    if (material->Name == "")
-        { donut::log::warning("Unsupported/missing material name"); return nullptr; }
+    input["name"] >> this->Name;
+    if (this->Name == "")
+    {
+        donut::log::warning("Unsupported/missing material name"); 
+    }
 
-    loadTexture(input, material->BaseTexture, "BaseTexture");
-    loadTexture(input, material->OcclusionRoughnessMetallicTexture, "OcclusionRoughnessMetallicTexture");
-    loadTexture(input, material->NormalTexture, "NormalTexture");
-    loadTexture(input, material->EmissiveTexture, "EmissiveTexture");
-    loadTexture(input, material->TransmissionTexture, "TransmissionTexture");
+    loadTexture(input, this->BaseTexture, "BaseTexture");
+    loadTexture(input, this->OcclusionRoughnessMetallicTexture, "OcclusionRoughnessMetallicTexture");
+    loadTexture(input, this->NormalTexture, "NormalTexture");
+    loadTexture(input, this->EmissiveTexture, "EmissiveTexture");
+    loadTexture(input, this->TransmissionTexture, "TransmissionTexture");
 
-#define LOAD_FIELD(NAME) input[#NAME] >> material->NAME;
+#define LOAD_FIELD(NAME) input[#NAME] >> this->NAME;
 
     LOAD_FIELD(BaseOrDiffuseColor);
     LOAD_FIELD(SpecularColor);
@@ -213,28 +217,33 @@ std::shared_ptr<MaterialPT> MaterialPT::FromJson(Json::Value& input, const std::
 
     LOAD_FIELD(ShadowNoLFadeout);
 
+    LOAD_FIELD(EnableAsAnalyticLightProxy);
+
+    return true;
+}
+
+std::shared_ptr<PTMaterial> PTMaterial::FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache)
+{
+    std::shared_ptr<PTMaterial> material = std::make_shared<PTMaterial>();
+
+    material->Read(input, mediaPath, textureCache);
+
     return material;
 }
 
-
-bool MaterialPT::EditorGUI()
+bool PTMaterial::EditorGUI(MaterialsBaker & baker)
 {
     bool update = false;
 
     float itemWidth = ImGui::CalcItemWidth();
 
-    auto getShortTexturePath = [ ](const MaterialPT::Texture & texture) -> std::string
+    auto getShortTexturePath = [ ](const PTTexture & texture) -> std::string
     {
         if( texture.Loaded == nullptr ) return "<nullptr>";
         return texture.LocalPath.string();
     };
 
     const ImVec4 filenameColor = ImVec4(0.474f, 0.722f, 0.176f, 1.0f);
-
-    update |= ImGui::Checkbox("Thin surface", &ThinSurface);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.");
-    update |= ImGui::Checkbox("Ignore by NEE shadow ray", &ExcludeFromNEE);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation");
 
     if (UseSpecularGlossModel)
     {
@@ -338,7 +347,7 @@ bool MaterialPT::EditorGUI()
         update |= ImGui::SliderFloat("Transmission Factor", &TransmissionFactor, 0.f, 1.f);
         update |= ImGui::SliderFloat("Diff Transmission Factor", &DiffuseTransmissionFactor, 0.f, 1.f);
 
-        if (ThinSurface)
+        if (!ThinSurface)
         {
             update |= ImGui::InputFloat("Attenuation Distance", &VolumeAttenuationDistance);
             if (VolumeAttenuationDistance < 0.0f) { VolumeAttenuationDistance = 0.0f; update = true; }
@@ -354,13 +363,27 @@ bool MaterialPT::EditorGUI()
         }
     }
 
-    update |= ImGui::SliderFloat("Shadow NoL Fadeout", &ShadowNoLFadeout, 0.0f, 0.2f);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-        "Low tessellation geometry often has triangle (flat) normals that differ significantly from shading normals. \n"
-        "This causes shading vs shadow discrepancy that exposes triangle edges. One way to mitigate this (other than \n"
-        "having more detailed mesh) is to add additional shadowing falloff to hide the seam. This setting is not \n"
-        "physically correct and adds bias. Setting of 0 means no fadeout (default).");
+    if (ImGui::CollapsingHeader("Special Properties"))
+    {
+        update |= ImGui::Checkbox("Thin surface", &ThinSurface);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.");
 
+        update |= ImGui::Checkbox("Ignore by NEE shadow ray (bias!)", &ExcludeFromNEE);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation\nNote: this isn't physically correct - it adds bias!");
+
+        update |= ImGui::SliderFloat("Shadow NoL Fadeout", &ShadowNoLFadeout, 0.0f, 0.2f);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Low tessellation geometry often has triangle (flat) normals that differ significantly from shading normals. \n"
+            "This causes shading vs shadow discrepancy that exposes triangle edges. One way to mitigate this (other than \n"
+            "having more detailed mesh) is to add additional shadowing falloff to hide the seam. This setting is not \n"
+            "physically correct and adds bias. Setting of 0 means no fadeout (default).");
+
+        update |= ImGui::Checkbox("Enable as analytic light proxy", &EnableAsAnalyticLightProxy);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Any scene object with this material will look at it's parent node in the scenegraph; if the parent contains\n"
+            "an analytic light, the rays falling of this surface will also output radiance from the analytic light.\n"
+            "The more closely the object's mesh resembles the analytic light, the more physically correct results will be.\n");
+    }
 
     if (ImGui::CollapsingHeader("Path Decomposition"))
     {
@@ -381,6 +404,27 @@ bool MaterialPT::EditorGUI()
         ImGui::Unindent();
     }
 
+    if (ImGui::CollapsingHeader("Save/Load"))
+    {
+        RAII_SCOPE( ImGui::Indent();, ImGui::Unindent(); );
+
+        ImGui::Checkbox("Share with all scenes", &SharedWithAllScenes);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("if checked, material saved to /Assets/Materials/ path and \nshared between all scenes; otherwise it will be saved to \n/Assets/Materials/SceneName specific to current scene");
+
+        auto matPath = baker.GetMaterialStoragePath(*this);
+
+        ImGui::TextWrapped("File name: %s", matPath.string().c_str());
+
+        if (ImGui::Button("Load"))
+        {
+            baker.LoadSingle(*this);
+            update = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save"))
+            baker.SaveSingle(*this);
+    }
+
     // mark for update
     GPUDataDirty |= update;
 
@@ -390,7 +434,7 @@ bool MaterialPT::EditorGUI()
 static void GetBindlessTextureIndex(const std::shared_ptr<LoadedTexture>& texture, uint& outEncodedInfo, unsigned int& flags, unsigned int textureBit)
 {
     // if bit not set, don't set the texture; if texture unavailable - remove the texture bit!
-    if ((flags & textureBit) == 0 || texture == nullptr || texture->texture == nullptr)
+    if ((flags & textureBit) == 0 || texture == nullptr || texture->texture == nullptr || texture->bindlessDescriptor.Get() == ~0u)
     {
         outEncodedInfo = 0xFFFFFFFF;
         flags &= ~textureBit; // remove flag
@@ -411,43 +455,43 @@ static void GetBindlessTextureIndex(const std::shared_ptr<LoadedTexture>& textur
     outEncodedInfo = (baseLOD << 24) | (mipLevels << 16) | bindlessDescIndex;
 }
 
-bool MaterialPT::IsEmissive() const
+bool PTMaterial::IsEmissive() const
 {
     return (EmissiveIntensity > 0) && (donut::math::any(EmissiveColor>0.0f));
 }
 
-void MaterialPT::FillData(MaterialPTData & data)
+void PTMaterial::FillData(PTMaterialData & data)
 {
     // flags
 
     data.Flags = 0;
 
     if (UseSpecularGlossModel)
-        data.Flags |= MaterialPTFlags_UseSpecularGlossModel;
+        data.Flags |= PTMaterialFlags_UseSpecularGlossModel;
 
     if (BaseTexture.Loaded && EnableBaseTexture)
-        data.Flags |= MaterialPTFlags_UseBaseOrDiffuseTexture;
+        data.Flags |= PTMaterialFlags_UseBaseOrDiffuseTexture;
 
     if (OcclusionRoughnessMetallicTexture.Loaded && EnableOcclusionRoughnessMetallicTexture)
-        data.Flags |= MaterialPTFlags_UseMetalRoughOrSpecularTexture;
+        data.Flags |= PTMaterialFlags_UseMetalRoughOrSpecularTexture;
 
     if (EmissiveTexture.Loaded && EnableEmissiveTexture)
-        data.Flags |= MaterialPTFlags_UseEmissiveTexture;
+        data.Flags |= PTMaterialFlags_UseEmissiveTexture;
 
     if (NormalTexture.Loaded && EnableNormalTexture)
-        data.Flags |= MaterialPTFlags_UseNormalTexture;
+        data.Flags |= PTMaterialFlags_UseNormalTexture;
 
     if (TransmissionTexture.Loaded && EnableTransmissionTexture && EnableTransmission)
-        data.Flags |= MaterialPTFlags_UseTransmissionTexture;
+        data.Flags |= PTMaterialFlags_UseTransmissionTexture;
 
     if (MetalnessInRedChannel)
-        data.Flags |= MaterialPTFlags_MetalnessInRedChannel;
+        data.Flags |= PTMaterialFlags_MetalnessInRedChannel;
 
     if (ThinSurface)
-        data.Flags |= MaterialPTFlags_ThinSurface;
+        data.Flags |= PTMaterialFlags_ThinSurface;
 
     if (PSDExclude)
-        data.Flags |= MaterialPTFlags_PSDExclude;
+        data.Flags |= PTMaterialFlags_PSDExclude;
 
     // free parameters
 
@@ -467,18 +511,28 @@ void MaterialPT::FillData(MaterialPTData & data)
 
     // bindless textures
 
-    GetBindlessTextureIndex(BaseTexture.Loaded, data.BaseOrDiffuseTextureIndex, data.Flags, MaterialPTFlags_UseBaseOrDiffuseTexture);
-    GetBindlessTextureIndex(OcclusionRoughnessMetallicTexture.Loaded, data.MetalRoughOrSpecularTextureIndex, data.Flags, MaterialPTFlags_UseMetalRoughOrSpecularTexture);
-    GetBindlessTextureIndex(EmissiveTexture.Loaded, data.EmissiveTextureIndex, data.Flags, MaterialPTFlags_UseEmissiveTexture);
-    GetBindlessTextureIndex(NormalTexture.Loaded, data.NormalTextureIndex, data.Flags, MaterialPTFlags_UseNormalTexture);
-    GetBindlessTextureIndex(TransmissionTexture.Loaded, data.TransmissionTextureIndex, data.Flags, MaterialPTFlags_UseTransmissionTexture);
+    GetBindlessTextureIndex(BaseTexture.Loaded, data.BaseOrDiffuseTextureIndex, data.Flags, PTMaterialFlags_UseBaseOrDiffuseTexture);
+    GetBindlessTextureIndex(OcclusionRoughnessMetallicTexture.Loaded, data.MetalRoughOrSpecularTextureIndex, data.Flags, PTMaterialFlags_UseMetalRoughOrSpecularTexture);
+    GetBindlessTextureIndex(EmissiveTexture.Loaded, data.EmissiveTextureIndex, data.Flags, PTMaterialFlags_UseEmissiveTexture);
+    GetBindlessTextureIndex(NormalTexture.Loaded, data.NormalTextureIndex, data.Flags, PTMaterialFlags_UseNormalTexture);
+    GetBindlessTextureIndex(TransmissionTexture.Loaded, data.TransmissionTextureIndex, data.Flags, PTMaterialFlags_UseTransmissionTexture);
 
-    data.Flags |= (uint)(min(NestedPriority, kMaterialMaxNestedPriority)) << MaterialPTFlags_NestedPriorityShift;
-    data.Flags |= (uint)(clamp(PSDDominantDeltaLobe + 1, 0, 7)) << MaterialPTFlags_PSDDominantDeltaLobeP1Shift;
+    data.Flags |= (uint)(min(NestedPriority, kMaterialMaxNestedPriority)) << PTMaterialFlags_NestedPriorityShift;
+    data.Flags |= (uint)(clamp(PSDDominantDeltaLobe + 1, 0, 7)) << PTMaterialFlags_PSDDominantDeltaLobeP1Shift;
 
     data.ShadowNoLFadeout = std::clamp(ShadowNoLFadeout, 0.0f, 0.25f);
 
     data._padding0 = data._padding1 = 42;
+}
+
+std::filesystem::path MaterialsBaker::GetMaterialStoragePath(PTMaterialBase& material)
+{
+    std::filesystem::path inPath = m_materialsPath;
+    if (!material.SharedWithAllScenes)
+        inPath = m_materialsSceneSpecializedPath;
+    std::string fileName = material.Name + c_MaterialsExtension;
+    inPath /= fileName;
+    return inPath;
 }
 
 MaterialsBaker::MaterialsBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory)
@@ -495,17 +549,18 @@ void MaterialsBaker::Clear()
     m_materials.clear();
     m_materialsGPU.clear();
     m_textures.clear();
-    m_sceneMaterialsFilePath = std::filesystem::path();
     m_mediaPath = std::filesystem::path();
+    m_materialsPath = std::filesystem::path();
+    m_materialsSceneSpecializedPath = std::filesystem::path();
 }
 
 MaterialsBaker::~MaterialsBaker()
 {
 }
 
-std::shared_ptr<MaterialPT> MaterialsBaker::ImportFromDonut(donut::engine::Material& material)
+std::shared_ptr<PTMaterial> MaterialsBaker::ImportFromDonut(donut::engine::Material& material)
 {
-    std::shared_ptr<MaterialPT> materialPT = std::make_shared<MaterialPT>();
+    std::shared_ptr<PTMaterial> materialPT = std::make_shared<PTMaterial>();
 
     materialPT->Name = material.name;
 
@@ -557,12 +612,70 @@ std::shared_ptr<MaterialPT> MaterialsBaker::ImportFromDonut(donut::engine::Mater
     return materialPT;
 }
 
+std::shared_ptr<PTMaterial> MaterialsBaker::Load(const std::string & name)
+{
+    std::string fileName = (name + c_MaterialsExtension);
+    std::filesystem::path pathShared      = m_materialsPath / fileName;
+    std::filesystem::path pathSpecialized = m_materialsSceneSpecializedPath / fileName;
+
+    // TODO: refactor to use LoadJsonFromFile
+    // first try scene specific
+    bool shared = false;
+    std::ifstream inFile;
+    inFile.open(pathSpecialized);
+
+    if (!inFile.is_open())
+    {
+        inFile.open(pathShared);
+        if (!inFile.is_open())
+        {
+            donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", fileName.c_str()); 
+            return nullptr;
+        }
+        shared = true;
+    }
+
+    Json::Value rootJ;
+    inFile >> rootJ;
+
+    std::shared_ptr<PTMaterial> materialPT = materialPT->FromJson(rootJ, m_mediaPath, m_textureCache);
+    if (materialPT == nullptr)
+    {
+        donut::log::warning("Error while reading material file '%s'", fileName.c_str()); 
+        return nullptr;
+    }
+    materialPT->SharedWithAllScenes = shared; // this property is not loaded from the file, but determined based on where the file was loaded from
+    return materialPT;
+}
+
 void MaterialsBaker::SceneReloaded()
 {
     Clear();
 }
 
-void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, const std::shared_ptr<donut::engine::ExtendedScene>& scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path & mediaPath )
+void MaterialsBaker::CompleteDeferredTexturesLoad(nvrhi::ICommandList* commandList)
+{
+    if (m_deferredTextureLoadInProgress)
+    {
+        if (commandList != nullptr)
+        {
+            commandList->close();
+            m_device->executeCommandList(commandList);
+        }
+
+        // In case new textures were loaded, we need to make sure they were uploaded properly
+        m_textureCache->ProcessRenderingThreadCommands(*m_commonPasses, 0.f);
+        m_textureCache->LoadingFinished();
+        m_deferredTextureLoadInProgress = false;
+
+        if (commandList != nullptr)
+        {
+            commandList->open();
+        }
+    }
+}
+
+void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path & mediaPath )
 {
     assert(!mediaPath.empty());
     //m_bindlessLayout = bindlessLayout;
@@ -573,88 +686,79 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
         bufferDesc.initialState = nvrhi::ResourceStates::ShaderResource;
         bufferDesc.keepInitialState = true;
         bufferDesc.canHaveUAVs = true;
-        bufferDesc.byteSize = sizeof(MaterialPTData) * RTXPT_MATERIAL_MAX_COUNT;
-        bufferDesc.structStride = sizeof(MaterialPTData);
-        bufferDesc.debugName = "MaterialPTDataStorage";
+        bufferDesc.byteSize = sizeof(PTMaterialData) * RTXPT_MATERIAL_MAX_COUNT;
+        bufferDesc.structStride = sizeof(PTMaterialData);
+        bufferDesc.debugName = "PTMaterialDataStorage";
         m_materialData = m_device->createBuffer(bufferDesc);
         m_materialDataWasReset = true;
     }
 
-    // if already initialized for this scene, do not re-load materials
-    if( !m_mediaPath.empty() )
-        return;
-
-    m_sceneMaterialsFilePath = sceneFilePath;
-    std::filesystem::path justName = sceneFilePath.filename().stem();
-    justName += ".materials.json";
-    m_sceneMaterialsFilePath.remove_filename();
-    m_sceneMaterialsFilePath /= justName;
-    m_mediaPath = mediaPath;
-  
-    std::unordered_map<std::string, std::shared_ptr<MaterialPT>> loadedMaterialsPT;
-
-    std::unordered_set<std::string> materialsPTUniqueNames;
-    LoadAll(loadedMaterialsPT);
-
-    int initializedFromDonutCount = 0;
-
-    std::shared_ptr<SceneGraph> sceneGraph = scene->GetSceneGraph();
-    auto& materials = sceneGraph->GetMaterials();
-    for (auto& material : materials)
+    if (m_mediaPath == "") // first time load all
     {
-        std::shared_ptr<MaterialEx> materialEx = std::dynamic_pointer_cast<MaterialEx>(material);
-        if (materialEx == nullptr)
-        {
-            assert(false && "Is there something wrong with ExtendedSceneTypeFactory::CreateMaterial()?");
-            continue;
-        }
-        else
-        {
-            auto it = loadedMaterialsPT.find(material->name);
-            if (it != loadedMaterialsPT.end())
-            {
-                materialEx->MaterialPT = it->second;
-                loadedMaterialsPT.erase(it);
-            }
-            else // ...and if we didn't find it in our .scene.materials.json, then import from Donut!
-            {
-                std::shared_ptr<MaterialPT> materialPT = ImportFromDonut(*material);
-                materialEx->MaterialPT = materialPT;
-                initializedFromDonutCount++;
-            }
+        m_mediaPath = mediaPath;
+        m_materialsPath = mediaPath / std::string(c_MaterialsSubFolder);
 
-            auto existing = materialsPTUniqueNames.find(materialEx->MaterialPT->Name);
-            if (existing != materialsPTUniqueNames.end() )
+        std::filesystem::path justName = sceneFilePath.filename().stem();
+
+        m_materialsSceneSpecializedPath = m_materialsPath / justName;
+  
+        std::unordered_set<std::string> materialsPTUniqueNames;
+
+        int initializedFromDonutCount = 0;
+
+        std::shared_ptr<SceneGraph> sceneGraph = scene->GetSceneGraph();
+        auto& materials = sceneGraph->GetMaterials();
+        for (auto& material : materials)
+        {
+            std::shared_ptr<MaterialEx> materialEx = std::dynamic_pointer_cast<MaterialEx>(material);
+            if (materialEx == nullptr)
             {
-                donut::log::error("Error while loading/converting materials for scene '%s' - there are at least two materials with the same name '%s'.\nThis is not supported and will result in errors.",
-                    sceneFilePath.string().c_str(), materialEx->MaterialPT->Name.c_str());
+                assert(false && "Is there something wrong with ExtendedSceneTypeFactory::CreateMaterial()?");
+                continue;
             }
             else
-                materialsPTUniqueNames.insert(materialEx->MaterialPT->Name);
+            {
+                std::shared_ptr<PTMaterial> loaded = Load(material->name);
+                if (loaded != nullptr)
+                    materialEx->PTMaterial = loaded;
+                else // ...and if we didn't find it in our .scene.materials.json, then import from Donut!
+                {
+                    std::shared_ptr<PTMaterial> materialPT = ImportFromDonut(*material);
+                    materialEx->PTMaterial = materialPT;
+                    initializedFromDonutCount++;
+                }
 
-            m_materials.push_back(materialEx->MaterialPT);
+                auto existing = materialsPTUniqueNames.find(materialEx->PTMaterial->Name);
+                if (existing != materialsPTUniqueNames.end() )
+                {
+                    donut::log::warning("Potential error while loading/converting materials for scene '%s' - there are at least two materials with the same name '%s'.\nThis is not supported and will result in errors.",
+                        sceneFilePath.string().c_str(), materialEx->PTMaterial->Name.c_str());
+                }
+                else
+                    materialsPTUniqueNames.insert(materialEx->PTMaterial->Name);
 
-            m_materialsGPU.push_back(MaterialPTData{});
-            materialEx->MaterialPT->GPUDataIndex = uint(m_materialsGPU.size() - 1);
-            materialEx->MaterialPT->GPUDataDirty = true;
-            assert(m_materialsGPU.size() <= RTXPT_MATERIAL_MAX_COUNT);
+                m_materials.push_back(materialEx->PTMaterial);
+
+                m_materialsGPU.push_back(PTMaterialData{});
+                materialEx->PTMaterial->GPUDataIndex = uint(m_materialsGPU.size() - 1);
+                materialEx->PTMaterial->GPUDataDirty = true;
+                assert(m_materialsGPU.size() <= RTXPT_MATERIAL_MAX_COUNT);
+            }
         }
+
+        // sort by name so when we're saving it's consistent
+        std::sort(m_materials.begin(), m_materials.end(), [](const auto & a, const auto & b) { return a->Name < b->Name; } );
+
+        if (initializedFromDonutCount > 0)
+            donut::log::warning("There were %d materials not found in RTXPT material materials folder '%s'; consider doing Scene->Materials->Advanced->Save", initializedFromDonutCount, m_materialsPath.string().c_str());
+
+        m_deferredTextureLoadInProgress = true;
     }
 
-    // sort by name so when we're saving it's consistent
-    std::sort(m_materials.begin(), m_materials.end(), [](const auto & a, const auto & b) { return a->Name < b->Name; } );
-
-    if (loadedMaterialsPT.size() > 0)
-        donut::log::warning("There were %d materials in RTXPT material definition file '%s' that were not used by the scene meshes; consider doing Scene->Materials->Advanced->Save", (int)loadedMaterialsPT.size(), m_sceneMaterialsFilePath.string().c_str()); 
-    if (initializedFromDonutCount > 0)
-        donut::log::warning("There were %d materials not found in RTXPT material definition file '%s'; consider doing Scene->Materials->Advanced->Save", initializedFromDonutCount, m_sceneMaterialsFilePath.string().c_str());
-
-    // In case new textures were loaded, we need to make sure they were uploaded properly
-    m_textureCache->ProcessRenderingThreadCommands(*m_commonPasses, 0.f);
-    m_textureCache->LoadingFinished();
+    CompleteDeferredTexturesLoad(nullptr);
 
     // currently unused
-    auto recordTexture = [&]( const MaterialPT::Texture & texture )
+    auto recordTexture = [&]( const PTTexture & texture )
     {
         if( texture.Loaded == nullptr ) return;
         
@@ -682,9 +786,57 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
     }
 }
 
-void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<donut::engine::ExtendedScene>& scene, std::vector<SubInstanceData>& subInstanceData)
+void UpdateSubInstanceData(SubInstanceData & ret, const donut::engine::MeshInstance& meshInstance, const donut::engine::MeshGeometry& geometry, uint meshGeometryIndex, const PTMaterial& material)
+{
+    MaterialShadingProperties props = MaterialShadingProperties::Compute(material);
+
+    bool alphaTest = props.AlphaTest;
+
+    // we need alpha texture for alpha testing to work - disable otherwise
+    if (alphaTest && (!material.EnableBaseTexture || material.BaseTexture.Loaded == nullptr))
+        alphaTest = false;
+
+    bool hasTransmission = props.HasTransmission;
+    bool notMiss = true; // because miss defaults to 0 :)
+
+    bool hasEmissive = material.IsEmissive();
+    bool noTextures = props.NoTextures;
+    bool hasNonDeltaLobes = !props.OnlyDeltaLobes;
+
+    ret.FlagsAndAlphaCutoff = 0;
+
+    float alphaCutoff = 0.0;
+
+    const std::shared_ptr<MeshInfo>& mesh = meshInstance.GetMesh();
+    if (alphaTest)
+    {
+        ret.FlagsAndAlphaCutoff |= SubInstanceData::Flags_AlphaTested;
+
+        assert(mesh->buffers->hasAttribute(VertexAttribute::TexCoord1));
+        assert(material.EnableBaseTexture && material.BaseTexture.Loaded != nullptr); // disable alpha testing if this happens to be possible
+        ret.AlphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
+        // ret.AlphaCutoff = material.alphaCutoff;
+        alphaCutoff = material.AlphaCutoff;
+    }
+    ret.EmissiveLightMappingOffset = 0xFFFFFFFF;
+
+    uint quantizedAlphaCutoff = (uint)(dm::clamp(alphaCutoff, 0.0f, 1.0f) * 255.0f + 0.5f); assert(quantizedAlphaCutoff < 256);
+    ret.FlagsAndAlphaCutoff |= (quantizedAlphaCutoff << SubInstanceData::Flags_AlphaOffsetOffset);
+
+    if (material.ExcludeFromNEE)
+        ret.FlagsAndAlphaCutoff |= SubInstanceData::Flags_ExcludeFromNEE;
+
+    uint globalGeometryIndex = mesh->geometries[0]->globalGeometryIndex + meshGeometryIndex;
+    uint globalMaterialIndex = material.GPUDataIndex;
+    ret.GlobalGeometryIndex_PTMaterialDataIndex = (globalGeometryIndex << 16) | globalMaterialIndex;
+}
+
+
+void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<ExtendedScene>& scene, std::vector<SubInstanceData>& subInstanceData)
 {
     RAII_SCOPE( commandList->beginMarker("MaterialsBaker");, commandList->endMarker(); );
+
+    CompleteDeferredTexturesLoad(commandList);
 
     bool needsUpload = false;
     for (auto& materialPT : m_materials)
@@ -699,7 +851,7 @@ void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_
 
     if ( needsUpload )
     {
-        commandList->writeBuffer( m_materialData, m_materialsGPU.data(), m_materialsGPU.size() * sizeof(MaterialPTData), 0 );
+        commandList->writeBuffer( m_materialData, m_materialsGPU.data(), m_materialsGPU.size() * sizeof(PTMaterialData), 0 );
         m_materialDataWasReset = false;
     }
 
@@ -713,15 +865,16 @@ void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_
         {
             const auto& geometry = mesh->geometries[geometryIndex];
             assert( geometry->material != nullptr && "No handling for null materials!" );
-            std::shared_ptr<MaterialPT> materialPT = MaterialPT::FromDonut(geometry->material);
+            std::shared_ptr<PTMaterial> materialPT = PTMaterial::FromDonut(geometry->material);
             assert(materialPT != nullptr && "Unknown error - should never have happened" );
-            uint globalMaterialIndex = materialPT->GPUDataIndex;
-            subInstanceData[subInstanceIndex].GlobalGeometryIndex_MaterialPTDataIndex = (subInstanceData[subInstanceIndex].GlobalGeometryIndex_MaterialPTDataIndex & 0xFFFF0000) | globalMaterialIndex;
+
+            UpdateSubInstanceData(subInstanceData[subInstanceIndex], *instance, *geometry, geometryIndex, *materialPT);
         }
     }
 }
 
-void MaterialsBaker::LoadAll(std::unordered_map<std::string, std::shared_ptr<MaterialPT>>& container)
+/*
+void MaterialsBaker::LoadAll(std::unordered_map<std::string, std::shared_ptr<PTMaterial>>& container)
 {
     std::ifstream inFile(m_sceneMaterialsFilePath);
 
@@ -744,7 +897,7 @@ void MaterialsBaker::LoadAll(std::unordered_map<std::string, std::shared_ptr<Mat
 
     for ( Json::Value materialJ : materialsJ )
     {
-        std::shared_ptr<MaterialPT> materialPT = materialPT->FromJson(materialJ, m_mediaPath, m_textureCache);
+        std::shared_ptr<PTMaterial> materialPT = materialPT->FromJson(materialJ, m_mediaPath, m_textureCache);
         if (materialPT == nullptr)
             { donut::log::warning("Error while reading material in material definition file '%s'", m_sceneMaterialsFilePath.string().c_str()); continue; }
         
@@ -754,21 +907,79 @@ void MaterialsBaker::LoadAll(std::unordered_map<std::string, std::shared_ptr<Mat
         else
             container.insert( make_pair(materialPT->Name, materialPT) );
     }
+}*/
+
+bool MaterialsBaker::LoadSingle(PTMaterialBase & material)
+{
+    std::filesystem::path inPath = m_materialsPath;
+    if (!material.SharedWithAllScenes)
+        inPath = m_materialsSceneSpecializedPath;
+    std::string fileName = material.Name + c_MaterialsExtension;
+    inPath /= fileName;
+
+    std::ifstream inFile;
+    inFile.open(inPath);
+
+    if (!inFile.is_open())
+    {
+        if (!inFile.is_open())
+        {
+            donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", fileName.c_str()); 
+            return false;
+        }
+    }
+
+    Json::Value rootJ;
+    inFile >> rootJ;
+
+    m_deferredTextureLoadInProgress = true;
+    return material.Read(rootJ, m_mediaPath, m_textureCache);
+}
+
+bool MaterialsBaker::SaveSingle(PTMaterialBase & material)
+{
+    if (!EnsureDirectoryExists(m_materialsPath))
+        return false;
+    std::filesystem::path outPath = m_materialsPath;
+    if (!material.SharedWithAllScenes)
+    {
+        outPath = m_materialsSceneSpecializedPath;
+        if (!EnsureDirectoryExists(outPath))
+            return false;
+    }
+
+    std::string fileName = material.Name + c_MaterialsExtension;
+    outPath /= fileName;
+
+    Json::Value rootJ;
+    //rootJ["RTXPTMaterialVersion"] = 1;
+
+    material.Write(rootJ);
+
+    // TODO: refactor, replace with SaveJsonToFile
+ 
+    std::ofstream outFile(outPath, std::ios::trunc);
+    if (!outFile.is_open())
+    {
+        log::error("Error attempting to save material to file '%s'", outPath.c_str());
+        return false;
+    }
+
+    Json::StreamWriterBuilder builder;
+    std::unique_ptr<Json::StreamWriter> writer(builder.newStreamWriter());
+
+    writer->write(rootJ, &outFile);
+    outFile.close();
+    return true;
 }
 
 void MaterialsBaker::SaveAll()
 {
+#if 0
     Json::Value rootJ;
 
     rootJ["RTXPTMaterials"]["version"] = 1;
     Json::Value materialsJ;
-    auto saveTexture = [&](Json::Value & materialJ, const std::shared_ptr<donut::engine::LoadedTexture>& texture, const std::string & name)
-    {
-        if( texture == nullptr )
-            return;
-        std::filesystem::path localPath = std::filesystem::relative(texture->path, m_mediaPath);
-        materialJ[name] = localPath.string();
-    };
     for (auto& materialPT : m_materials)
     {
         Json::Value materialJ;
@@ -785,6 +996,10 @@ void MaterialsBaker::SaveAll()
     
     writer->write(rootJ, &outFile);
     outFile.close();
+#else
+    for (auto& materialPT : m_materials)
+        SaveSingle(*materialPT);
+#endif
 }
 
 bool MaterialsBaker::DebugGUI(float indent)
@@ -808,15 +1023,43 @@ bool MaterialsBaker::DebugGUI(float indent)
 
     if (ImGui::CollapsingHeader("Advanced", 0/*ImGuiTreeNodeFlags_DefaultOpen*/))
     {
-        ImGui::Text("Materials file path:");
+        ImGui::Text("Materials storage directory:");
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0, 1.0, 0.5, 1.0));
-        ImGui::TextWrapped("%s", m_sceneMaterialsFilePath.string().c_str());
+        ImGui::TextWrapped("%s", m_materialsPath.string().c_str());
         ImGui::PopStyleColor();
 
-        if( ImGui::Button("Save to file") )
+        ImGui::Text("Set all SharedWithAllScenes props to");
+        {
+            RAII_SCOPE(ImGui::Indent();, ImGui::Unindent(););
+            if (ImGui::Button("Shared"))
+                for (auto& materialPT : m_materials)
+                    materialPT->SharedWithAllScenes = true;
+            ImGui::SameLine();
+            if (ImGui::Button("Not Shared"))
+                for (auto& materialPT : m_materials)
+                    materialPT->SharedWithAllScenes = false;
+        }
+
+        if( ImGui::Button("Save all") )
             SaveAll();
     }
 
     return resetAccumulation;
 }
 
+MaterialShadingProperties MaterialShadingProperties::Compute(const PTMaterial& material)
+{
+    MaterialShadingProperties props;
+    props.AlphaTest = material.EnableAlphaTesting;
+    props.HasTransmission = material.EnableTransmission;
+    props.NoTransmission = !props.HasTransmission;
+    props.NoTextures = (!material.EnableBaseTexture || material.BaseTexture.Loaded == nullptr)
+        && (!material.EnableEmissiveTexture || material.EmissiveTexture.Loaded == nullptr)
+        && (!material.EnableNormalTexture || material.NormalTexture.Loaded == nullptr)
+        && (!material.EnableOcclusionRoughnessMetallicTexture || material.OcclusionRoughnessMetallicTexture.Loaded == nullptr)
+        && (!material.EnableTransmissionTexture || material.TransmissionTexture.Loaded == nullptr);
+    static const float kMinGGXRoughness = 0.08f; // see BxDF.hlsli, kMinGGXAlpha constant: kMinGGXRoughness must match sqrt(kMinGGXAlpha)!
+    props.OnlyDeltaLobes = ((props.HasTransmission && material.TransmissionFactor == 1.0) || (material.Metalness == 1)) && (material.Roughness < kMinGGXRoughness) && !(material.EnableOcclusionRoughnessMetallicTexture && material.OcclusionRoughnessMetallicTexture.Loaded != nullptr);
+    props.ExcludeFromNEE = material.ExcludeFromNEE;
+    return props;
+}

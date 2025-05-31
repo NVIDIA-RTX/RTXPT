@@ -16,17 +16,16 @@
 #include <memory>
 #include <unordered_map>
 
-#include "../PathTracer/Lighting/LightingTypes.h"
+#include "../Shaders/PathTracer/Lighting/LightingTypes.h"
 
 namespace donut::engine
 {
     class CommonRenderPasses;
     class ShaderFactory;
-    class ExtendedScene;
     class Light;
-
 }
 
+class ExtendedScene;
 class RenderTargets;
 class RtxdiResources;
 class EnvMapBaker;
@@ -59,7 +58,7 @@ private:
     
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
     std::shared_ptr<donut::engine::CommonRenderPasses> m_commonPasses;
-    std::shared_ptr<donut::engine::ExtendedScene> m_Scene;
+    std::shared_ptr<ExtendedScene> m_Scene;
     std::shared_ptr<class MaterialsBaker> m_materialsBaker;
     std::shared_ptr<class OmmBaker> m_ommBaker;
     nvrhi::BufferHandle m_subInstanceData;
@@ -74,7 +73,7 @@ public:
         nvrhi::IDevice* device,
         std::shared_ptr<donut::engine::ShaderFactory> shaderFactory,
         std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses,
-        std::shared_ptr<donut::engine::ExtendedScene> scene,
+        std::shared_ptr<ExtendedScene> scene,
         std::shared_ptr<class MaterialsBaker> materialsBaker,
         std::shared_ptr<class OmmBaker> ommBaker,
         nvrhi::BufferHandle subInstanceData,
@@ -82,7 +81,7 @@ public:
         std::shared_ptr<ShaderDebug> shaderDebug
     );
 
-    void SetScene(std::shared_ptr<donut::engine::ExtendedScene> scene, std::shared_ptr<EnvMapBaker> environmentMap = nullptr, EnvMapSceneParams envMapSceneParams = {} );
+    void SetScene(std::shared_ptr<ExtendedScene> scene, std::shared_ptr<EnvMapBaker> environmentMap = nullptr, EnvMapSceneParams envMapSceneParams = {} );
     void CreatePipeline();
     void CreateBindingSet(RtxdiResources& resources, const RenderTargets& renderTargets);
     void CountLightsInScene(uint32_t& numEmissiveMeshes, uint32_t& numEmissiveTriangles);

@@ -63,7 +63,7 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
                 combined += diffuseContributionDI + specularContributionDI;
             if (hasGI)
                 combined += diffuseContributionGI + specularContributionGI;
-            u_Output[pixelPos] += float4(combined, 0);
+            u_OutputColor[pixelPos] += float4(combined, 0);
         }
     }
 

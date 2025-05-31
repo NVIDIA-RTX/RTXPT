@@ -25,7 +25,7 @@ public:
     AccumulationPass(nvrhi::IDevice* device, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory);
 
     void CreatePipeline();
-    void CreateBindingSet(nvrhi::ITexture* inputTexture, nvrhi::ITexture* outputTexture);
+    void CreateBindingSet(nvrhi::ITexture* inputTexture, nvrhi::ITexture* outputTexture, nvrhi::ITexture* renderOutputTexture);
     void Render(nvrhi::ICommandList* commandList, const donut::engine::IView& sourceView, const donut::engine::IView& upscaledView, float accumulationWeight);
 
 private:

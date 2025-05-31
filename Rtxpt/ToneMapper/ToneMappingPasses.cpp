@@ -195,7 +195,7 @@ void ToneMappingPass::PreRender(const ToneMappingParameters& params)
 bool ToneMappingPass::Render(
     nvrhi::ICommandList* commandList, 
     const donut::engine::ICompositeView& compositeView,
-    nvrhi::ITexture* sourceTexture)
+    nvrhi::ITexture* sourceTexture, bool enabled)
 {
     assert( m_FrameParamsSet ); // forgot to call PreRender before this?
     m_FrameParamsSet = false;
@@ -215,7 +215,6 @@ bool ToneMappingPass::Render(
         }
     }
 
-    //Not working as expected 
     if(m_AutoExposure) 
     {
 		commandList->beginMarker("Luminance");
@@ -291,8 +290,6 @@ bool ToneMappingPass::Render(
 #endif
 		}
 		commandList->endMarker();
-
-
     }
 
     commandList->beginMarker("ToneMapping");
@@ -348,6 +345,7 @@ bool ToneMappingPass::Render(
 		toneMappingConsts.colorTransform[0] = float4(m_ColorTransform.col(0), 0);
 		toneMappingConsts.colorTransform[1] = float4(m_ColorTransform.col(1), 0);
 		toneMappingConsts.colorTransform[2] = float4(m_ColorTransform.col(2), 0);
+        toneMappingConsts.enabled = enabled;
         commandList->writeBuffer(m_ToneMappingCB, &toneMappingConsts, sizeof(ToneMappingConstants));
 
         commandList->setGraphicsState(state);

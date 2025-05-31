@@ -183,7 +183,7 @@ void RtxdiPass::PrepareResources(
     const RenderTargets& renderTargets,
     std::shared_ptr<EnvMapBaker> envMap,
     EnvMapSceneParams envMapSceneParams,
-    const std::shared_ptr<donut::engine::ExtendedScene> scene,
+    const std::shared_ptr<ExtendedScene> scene,
     std::shared_ptr<class MaterialsBaker> materialsBaker,
     std::shared_ptr<class OmmBaker> ommBaker,
     nvrhi::BufferHandle subInstanceDataBuffer,

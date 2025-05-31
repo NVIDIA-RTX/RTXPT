@@ -15,6 +15,7 @@
 #include <json/value.h>
 #include <nvrhi/utils.h>
 #include <nvrhi/common/misc.h>
+#include <json/json.h>
 
 using namespace donut::math;
 #include <donut/shaders/light_cb.h>
@@ -63,6 +64,10 @@ std::shared_ptr<donut::engine::SceneGraphLeaf> ExtendedSceneTypeFactory::CreateL
     if (type == "SampleSettings")
     {
         return std::make_shared<SampleSettings>();
+    } else
+    if (type == "GameSettings")
+    {
+        return std::make_shared<GameSettings>();
     }
     return SceneTypeFactory::CreateLeaf(type);
 }
@@ -126,6 +131,12 @@ void ExtendedScene::ProcessNodesRecursive(donut::engine::SceneGraphNode* node)
             assert(m_loadedSettings == nullptr);    // multiple settings nodes? only last one will be loaded
             m_loadedSettings = sampleSettings;
         }
+        std::shared_ptr<GameSettings> gameSettings = std::dynamic_pointer_cast<GameSettings>(node->GetLeaf());
+        if (gameSettings != nullptr)
+        {
+            assert(m_loadedGameSettings == nullptr);    // multiple settings nodes? only last one will be loaded
+            m_loadedGameSettings = gameSettings;
+        }
     }
 
     for( int i = (int)node->GetNumChildren()-1; i >= 0; i-- )
@@ -151,7 +162,7 @@ bool ExtendedScene::LoadWithExecutor(const std::filesystem::path& jsonFileName, 
     return true;
 }
 
-std::shared_ptr<EnvironmentLight> donut::engine::FindEnvironmentLight(std::vector <std::shared_ptr<Light>> lights)
+std::shared_ptr<EnvironmentLight> FindEnvironmentLight(std::vector <std::shared_ptr<donut::engine::Light>> lights)
 {
     for (auto light : lights)
     {
@@ -223,3 +234,15 @@ void SampleSettings::Load(const Json::Value& node)
     node["textureMIPBias"] >> textureMIPBias;
 }
 
+std::shared_ptr<SceneGraphLeaf> GameSettings::Clone()
+{
+    auto copy = std::make_shared<SampleSettings>();
+    assert(false); // not properly implemented
+    return copy;
+}
+
+void GameSettings::Load(const Json::Value& node)
+{
+    Json::StreamWriterBuilder writer;
+    jsonData = Json::writeString(writer, node);
+}

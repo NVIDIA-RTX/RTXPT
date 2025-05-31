@@ -12,8 +12,8 @@
 #define __ENVMAP_IMPORTANCE_SAMPLING_BAKER_HLSL__
 
 #define EMISB_NUM_COMPUTE_THREADS_PER_DIM       16
-#define EMISB_IMPORTANCE_MAP_DIM                512
-#define EMISB_IMPORTANCE_SAMPLES_PER_PIXEL      32          // should have integer square root
+#define EMISB_IMPORTANCE_MAP_DIM                1024
+#define EMISB_IMPORTANCE_SAMPLES_PER_PIXEL      16          // how many samples of the cubemap to take for one highest resolution importance map texel
 
 struct EnvMapImportanceSamplingBakerConstants
 {
@@ -35,11 +35,11 @@ struct EnvMapImportanceSamplingBakerConstants
 #if !defined(__cplusplus)
 
 #define EMIS_ENABLE_CORE_ONLY 1
-#include "../../PathTracer/Utils/Math/MathHelpers.hlsli"
-#include "../../PathTracer/Lighting/EnvMap.hlsli"
+#include "../../Shaders/PathTracer/Utils/Math/MathHelpers.hlsli"
+#include "../../Shaders/PathTracer/Lighting/EnvMap.hlsli"
 
-#include "../../PathTracer/SampleGenerators.hlsli"
-#include "../../PathTracer/Utils/Utils.hlsli"
+#include "../../Shaders/PathTracer/Utils/SampleGenerators.hlsli"
+#include "../../Shaders/PathTracer/Utils/Utils.hlsli"
 
 ConstantBuffer<EnvMapImportanceSamplingBakerConstants>  g_BuilderConsts  : register(b0);
 
@@ -48,6 +48,7 @@ SamplerState                            s_LinearWrap                : register(s
 
 TextureCube<float4>                     t_EnvMapCube                : register(t0);
 RWTexture2D<float>                      u_ImportanceMap             : register(u0);
+RWTexture2D<float4>                     u_RadianceMap               : register(u1);
 
 Texture2D<float>                        t_ImportanceMap             : register(t1);
 RWBuffer<uint2>                         u_PresampledBuffer          : register(u0);
@@ -63,7 +64,8 @@ void BuildMIPDescentImportanceMapCS(uint3 dispatchThreadID : SV_DispatchThreadID
     uint2 pixel = dispatchThreadID.xy;
     if (any(pixel >= outputDim)) return;
 
-    float L = 0.f;
+    float   L = 0.f;
+    float3  R = 0.f;
     for (uint y = 0; y < numSamples.y; y++)
     {
         for (uint x = 0; x < numSamples.x; x++)
@@ -76,12 +78,15 @@ void BuildMIPDescentImportanceMapCS(uint3 dispatchThreadID : SV_DispatchThreadID
             float3 dir = oct_to_ndir_equal_area_unorm(p);
             float3 radiance = t_EnvMapCube.SampleLevel(s_LinearWrap, dir, 0).rgb;
             
-            L += Luminance(radiance);
+            L += (Luminance(radiance)+Average(radiance))*0.5;
+            R += radiance;
         }
     }
 
-    // Store average radiance for this texel.
+    // Store average radiance (actually average luminance, but can be average radiance) for this texel.
     u_ImportanceMap[pixel] = L * invSamples;
+    // Store full radiance (color) and also average radiance in .w
+    u_RadianceMap[pixel] = float4( R, L ) * invSamples.xxxx;
 }
 
 #if 0

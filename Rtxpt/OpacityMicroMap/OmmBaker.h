@@ -73,6 +73,13 @@ struct MeshInfoEx : public donut::engine::MeshInfo
     virtual ~MeshInfoEx() = default;
 };
 
+enum class OpacityMicroMapDebugView : uint32_t
+{
+    Disabled,
+    InWorld,
+    Overlay,
+};
+
 struct OpacityMicroMapUIData
 {
     struct BuildState
@@ -128,6 +135,8 @@ struct OpacityMicroMapUIData
     // build progress of active tasks
     uint32_t                            BuildsLeftInQueue = 0;
     uint32_t                            BuildsQueued = 0;
+
+    OpacityMicroMapDebugView            DebugView = OpacityMicroMapDebugView::Disabled;
 };
 
 class OmmBaker
@@ -155,6 +164,8 @@ public:
     void                            UpdateDebugGeometry(const std::shared_ptr<struct donut::engine::MeshInfo>& mesh);
 
     [[nodiscard]] nvrhi::IBuffer*   GetGeometryDebugBuffer() const { return m_geometryDebugBuffer; }
+
+    void                            SetGlobalShaderMacros(std::vector<donut::engine::ShaderMacro> & macros);
 
 
 private:

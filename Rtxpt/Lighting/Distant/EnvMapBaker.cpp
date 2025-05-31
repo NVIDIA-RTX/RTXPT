@@ -35,8 +35,6 @@ using namespace donut::engine;
 
 std::filesystem::path GetLocalPath(std::string subfolder);
 
-extern const char* g_assetsFolder;
-
 static const int    c_BlockCompressionBlockSize = 4; 
 
 EnvMapBaker::EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::CommonRenderPasses> commonPasses )
@@ -130,16 +128,6 @@ void EnvMapBaker::CreateRenderPasses()
     samplerDesc.setAllFilters(true);
     m_equiRectSampler = m_device->createSampler(samplerDesc);
 
-    // Get all scenes in "Assets" folder
-    m_dbgLocalMediaEnvironmentMaps.clear();
-    m_dbgLocalMediaFolder = GetLocalPath(g_assetsFolder) / "EnvironmentMaps";
-    for (const auto& file : std::filesystem::directory_iterator(m_dbgLocalMediaFolder))
-    {
-        if (!file.is_regular_file()) continue;
-        if (file.path().extension() == ".exr" || file.path().extension() == ".hdr" || file.path().extension() == ".dds")
-            m_dbgLocalMediaEnvironmentMaps.push_back(file.path());
-    }
-
     m_importanceSamplingBaker->CreateRenderPasses();
 
     if (m_BC6UCompressionEnabled)
@@ -199,7 +187,7 @@ void EnvMapBaker::InitBuffers(uint cubeDim)
         desc.depth  = 1;
         desc.arraySize = 6;
         desc.mipLevels = mipLevels;
-        desc.format = nvrhi::Format::RGBA16_FLOAT;
+        desc.format = nvrhi::Format::RGBA16_FLOAT; //(m_device->getGraphicsAPI() == nvrhi::GraphicsAPI::VULKAN)?nvrhi::Format::RGBA32_FLOAT:nvrhi::Format::RGBA16_FLOAT;
         desc.dimension = nvrhi::TextureDimension::TextureCube;
         desc.debugName = "EnvMapBakerMainCube";
         desc.isUAV = true;
@@ -266,15 +254,7 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMap
         m_BC6UCompressionEnabled = false;
     }
 
-    if (m_dbgOverrideSource != c_SceneDefault)
-    {
-        if (m_dbgOverrideSource != c_ProcSkyName)
-            envMapBackgroundPath = m_dbgLocalMediaFolder.string() + "/" + m_dbgOverrideSource;
-        else
-            envMapBackgroundPath = c_ProcSkyName;
-    }
-
-    bool proceduralSkyEnabled = envMapBackgroundPath == std::string(c_ProcSkyName);
+    bool proceduralSkyEnabled = IsProceduralSky( envMapBackgroundPath.c_str() );
 
     if (m_targetResolution == 0)
         m_targetResolution = (proceduralSkyEnabled) ? (1024) : (2048);
@@ -299,7 +279,7 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMap
 
         if (!proceduralSkyEnabled)
         {
-            std::filesystem::path fullPath = GetLocalPath(g_assetsFolder) / m_loadedSourceBackgroundPath;
+            std::filesystem::path fullPath = GetLocalPath(c_AssetsFolder) / m_loadedSourceBackgroundPath;
             m_textureCache->LoadTextureFromFile(fullPath, false, m_commonPasses.get(), commandList);
             commandList->close();
             m_device->executeCommandList(commandList);
@@ -327,14 +307,14 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMap
     }
 }
 
-bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & _settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount)
+bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & _settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate)
 {
     BakeSettings settings = _settings;
 
     bool contentsChanged = m_dbgForceDynamic || m_renderPassesDirty;
     m_renderPassesDirty = false;
 
-    bool proceduralSkyEnabled = m_sourceBackgroundPath == std::string(c_ProcSkyName);
+    bool proceduralSkyEnabled = IsProceduralSky( m_sourceBackgroundPath.c_str() );
 
     if (m_dbgSaveBaked != "") // re-bake if saving
     {
@@ -358,7 +338,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
 
     ProceduralSkyConstants procSkyConsts; memset(&procSkyConsts, 0, sizeof(procSkyConsts));
     if (m_proceduralSky != nullptr && proceduralSkyEnabled)
-        contentsChanged |= m_proceduralSky->Update(sceneTime, procSkyConsts);
+        contentsChanged |= m_proceduralSky->Update(sceneTime, procSkyConsts, m_sourceBackgroundPath, forceInstantUpdate);
 
     if (!contentsChanged)
         return contentsChanged;
@@ -607,39 +587,8 @@ bool EnvMapBaker::DebugGUI(float indent)
         ImGui::EndCombo();
         resetAccumulation = true;
     }
-
     IMAGE_QUALITY_OPTION(ImGui::Checkbox("Force dynamic", &m_dbgForceDynamic));
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force re-generate every frame even if static");
-
-
-    //ImGui::PushItemWidth(-60.0f);
-    if (ImGui::BeginCombo("Override source", m_dbgOverrideSource.c_str()))
-    {
-        for (int i = -2; i < (int)m_dbgLocalMediaEnvironmentMaps.size(); i++)
-        {
-            std::string itemName;
-            if (i == -2)
-                itemName = c_SceneDefault;
-            else if (i == -1)
-                itemName = c_ProcSkyName;
-            else 
-                itemName = m_dbgLocalMediaEnvironmentMaps[i].filename().string();
-                
-            bool is_selected = itemName == m_dbgOverrideSource;
-            if (ImGui::Selectable(itemName.c_str(), is_selected))
-                m_dbgOverrideSource = itemName;
-            if (is_selected)
-                ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-        resetAccumulation = true;
-    }
-    //ImGui::PopItemWidth();
-
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overrides scene's default environment map");
-
-    if (m_proceduralSky != nullptr && m_loadedSourceBackgroundPath == std::string(c_ProcSkyName))
-        m_proceduralSky->DebugGUI(indent);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force re-generate every frame even if static (for performance testing only)");
 
     if (m_BC6UCompressionEnabled)
     {

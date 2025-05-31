@@ -10,6 +10,8 @@
 
 #pragma pack_matrix(row_major)
 
+#define NON_PATH_TRACING_PASS 1
+
 #include "RtxdiApplicationBridge.hlsli"
 
 #include <Rtxdi/ReGIR/ReGIRSampling.hlsli>

@@ -158,14 +158,17 @@ float4 applyToneMapping(float2 texC)
         finalColor *= clamp( (kExposureKey / avgLuminance), gParams.autoExposureLumValueMin, gParams.autoExposureLumValueMax );
     }
 
-    // apply color grading
-    finalColor = mul(finalColor, (float3x3) gParams.colorTransform);
+    if (gParams.enabled)
+    {
+        // apply color grading
+        finalColor = mul(finalColor, (float3x3) gParams.colorTransform);
 
-    // apply tone mapping
-    finalColor = toneMap(finalColor);
+        // apply tone mapping
+        finalColor = toneMap(finalColor);
 
-    if(gParams.clamped)
-        finalColor = saturate(finalColor);
+        if (gParams.clamped)
+            finalColor = saturate(finalColor);
+    }
 
     return float4(finalColor, color.a);
 }

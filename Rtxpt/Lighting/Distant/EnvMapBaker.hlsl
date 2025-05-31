@@ -40,7 +40,7 @@ struct EnvMapBakerConstants
 
 #if !defined(__cplusplus)
 
-#include "../../PathTracer/Utils/Math/MathHelpers.hlsli"
+#include "../../Shaders/PathTracer/Utils/Math/MathHelpers.hlsli"
 
 ConstantBuffer<EnvMapBakerConstants>    g_Const                     : register(b0);
 

@@ -8,6 +8,8 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
+#define NON_PATH_TRACING_PASS 1
+
 #include "RtxdiApplicationBridge.hlsli"
 
 #include <rtxdi/LightSampling/PresamplingFunctions.hlsli>

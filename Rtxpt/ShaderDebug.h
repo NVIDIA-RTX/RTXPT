@@ -14,7 +14,7 @@
 #include <memory>
 #include <donut/core/math/math.h>
 
-#include "ShaderDebug.hlsli"
+#include "Shaders/ShaderDebug.hlsli"
 
 namespace donut::engine
 {

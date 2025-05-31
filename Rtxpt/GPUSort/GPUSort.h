@@ -23,13 +23,8 @@ using namespace donut::math;
 
 namespace donut::engine
 {
-    class ExtendedScene;
-    class FramebufferFactory;
-    class TextureCache;
-    class TextureHandle;
     class ShaderFactory;
     class CommonRenderPasses;
-    struct TextureData;
 }
 
 class ShaderDebug;
@@ -59,7 +54,6 @@ private:
 private:
     nvrhi::DeviceHandle             m_device;
     std::shared_ptr<donut::engine::CommonRenderPasses> m_commonPasses;
-    std::shared_ptr<donut::engine::FramebufferFactory> m_framebufferFactory;
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
     std::shared_ptr<ShaderDebug>   m_shaderDebug;
 
