@@ -181,7 +181,7 @@ interface IBSDF
     uint getLobes(const ShadingData shadingData);
 
     // TODO add and explain - see StandardBSDF::evalDeltaLobes
-    // void evalDeltaLobes(const ShadingData shadingData, inout DeltaLobe deltaLobes[cMaxDeltaLobes], inout int deltaLobeCount, inout float nonDeltaPart)
+    // void evalDeltaLobes(const ShadingData shadingData, out DeltaLobe deltaLobes[cMaxDeltaLobes], out int deltaLobeCount, out float nonDeltaPart)
 
 }
 

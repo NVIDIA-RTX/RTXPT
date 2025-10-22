@@ -128,6 +128,8 @@ class SortedLightList
     }
 };
 
+#if 0 // no longer used & maintained
+
 template<uint _MaxSize>
 struct Bucket
 {
@@ -273,6 +275,8 @@ class HashBucketSortTable
     }
 
 };
+
+#endif
 
 #if 0 // no longer used & maintained
 // This is based on a fast, "Left-leaning Red-Black Tree" (self-balancing binary tree) by Robert Sedgewick 2008
@@ -641,19 +645,38 @@ class SortedLightLLRBTree
 
 
 
-// Expects elements of storageBuffer[tileAddress, x] to be sorted and 'narrowLightCount' is the depth of storageBuffer.
+// Expects elements of storageBuffer[tileAddress, x] to be sorted and 'localLightCount' is the depth of storageBuffer.
 // Note: returning value that consists both of key and counter (which needs unpacking to get actual global index); if not found, RTXPT_INVALID_LIGHT_INDEX returned
-inline uint NarrowLightBinarySearch(Texture3D<uint> storageBuffer, const uint2 tileAddress, const uint narrowLightCount, const uint globalLightIndexToFind)
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+inline uint LocalLightBinarySearch(Texture3D<uint> storageBuffer, const uint2 tileAddress, const uint globalLightIndexToFind, const uint localLightCount, uniform const uint BINARY_SEARCH_STEPS)
+#else
+inline uint LocalLightBinarySearch(Buffer<uint> storageBuffer, const uint tileAddress, const uint globalLightIndexToFind, const uint localLightCount, uniform const uint BINARY_SEARCH_STEPS)
+#endif
 {
-    int indexLeft = 0; 
-    int indexRight = narrowLightCount-1;
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+    uint indexLeft = 0; 
+    uint indexRight = localLightCount-1;
+#else
+    uint indexLeft = tileAddress; 
+    uint indexRight = tileAddress + localLightCount-1;
+#endif
+    
+#if 0 // early out - doesn't help in this case
+    uint keyLeft  = UnpackMiniListLight(storageBuffer[indexLeft] );
+    uint keyRight = UnpackMiniListLight(storageBuffer[indexRight]);
+    if (globalLightIndexToFind < keyLeft || globalLightIndexToFind > keyRight)
+        return RTXPT_INVALID_LIGHT_INDEX;
+#endif
 
-    //uint remainingLoops = some number;
-    while( indexLeft <= indexRight ) // && remainingLoops != 0 )
+    [unroll] for (uint i = 0u; i < BINARY_SEARCH_STEPS; ++i)
     {
-        int indexMiddle = (indexLeft+indexRight)/2;
+        uint indexMiddle = (indexLeft+indexRight)>>1;
 
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
         uint value = storageBuffer[uint3(tileAddress, indexMiddle)];
+#else
+        uint value = storageBuffer[indexMiddle];
+#endif
 
         uint keyMiddle = UnpackMiniListLight(value);
 
@@ -663,7 +686,6 @@ inline uint NarrowLightBinarySearch(Texture3D<uint> storageBuffer, const uint2 t
             indexRight = indexMiddle-1;
         else 
             return value;
-        //remainingLoops--;
     }
     return RTXPT_INVALID_LIGHT_INDEX;
 }

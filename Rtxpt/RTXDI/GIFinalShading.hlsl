@@ -30,26 +30,40 @@ float GetMISWeight(float3 roughBrdf, float3 trueBrdf)
     return initWeight * initWeight * initWeight;
 }
 
-bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surface, out float3 diffuseContribution, out float3 specularContribution, out float hitDistance)
+bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surface, out float4 radianceAndSpecAvg, out float hitDistance)
 {
     RTXDI_GIReservoir finalReservoir = RTXDI_LoadGIReservoir(
         g_RtxdiBridgeConst.restirGI.reservoirBufferParams,
         pixelPosition, 
         g_RtxdiBridgeConst.restirGI.bufferIndices.finalShadingInputBufferIndex);
 
-    diffuseContribution = 0.0.xxx;
-    specularContribution = 0.0.xxx;
+    radianceAndSpecAvg = 0;
     hitDistance = 0;
+
+    const float4 secondaryPositionNormal = u_SecondarySurfacePositionNormal[pixelPosition];
+    const float3 secondaryPositionRadiance = u_SecondarySurfaceRadiance[pixelPosition].xyz;
+    const float  primaryScatterPdf = u_SecondarySurfaceRadiance[pixelPosition].w;
+
+    #if 0
+    {
+        DebugContext debug;
+        debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+        //debug.DrawDebugViz(pixelPosition, float4(frac(secondaryPositionNormal.rgb), 1.0));
+        if (primaryScatterPdf==0)
+            debug.DrawDebugViz(pixelPosition, float4(1, 0.5, 0.0, 1.0));
+        else
+            debug.DrawDebugViz(pixelPosition, float4(frac(secondaryPositionRadiance.rgb), 1.0));
+        return false;
+    }
+    #endif
 
     if (!RTXDI_IsValidGIReservoir(finalReservoir))
         return false;
 
-    const float4 secondaryPositionNormal = u_SecondarySurfacePositionNormal[pixelPosition];
-    RTXDI_GIReservoir initialReservoir = RTXDI_MakeGIReservoir(
-        secondaryPositionNormal.xyz,
-        octToNdirUnorm32(asuint(secondaryPositionNormal.w)),
-        u_SecondarySurfaceRadiance[pixelPosition].xyz,
-        /* samplePdf = */ 1.0);
+    RTXDI_GIReservoir initialReservoir = RTXDI_EmptyGIReservoir();
+    if (primaryScatterPdf>0)
+        initialReservoir = RTXDI_MakeGIReservoir( secondaryPositionNormal.xyz, octToNdirUnorm32(asuint(secondaryPositionNormal.w)),
+                                                    secondaryPositionRadiance.xyz, primaryScatterPdf );
 
 
     float3 L = finalReservoir.position - surface.GetPosW();
@@ -70,11 +84,9 @@ bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surf
             finalRadiance = 0;
     }
     
-    float3 diffuseBrdf, specularBrdf;
-    surface.Eval(L, diffuseBrdf, specularBrdf);
+    float4 bsdfThp = surface.Eval(L);
     
-    diffuseContribution = 0; 
-    specularContribution = 0;
+    float3 attenuatedRadiance = 0; 
 
     if (g_RtxdiBridgeConst.restirGI.finalShadingParams.enableFinalMIS)
     {
@@ -82,43 +94,35 @@ bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surf
         float hitDistance0 = length(L0);
         L0 /= hitDistance0;
 
-        float3 diffuseBrdf0, specularBrdf0;
-        surface.Eval(L0, diffuseBrdf0, specularBrdf0);
+        float4 bsdfThp0 = surface.Eval(L0);
 
-        float3 roughDiffuseBrdf, roughSpecularBrdf;
-        float3 roughDiffuseBrdf0, roughSpecularBrdf0;
-        surface.EvalRoughnessClamp(kMISRoughness, L, roughDiffuseBrdf, roughSpecularBrdf);
-        surface.EvalRoughnessClamp(kMISRoughness, L0, roughDiffuseBrdf0, roughSpecularBrdf0);
+        float4 roughBrdf    = surface.EvalRoughnessClamp(kMISRoughness, L);
+        float4 roughBrdf0   = surface.EvalRoughnessClamp(kMISRoughness, L0);
 
-        const float finalWeight = 1.0 - GetMISWeight(roughDiffuseBrdf + roughSpecularBrdf, diffuseBrdf + specularBrdf);
-        const float initialWeight = GetMISWeight(roughDiffuseBrdf0 + roughSpecularBrdf0, diffuseBrdf0 + specularBrdf0);
+        const float finalWeight = 1.0 - GetMISWeight(roughBrdf.rgb, bsdfThp.rgb);
+        const float initialWeight = GetMISWeight(roughBrdf.rgb, bsdfThp0.rgb);
 
         const float3 initialRadiance = initialReservoir.radiance * initialReservoir.weightSum;
 
-        diffuseContribution = diffuseBrdf * finalRadiance * finalWeight
-                            + diffuseBrdf0 * initialRadiance * initialWeight;
+        attenuatedRadiance = bsdfThp.rgb * finalRadiance * finalWeight + bsdfThp0.rgb * initialRadiance * initialWeight;
 
-        specularContribution = specularBrdf * finalRadiance * finalWeight
-                             + specularBrdf0 * initialRadiance * initialWeight;
-
-        hitDistance = hitDistance * finalWeight
-                    + hitDistance0 * initialWeight;
+        hitDistance = hitDistance * finalWeight     + hitDistance0 * initialWeight;
     }
     else
     {
-        diffuseContribution = diffuseBrdf * finalRadiance;
-        specularContribution = specularBrdf * finalRadiance;
+        attenuatedRadiance = bsdfThp.rgb * finalRadiance;
     }
 
-    if (any(isinf(diffuseContribution)) || any(isnan(diffuseContribution)) ||
-        any(isinf(specularContribution)) || any(isnan(specularContribution)))
+    if ( any(isinf(attenuatedRadiance)) || any(isnan(attenuatedRadiance)) )
     {
-        diffuseContribution = 0;
-        specularContribution = 0;
+        attenuatedRadiance = 0;
     }
+
+    radianceAndSpecAvg.rgb = attenuatedRadiance;
+    radianceAndSpecAvg.a = Average(finalRadiance) * bsdfThp.a;
 
     DebugContext debug;
-    debug.Init( pixelPosition, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+    debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
 
     switch(g_Const.debug.debugViewType)
     {
@@ -129,48 +133,41 @@ bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surf
         debug.DrawDebugViz(pixelPosition, float4(finalReservoir.radiance, 1.0));
         break;
     case (int)DebugViewType::ReSTIRGIOutput:
-        debug.DrawDebugViz(pixelPosition, float4(diffuseContribution + specularContribution, 1.0));
+        debug.DrawDebugViz(pixelPosition, float4(radianceAndSpecAvg.rgb, 1.0));
         break;
     }
 
-    return any(diffuseContribution+specularContribution)>0;
+    return any(radianceAndSpecAvg.rgb)>0;
 }
 
 #ifndef USE_AS_INCLUDE
 [numthreads(RTXDI_SCREEN_SPACE_GROUP_SIZE, RTXDI_SCREEN_SPACE_GROUP_SIZE, 1)]
 void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupThreadID, uint2 GroupIdx : SV_GroupID)
 {
-   const uint2 pixelPosition = RTXDI_ReservoirPosToPixelPos(GlobalIndex, g_RtxdiBridgeConst.runtimeParams.activeCheckerboardField);
+    const uint2 pixelPos = RTXDI_ReservoirPosToPixelPos(GlobalIndex, g_RtxdiBridgeConst.runtimeParams.activeCheckerboardField);
 
-    RAB_Surface surface = RAB_GetGBufferSurface(pixelPosition, false);
+    RAB_Surface surface = RAB_GetGBufferSurface(pixelPos, false);
 
     if (!RAB_IsSurfaceValid(surface))
         return;
 
-    float3 diffuseContribution, specularContribution;
-    float hitDistance;
+    float4 newRadianceAndSpecAvg;
+    float newSpecHitT;
 
-    if (ReSTIRGIFinalContribution(pixelPosition, surface, diffuseContribution, specularContribution, hitDistance))
+    if (ReSTIRGIFinalContribution(pixelPos, surface, newRadianceAndSpecAvg, newSpecHitT))
     {
         if (g_Const.ptConsts.denoisingEnabled)
         {
-            StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPosition, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
+            uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
 
-            uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
-            uint address = stablePlanes.PixelToAddress(pixelPosition, dominantStablePlaneIndex);
-
-            float4 denoiserDiffRadianceHitDist;
-            float4 denoiserSpecRadianceHitDist;
-            UnpackTwoFp32ToFp16(u_StablePlanesBuffer[address].DenoiserPackedRadianceHitDist, denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
-
-            denoiserDiffRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserDiffRadianceHitDist, diffuseContribution, hitDistance);
-            denoiserSpecRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserSpecRadianceHitDist, specularContribution, hitDistance);
-
-            u_StablePlanesBuffer[address].DenoiserPackedRadianceHitDist = PackTwoFp32ToFp16(denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
+            float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
+            float specHitDist   = u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist;
+            u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist = AccumulateHitT( radiance.a, specHitDist, newRadianceAndSpecAvg.a, newSpecHitT );
+            u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16(radiance.rgba+newRadianceAndSpecAvg.rgba);
         }
         else
         {
-            u_OutputColor[pixelPosition] += float4(diffuseContribution + specularContribution, 0);
+            u_OutputColor[pixelPos] += float4(newRadianceAndSpecAvg.rgb, 0);
         }
     }
 }

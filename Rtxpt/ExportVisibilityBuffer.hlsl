@@ -24,9 +24,9 @@ void main( uint2 dispatchThreadID : SV_DispatchThreadID )
         return;
 
     // Load the primary hit from the V-buffer (stable planes are now what used to be v-buffer).
-    StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
+    StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
 
-    uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
+    uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndex(pixelPos);
     uint stableBranchID = stablePlanes.GetBranchID(pixelPos, dominantStablePlaneIndex);
 	StablePlane sp = stablePlanes.LoadStablePlane(pixelPos, dominantStablePlaneIndex);
     PackedHitInfo packedHitInfo; float3 rayDir; uint vertexIndex; float sceneLength; float3 pathThp; float3 motionVectors;
@@ -37,7 +37,7 @@ void main( uint2 dispatchThreadID : SV_DispatchThreadID )
     // Useful for debugging
     // DebugContext debug; debug.Init( pixelPos, 0, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
 
-    const Ray cameraRay = Bridge::computeCameraRay( pixelPos, 0 );
+    const Ray cameraRay = Bridge::computeCameraRay( pixelPos );
     const HitInfo hit = HitInfo(packedHitInfo);
     bool hitSurface = hit.isValid();// && hit.getType() == HitType::Triangle;
 

@@ -39,9 +39,6 @@ using namespace donut::math;
 #include "../../external/RtxTf/STFDefinitions.h"
 #endif
 
-#define UI_SCOPED_INDENT(indent) RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); )
-#define UI_SCOPED_DISABLE(cond) RAII_SCOPE(ImGui::BeginDisabled(cond); , ImGui::EndDisabled(); )
-
 namespace donut::engine
 {
     class SceneGraphNode;
@@ -100,12 +97,9 @@ enum class StfMagnificationMethod
 
 struct SampleUIData
 {
-    bool                                ActualUseStablePlanes() const { return UseStablePlanes || RealtimeMode || ((AllowRTXDIInReferenceMode) && (UseReSTIRDI || UseReSTIRGI)); }
-    //bool                                ActualSkipIndirectNoisePlane0() const       { return StablePlanesSkipIndirectNoisePlane0 && StablePlanesActiveCount > 2; }
-
-    bool                                ActualUseRTXDIPasses() const { return (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRDI || UseReSTIRGI); }
-    bool                                ActualUseReSTIRDI() const { return UseNEE && (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRDI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
-    bool                                ActualUseReSTIRGI() const { return (RealtimeMode || AllowRTXDIInReferenceMode) && (UseReSTIRGI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
+    bool                                ActualUseRTXDIPasses() const { return (RealtimeMode) && (UseReSTIRDI || UseReSTIRGI); }
+    bool                                ActualUseReSTIRDI() const { return UseNEE && (RealtimeMode) && (UseReSTIRDI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
+    bool                                ActualUseReSTIRGI() const { return (RealtimeMode) && (UseReSTIRGI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
     uint                                ActualSamplesPerPixel() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSamplesPerPixel : 1u; }
     bool                                ActualUseStandaloneDenoiser() const { return (RealtimeMode && RealtimeAA < 3) ? StandaloneDenoiser : false; }
 
@@ -128,26 +122,24 @@ struct SampleUIData
     std::string                         ScreenshotSequencePath = "D:/AnimSequence/";
     bool                                ScreenshotSequenceCaptureActive = false;
     int                                 ScreenshotSequenceCaptureIndex = -64; // -x means x warmup frames for recording to stabilize denoiser
-    bool                                LoopLongestAnimation = false; // some animation sequences want to loop only the longest, but some want to loop each independently
     bool                                ExperimentalPhotoModeScreenshot = false;
 
     bool                                ScreenshotResetAndDelay = false;
-    int                                 ScreenshotResetAndDelayFrames = 5;
+    int                                 ScreenshotResetAndDelayFrames = 0;
     int                                 ScreenshotResetAndDelayCounter = -1;
     bool                                ScreenshotMiniSequence = false;
     int                                 ScreenshotMiniSequenceFrames = 5;
     int                                 ScreenshotMiniSequenceCounter = -1;
 
-    bool                                UseStablePlanes = false; // only determines whether UseStablePlanes is used in Accumulate mode (for testing correctness and enabling RTXDI) - in Realtime mode or when using RTXDI UseStablePlanes are necessary
-    bool                                AllowRTXDIInReferenceMode   = false; // allows use of RTXDI even in reference mode
-    bool                                UseNEE                      = true;
-    int                                 NEEType                                 = 2;        // '0' is uniform, '1' is power, '2' is NEE-AT (used to be ReGIR); once this solidifies make it a proper enum
-    int                                 NEECandidateSamples                     = 6;        // each full sample is picked from a number of candidate samples; these are not visibility tested so taking too many can hurt quality in heavily shadowed scenarios
+    bool                                UseNEE                                  = true;
+    int                                 NEEType                                 = 2;        // '0' is uniform, '1' is power, '2' is NEE-AT; once this solidifies make it a proper enum
+    int                                 NEECandidateSamples                     = 4;        // each full sample is picked from a number of candidate samples; these are not visibility tested so taking too many can hurt quality in heavily shadowed scenarios
     int                                 NEEFullSamples                          = 2;        // each full sample requires a shadow ray!
+    bool                                NEEAT_AntiLagPass                       = false;
     bool                                NEEAT_GlobalTemporalFeedbackEnabled     = true;
-    float                               NEEAT_GlobalTemporalFeedbackRatio       = 0.65f;
-    bool                                NEEAT_NarrowTemporalFeedbackEnabled     = true;
-    float                               NEEAT_NarrowTemporalFeedbackRatio       = 0.65f;
+    float                               NEEAT_GlobalTemporalFeedbackRatio       = 0.75f;
+    bool                                NEEAT_LocalTemporalFeedbackEnabled     = true;
+    float                               NEEAT_LocalTemporalFeedbackRatio       = 0.65f;
     float                               NEEAT_MIS_Boost                         = 1.0f;
     float                               NEEAT_Distant_vs_Local_Importance       = 1.0f;
     int                                 NEEBoostSamplingOnDominantPlane = 0;    // Boost light sampling only on the dominant denoising surface
@@ -159,11 +151,11 @@ struct SampleUIData
     bool                                StandaloneDenoiser = true;
     bool                                ResetAccumulation = false;
     bool                                ResetRealtimeCaches = false;
-    int                                 BounceCount = 32;
+    int                                 BounceCount = 24;
     int                                 ReferenceDiffuseBounceCount = 6;
     int                                 RealtimeDiffuseBounceCount = 3;
     int                                 AccumulationTarget = 4096;
-    int                                 AccumulationIndex = 0;
+    bool                                AccumulationPreWarmRealtimeCaches = true;
     bool                                AccumulationAA = true;
     int                                 RealtimeAA = 3;                     // 0 - no AA, 1 - TAA, 2 - DLSS, 3 - DLSS-RR
     float                               CameraAperture = 0.0f;
@@ -171,12 +163,10 @@ struct SampleUIData
     float                               CameraMoveSpeed = 1.0f;
     float                               CameraAntiRRSleepJitter = 0.0f;
     float                               TexLODBias = -1.0f;                 // as small as possible without reducing performance!
-    bool                                SuppressPrimaryNEE = false;   
 #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
     StfFilterMode                       STFFilterMode = StfFilterMode::Linear;
     StfMagnificationMethod              STFMagnificationMethod = StfMagnificationMethod::Default;
     float                               STFGaussianSigma = 0.3f;
-    bool                                STFUseBlueNoise = false;
 #endif // RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
 
     donut::render::TemporalAntiAliasingParameters TemporalAntiAliasingParams;
@@ -202,9 +192,10 @@ struct SampleUIData
     bool                                ShowWireframe;
 
     bool                                ReferenceFireflyFilterEnabled = true;
-    float                               ReferenceFireflyFilterThreshold = 2.5f;
+    float                               ReferenceFireflyFilterThreshold = 5.0f;
     bool                                RealtimeFireflyFilterEnabled = true;
-    float                               RealtimeFireflyFilterThreshold = 0.1f;
+    float                               RealtimeFireflyFilterThreshold = 0.15f;
+    bool                                RealtimeFireflyFilterRelaxOnNonNoisy = true;
 
     float                               DenoiserRadianceClampK = 8.0f;
 
@@ -295,7 +286,7 @@ struct SampleUIData
 
     bool                                EnableBloom = true;
     float                               BloomRadius = 8.0f;
-    float                               BloomIntensity = 0.008f;
+    float                               BloomIntensity = 0.004f;
 };
 
 extern SampleUIData g_sampleUIData;

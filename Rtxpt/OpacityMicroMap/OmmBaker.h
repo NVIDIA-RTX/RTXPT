@@ -20,7 +20,7 @@
 
 #include "../ComputePass.h"
 
-using namespace donut::math;
+#include "../Shaders/Misc/OmmGeometryDebugData.hlsli"
 
 namespace donut::engine
 {
@@ -102,24 +102,7 @@ struct OpacityMicroMapUIData
         bool EnableSpecialIndices = true;
         int MaxOmmArrayDataSizeInMB = 100;
 
-        bool operator == (const BuildState& o) const {
-            return
-                MaxSubdivisionLevel == o.MaxSubdivisionLevel &&
-                EnableDynamicSubdivision == o.EnableDynamicSubdivision &&
-                DynamicSubdivisionScale == o.DynamicSubdivisionScale &&
-                Flag == o.Flag &&
-                Format == o.Format &&
-                AlphaCutoffGT == o.AlphaCutoffGT &&
-                AlphaCutoffLE == o.AlphaCutoffLE &&
-                ComputeOnly == o.ComputeOnly &&
-                LevelLineIntersection == o.LevelLineIntersection &&
-                EnableTexCoordDeduplication == o.EnableTexCoordDeduplication &&
-                Force32BitIndices == o.Force32BitIndices &&
-                EnableNsightDebugMode == o.EnableNsightDebugMode &&
-                EnableSpecialIndices == o.EnableSpecialIndices &&
-                MaxOmmArrayDataSizeInMB == o.MaxOmmArrayDataSizeInMB
-                ;
-        }
+        bool operator == (const BuildState& other) const = default;
     };
 
     bool                                Enable = true;
@@ -142,26 +125,27 @@ struct OpacityMicroMapUIData
 class OmmBaker
 {
 public:
-    OmmBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::DescriptorTableManager> descriptorTableManager, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, nvrhi::CommandListHandle mainCommandList, bool enabled);
+    OmmBaker(nvrhi::DeviceHandle device,
+        std::shared_ptr<donut::engine::DescriptorTableManager> descriptorTableManager,
+        std::shared_ptr<donut::engine::TextureCache> textureCache,
+        std::shared_ptr<donut::engine::ShaderFactory> shaderFactory);
     ~OmmBaker();
 
-    bool                            IsEnabled() const { return m_enabled; }
+    void                            CreateRenderPasses(nvrhi::BindingLayoutHandle bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses);
 
-    void                            CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const std::shared_ptr<donut::engine::Scene>& scene);
-
-    void                            Update(nvrhi::ICommandList * commandList, const std::shared_ptr<donut::engine::Scene> & scene);
+    void                            Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene);
 
     OpacityMicroMapUIData &         UIData()    { return m_uiData; }
-    bool                            DebugGUI(float indent, const std::shared_ptr<donut::engine::Scene>& scene);
+    bool                            DebugGUI(float indent, const donut::engine::Scene& scene);
 
-    void                            SceneLoaded(const std::shared_ptr<donut::engine::Scene>& scene);
+    void                            SceneLoaded(const donut::engine::Scene& scene);
     void                            SceneUnloading();
 
-    void                            CreateOpacityMicromaps(const std::shared_ptr<donut::engine::Scene>& scene);
-    void                            DestroyOpacityMicromaps(nvrhi::ICommandList* commandList, const std::shared_ptr<donut::engine::Scene>& scene);
-    void                            BuildOpacityMicromaps(nvrhi::ICommandList* commandList, const std::shared_ptr<donut::engine::Scene>& scene);
-    void                            WriteGeometryDebugBuffer(nvrhi::ICommandList* commandList);
-    void                            UpdateDebugGeometry(const std::shared_ptr<struct donut::engine::MeshInfo>& mesh);
+    void                            CreateOpacityMicromaps(const donut::engine::Scene& scene);
+    void                            DestroyOpacityMicromaps(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene);
+    void                            BuildOpacityMicromaps(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene);
+    void                            WriteGeometryDebugBuffer(nvrhi::ICommandList& commandList);
+    void                            UpdateDebugGeometry(const donut::engine::MeshInfo& mesh);
 
     [[nodiscard]] nvrhi::IBuffer*   GetGeometryDebugBuffer() const { return m_geometryDebugBuffer; }
 
@@ -186,8 +170,6 @@ private:
 
     OpacityMicroMapUIData           m_uiData;
 
-    std::unique_ptr<std::vector<class GeometryDebugData>> m_geometryDebugDataPtr;
+    std::vector<class GeometryDebugData> m_geometryDebugDataPtr;
     nvrhi::BufferHandle             m_geometryDebugBuffer;
-
-    bool                            m_enabled;
 };

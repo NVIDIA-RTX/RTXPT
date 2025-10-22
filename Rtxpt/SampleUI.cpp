@@ -22,7 +22,7 @@
 
 #include "OpacityMicroMap/OmmBaker.h"
 
-#include "SampleGame/SampleGame.h"
+#include "SampleGame/GameScene.h"
 #include "ZoomTool.h"
 
 using namespace donut::app;
@@ -185,15 +185,23 @@ void SampleUI::buildUI(void)
     if (!m_ui.ShowUI)
         return;
 
-    ImGui::SetCurrentFont(m_defaultFont->GetScaledFont());
+    ImGui::PushFont(m_defaultFont->GetScaledFont());
 
     // Ideally we'd want to rework UI scaling so that it is not based on m_currentScale but on ImGui::GetFontSize() so we can freely change fonts
     auto& io = ImGui::GetIO();
     float scaledWidth = io.DisplaySize.x; 
     float scaledHeight = io.DisplaySize.y;
 
-    const float defWindowWidth = 320.0f * m_currentScale;
+    const float defWindowWidth = 340.0f * m_currentScale;
     const float defItemWidth = defWindowWidth * 0.3f * m_currentScale;
+
+    auto imGuiCheckboxUInt32 = [ & ](const char* label, uint32_t* v)
+    {
+        bool pv = (*v) != 0;
+        bool ret = ImGui::Checkbox(label, &pv);
+        *v = pv ? (1) : (0);
+        return ret;
+    };
 
     {
         ImGui::SetNextWindowPos(ImVec2(10.f, 10.f), ImGuiCond_Appearing);
@@ -250,6 +258,8 @@ void SampleUI::buildUI(void)
                         if (FileDialog(false, "PNG files\0*.png\0BMP files\0*.bmp\0All files\0*.*\0\0", fileName))
                         {
                             m_ui.ScreenshotFileName = fileName;
+                            if (m_ui.ScreenshotResetAndDelay)
+                                m_app.ResetSceneTime();
                         }
                     }
 
@@ -275,6 +285,9 @@ void SampleUI::buildUI(void)
                         ImGui::PopItemWidth();
                     }
 
+                    //ImGui::Checkbox("Reset scene time", &m_ui.ScreenshotResetSceneTime);
+
+#if 0
                     ImGui::Separator();
                     ImGui::TextColored(categoryColor, "[experimental] Save stable animation sequence, path:");
                     ImGui::Text(" '%s'", m_ui.ScreenshotSequencePath.c_str()); 
@@ -300,6 +313,7 @@ void SampleUI::buildUI(void)
                     // ImGui::Separator();
                     // ImGui::Checkbox("Loop longest animation", &m_ui.LoopLongestAnimation);
                     // if (ImGui::IsItemHovered()) ImGui::SetTooltip("If enabled, only restarts all animations when longest one played out. Otherwise loops them individually (and not in sync)!");
+#endif
                 }
             }
         }
@@ -323,23 +337,15 @@ void SampleUI::buildUI(void)
         ImGui::PopID(); //"SceneComboID"
         ImGui::PopItemWidth();
 
-        if (m_app.GetGame() && m_app.GetGame()->IsEnabled() )
-        {
-            if (ImGui::CollapsingHeader("Sample Game"/*, ImGuiTreeNodeFlags_DefaultOpen*/))
-            {
-                RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
-                m_app.GetGame()->DebugGUI(indent);
-            }
-        }
-
         if (ImGui::CollapsingHeader("Scene"/*, ImGuiTreeNodeFlags_DefaultOpen*/))
         {
             RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
-            if (m_app.UncompressedTextureCount() > 0)
+            uint uncompressedTextureCount = (uint)m_app.GetUncompressedTextures().size();
+            if (uncompressedTextureCount > 0)
             {
-                ImGui::TextColored(warnColor, "Scene has %d uncompressed textures", (uint)m_app.UncompressedTextureCount());
+                ImGui::TextColored(warnColor, "Scene has %d uncompressed textures", uncompressedTextureCount);
                 if (ImGui::Button("Batch compress with nvtt_export.exe", { -1, 0 }))
-                    if (m_app.CompressTextures())
+                    if (CompressTextures(m_app.GetUncompressedTextures()))
                     {   // reload scene
                         m_app.SetCurrentScene(m_app.GetCurrentSceneName(), true);
                     }
@@ -357,7 +363,16 @@ void SampleUI::buildUI(void)
                 m_ui.ResetAccumulation = true;
             }
 
-            if (m_ui.TogglableNodes != nullptr && ImGui::CollapsingHeader("Togglables"))
+            if (m_app.GetGame() && m_app.GetGame()->IsInitialized())
+            {
+                if (ImGui::CollapsingHeader("Interactive elements"/*, ImGuiTreeNodeFlags_DefaultOpen*/))
+                {
+                    RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
+                    m_app.GetGame()->DebugGUI(indent);
+                }
+            }
+
+            if (m_ui.TogglableNodes != nullptr && m_ui.TogglableNodes->size() > 0 && ImGui::CollapsingHeader("Togglables"))
             {
                 for (int i = 0; i < m_ui.TogglableNodes->size(); i++)
                 {
@@ -509,11 +524,16 @@ void SampleUI::buildUI(void)
                     m_ui.ResetAccumulation |= m_app.GetLightsBaker()->InfoGUI(indent);
             }
 
-            ImGui::TextColored(categoryColor, "Distant lighting (envmap+directional):");
+
+            //ImGui::TextColored(categoryColor, "Distant lighting (envmap+directional):");
             {
                 RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
-                if (m_app.GetEnvMapBaker()!=nullptr) // envmap baker can legally be nullptr
-                    m_ui.ResetAccumulation |= m_app.GetEnvMapBaker()->DebugGUI(indent);
+                if (ImGui::CollapsingHeader("Distant lighting (envmap+directional)", 0/*ImGuiTreeNodeFlags_DefaultOpen*/))
+                {
+                    RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
+                    if (m_app.GetEnvMapBaker()!=nullptr) // envmap baker can legally be nullptr
+                        m_ui.ResetAccumulation |= m_app.GetEnvMapBaker()->DebugGUI(indent);
+                }
             }
 
             ImGui::TextColored(categoryColor, "Importance sampling:");
@@ -538,30 +558,32 @@ void SampleUI::buildUI(void)
                                 RESET_ON_CHANGE(ImGui::SliderFloat("Global feedback ratio", &m_ui.NEEAT_GlobalTemporalFeedbackRatio, 0.0f, 0.95f));
                             }
 
-                            RESET_ON_CHANGE(ImGui::Checkbox("Narrow temporal feedback", &m_ui.NEEAT_NarrowTemporalFeedbackEnabled));
+                            RESET_ON_CHANGE(ImGui::Checkbox("Local temporal feedback", &m_ui.NEEAT_LocalTemporalFeedbackEnabled));
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Increase sampling importance for most influential lights from previous frame, within a per-screen-tile.");
-                            if (m_ui.NEEAT_NarrowTemporalFeedbackEnabled)
+                            if (m_ui.NEEAT_LocalTemporalFeedbackEnabled)
                             {
                                 RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent););
-                                RESET_ON_CHANGE(ImGui::SliderFloat("Narrow feedback ratio", &m_ui.NEEAT_NarrowTemporalFeedbackRatio, 0.0f, 0.95f));
+                                RESET_ON_CHANGE(ImGui::SliderFloat("Local feedback ratio", &m_ui.NEEAT_LocalTemporalFeedbackRatio, 0.0f, 0.95f));
                     
-                                uint samplesBoosted = std::min(RTXPT_LIGHTING_NEEAT_MAX_TOTAL_SAMPLE_COUNT, m_ui.NEEFullSamples+m_ui.NEEBoostSamplingOnDominantPlane);
+                                uint samplesBoosted = std::min(RTXPT_LIGHTING_MAX_TOTAL_SAMPLE_COUNT, m_ui.NEEFullSamples+m_ui.NEEBoostSamplingOnDominantPlane);
 
-                                uint narrowSamples = ComputeNarrowSampleCount(m_ui.NEEAT_NarrowTemporalFeedbackRatio, m_ui.NEEFullSamples);
-                                uint narrowSamplesBoosted = ComputeNarrowSampleCount(m_ui.NEEAT_NarrowTemporalFeedbackRatio, samplesBoosted );
+                                uint localSamples = ComputeLocalSampleCount(m_ui.NEEAT_LocalTemporalFeedbackRatio, m_ui.NEEFullSamples);
+                                uint localSamplesBoosted = ComputeLocalSampleCount(m_ui.NEEAT_LocalTemporalFeedbackRatio, samplesBoosted );
                     
                                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Increase sampling importance for most influential lights from previous frame, within a per-screen-tile.\n"
-                                                                              "Current full samples is %d, and out of those %d will be narrow and %d will be global (%d:%d for boosted)", m_ui.NEEFullSamples, 
-                                                                                    narrowSamples, m_ui.NEEFullSamples-narrowSamples,
-                                                                                    narrowSamplesBoosted, samplesBoosted-narrowSamplesBoosted);
+                                                                              "Current full samples is %d, and out of those %d will be local and %d will be global (%d:%d for boosted)", m_ui.NEEFullSamples, 
+                                                                                    localSamples, m_ui.NEEFullSamples-localSamples,
+                                                                                    localSamplesBoosted, samplesBoosted-localSamplesBoosted);
                             }
-                            if (m_ui.NEEAT_GlobalTemporalFeedbackEnabled || m_ui.NEEAT_NarrowTemporalFeedbackEnabled)
+                            if (m_ui.NEEAT_GlobalTemporalFeedbackEnabled || m_ui.NEEAT_LocalTemporalFeedbackEnabled)
                             {
                                 ImGui::SliderFloat("BSDF vs NEE-AT MIS boost", &m_ui.NEEAT_MIS_Boost, 0.0f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
                                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tweak the MIS to give more power to NEE-AT (>1) or to BSDF sampled emissives (<1);\nuseful since NEE-AT is shadow aware and boosting it can provide better overall sampling quality");
                             }
                             ImGui::SliderFloat("Distant vs Local initial importance", &m_ui.NEEAT_Distant_vs_Local_Importance, 0.01f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("The higher the setting, the more initial importance will be given to environment map / sunlight vs local scene lights and vice versa.");
+                            ImGui::Checkbox("Anti-lag pre-pass (experimental)", &m_ui.NEEAT_AntiLagPass);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("This will use RTXPT-s path tracing pre-pass (used for denoising and etc.) to pre-fill NEE-AT lighting \nguide buffers for additional same-frame selection of lights, including for disocclusions.\nWithout this, NEE-AT guidance is past-frame feedback driven and thus lags a frame.\nThis is entirely at proof of concept stage - not optimized in any way.");
                         }
                     }
                 
@@ -600,27 +622,28 @@ void SampleUI::buildUI(void)
                     {
                         UI_SCOPED_DISABLE( (m_ui.ActualUseReSTIRDI() || m_ui.ActualUseReSTIRGI()) );
                         ImGui::InputInt("Samples per pixel", &m_ui.RealtimeSamplesPerPixel); 
-                        m_ui.RealtimeSamplesPerPixel = dm::clamp(m_ui.RealtimeSamplesPerPixel, 1, 128);
+                        m_ui.RealtimeSamplesPerPixel = dm::clamp(m_ui.RealtimeSamplesPerPixel, 1, 64);
                         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) 
                             ImGui::SetTooltip("How many full paths to trace per pixel from the primary surface\n(camera ray is not re-cast so there is no added AA)\n(currently incompatible with ReSTIR DI & ReSTIR GI)");
                     }
                 }
                 else
                 {
-                    if (ImGui::Button("Reset"))
-                    {
-                        m_ui.ResetAccumulation = true;
-                        m_ui.ResetRealtimeCaches = true;
-                    }
+                    RESET_ON_CHANGE( ImGui::Button("Reset") );
                     ImGui::SameLine();
-                    ImGui::InputInt("Sample count", &m_ui.AccumulationTarget);
+                    RESET_ON_CHANGE( ImGui::InputInt("Sample count", &m_ui.AccumulationTarget) );
                     m_ui.AccumulationTarget = dm::clamp(m_ui.AccumulationTarget, 1, 4 * 1024 * 1024); // this max is beyond float32 precision threshold; expect some banding creeping in when using more than 500k samples
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of path samples per pixel to collect");
-                    ImGui::Text("Accumulated samples: %d (out of %d target)", m_ui.AccumulationIndex, m_ui.AccumulationTarget);
+                    ImGui::Text("Accumulated samples: %d (out of %d target)", m_app.GetAccumulationSampleIndex(), m_ui.AccumulationTarget);
                     ImGui::Text("(avg frame time: %.3fms)", m_app.GetAvgTimePerFrame() * 1000.0f);
+
+                    RESET_ON_CHANGE(ImGui::Checkbox("Pre-warm real-time caches", &m_ui.AccumulationPreWarmRealtimeCaches));
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("If enabled, various lighting and etc systems will be pre-warmed before sample 0 is \naccumulated; otherwise they're reset and initial few samples will be lower quality.");
 
                     RESET_ON_CHANGE(ImGui::Checkbox("Jitter anti-aliasing", &m_ui.AccumulationAA));
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each sample will have a random, per pixel jitter emulating box filter\nTODO: add option for Gaussian distribution for better AA");
+
+                    m_ui.ResetRealtimeCaches |= m_ui.ResetAccumulation; // if there's a reset for any reason whilst we're in reference mode, reset the realtime caches too for determinism
                 }
 
                 RESET_ON_CHANGE(ImGui::InputInt("Max bounces", &m_ui.BounceCount));
@@ -644,6 +667,9 @@ void SampleUI::buildUI(void)
                         RESET_ON_CHANGE( ImGui::InputFloat("FF Threshold", &m_ui.RealtimeFireflyFilterThreshold, 0.01f, 0.1f, "%.5f") );
                         m_ui.RealtimeFireflyFilterThreshold = dm::clamp(m_ui.RealtimeFireflyFilterThreshold, 0.00001f, 1000.0f);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Better light importance sampling allows for setting higher firefly filter threshold and conversely.");
+                        ImGui::SameLine();
+                        RESET_ON_CHANGE( ImGui::Checkbox("RX", &m_ui.RealtimeFireflyFilterRelaxOnNonNoisy) ); 
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Relax on non-noisy (direct, stable) radiance: clamp value will be FIREFLY_FILTER_RELAX_ON_NON_NOISY_K times bigger - helps with blooms");
                     }
                 }
                 else
@@ -748,7 +774,7 @@ void SampleUI::buildUI(void)
             {
                 RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); );
 
-                if (m_ui.RealtimeMode || m_ui.AllowRTXDIInReferenceMode)
+                if (m_ui.RealtimeMode)
                 {
                     {
                         bool nullCheckbox = false;
@@ -780,7 +806,7 @@ void SampleUI::buildUI(void)
                     {
                         RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
     #ifndef LIGHTS_IMPORTANCE_SAMPLING_TYPE
-                        RESET_ON_CHANGE(ImGui::Combo("Sampling technique", (int*)&m_ui.NEEType, "Uniform\0Power\0NEE-AT\0\0"));
+                        RESET_ON_CHANGE(ImGui::Combo("Sampling technique", (int*)&m_ui.NEEType, "Uniform\0Power+\0NEE-AT\0\0"));
                         m_ui.NEEType = dm::clamp(m_ui.NEEType, 0, 2);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Light importance sampling technique to use for NEE.\nNote: Additional NEE-AT settings are exposed in 'Lighting -> NEE-AT' UI section.");
     #else
@@ -847,25 +873,14 @@ void SampleUI::buildUI(void)
                 }
                 else
                 {
-                    RESET_ON_CHANGE(ImGui::Checkbox("Enable StablePlanes (*)", &m_ui.UseStablePlanes));
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use to test (should be identical before/after)\nUseStablePlanes is always on when RTXDI is enabled or in realtime mode");
-
-                    {
-                        UI_SCOPED_DISABLE(true);
-                        RESET_ON_CHANGE(ImGui::Checkbox("Allow RTXDI in reference mode", &m_ui.AllowRTXDIInReferenceMode));
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("!!CURRENTLY BROKEN AND DISABLED!!");
-                    }
+                    // no UI debugging options for reference mode at the moment
                 }
-                RESET_ON_CHANGE(ImGui::Checkbox("Suppress Primary NEE", &m_ui.SuppressPrimaryNEE));
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("NOTE: works only in realtime mode at the moment!");
             }
         }
 
     #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
         if (ImGui::CollapsingHeader("Stochastic Texture Filtering"))
         {
-            ImGui::Checkbox("Use Blue Noise", (bool*)&m_ui.STFUseBlueNoise);
-
             bool changed = false;
             changed = ImGui::Combo("Magnification Method", (int*)&m_ui.STFMagnificationMethod,
                 "Default\0"
@@ -1091,6 +1106,7 @@ void SampleUI::buildUI(void)
                         RESET_ON_CHANGE(ImGui::InputInt("Environment Light", (int*)&m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples));
 		                m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples = dm::clamp(m_ui.RTXDI.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples, 0u, 32u);
                     }
+                    RESET_ON_CHANGE(imGuiCheckboxUInt32("Initial visibility test", &m_ui.RTXDI.restirDI.initialSamplingParams.enableInitialVisibility));
     
                     if (ImGui::CollapsingHeader("Fine Tuning"))
                     {
@@ -1098,17 +1114,18 @@ void SampleUI::buildUI(void)
                         ImGui::PushItemWidth(defItemWidth);
                         RESET_ON_CHANGE(ImGui::SliderFloat("BRDF Cut-off", &m_ui.RTXDI.restirDI.initialSamplingParams.brdfCutoff, 0.0f, 1.0f));
                         ImGui::Separator();
-                        RESET_ON_CHANGE(ImGui::Checkbox("Use Permutation Sampling", (bool*)&m_ui.RTXDI.restirDI.temporalResamplingParams.enablePermutationSampling));
+                        RESET_ON_CHANGE(imGuiCheckboxUInt32("Use Permutation Sampling", &m_ui.RTXDI.restirDI.temporalResamplingParams.enablePermutationSampling));
                         RESET_ON_CHANGE(ImGui::SliderFloat("Temporal Depth Threshold", &m_ui.RTXDI.restirDI.temporalResamplingParams.temporalDepthThreshold, 0.f, 1.f));
                         RESET_ON_CHANGE(ImGui::SliderFloat("Temporal Normal Threshold", &m_ui.RTXDI.restirDI.temporalResamplingParams.temporalNormalThreshold, 0.f, 1.f));
 			            RESET_ON_CHANGE(ImGui::SliderFloat("Boiling Filter Strength", &m_ui.RTXDI.restirDI.temporalResamplingParams.boilingFilterStrength, 0.f, 1.f));
+                        RESET_ON_CHANGE(imGuiCheckboxUInt32("Discard Invisible Temporal Samples", &m_ui.RTXDI.restirDI.temporalResamplingParams.discardInvisibleSamples));
                         ImGui::Separator();
                         RESET_ON_CHANGE(ImGui::SliderInt("Spatial Samples", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.numSpatialSamples, 0, 8));
 			            RESET_ON_CHANGE(ImGui::SliderInt("Disocclusion Samples", (int*)&m_ui.RTXDI.restirDI.spatialResamplingParams.numDisocclusionBoostSamples, 0, 8));
                         RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Sampling Radius", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialSamplingRadius, 0.f, 64.f));
                         RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Depth Threshold", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialDepthThreshold, 0.f, 1.f));
                         RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Normal Threshold", &m_ui.RTXDI.restirDI.spatialResamplingParams.spatialNormalThreshold, 0.f, 1.f));
-			            RESET_ON_CHANGE(ImGui::Checkbox("Discount Naive Samples", (bool*)&m_ui.RTXDI.restirDI.spatialResamplingParams.discountNaiveSamples));
+			            RESET_ON_CHANGE(imGuiCheckboxUInt32("Discount Naive Samples", &m_ui.RTXDI.restirDI.spatialResamplingParams.discountNaiveSamples));
 			            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Prevents samples which are from the current frame or have no reasonable temporal history merged being spread to neighbors");
                         ImGui::Separator();
                         RESET_ON_CHANGE(ImGui::DragFloat("Ray Epsilon", &m_ui.RTXDI.rayEpsilon, 0.0001f, 0.0001f, 0.01f, "%.4f"));
@@ -1130,11 +1147,12 @@ void SampleUI::buildUI(void)
                     ImGui::PushItemWidth(defItemWidth);
 		            RESET_ON_CHANGE(ImGui::Combo("Resampling Mode", (int*)&m_ui.RTXDI.restirGI.resamplingMode,
 			            "Disabled\0Temporal\0Spatial\0Temporal & Spatial\0Fused\0\0"));
+                    ImGui::TextWrapped("Please note: there's a bug in ReSTIRGIContext::UpdateBufferIndices or similar which breaks 'Disabled' or one or the other sampling modes.");
                     ImGui::Separator();
                     RESET_ON_CHANGE(ImGui::SliderInt("History Length ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.maxHistoryLength, 0, 64));
                     RESET_ON_CHANGE(ImGui::SliderInt("Max Reservoir Age ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.maxReservoirAge, 0, 100));
-                    RESET_ON_CHANGE(ImGui::Checkbox("Permutation Sampling ##GI", (bool*)&m_ui.RTXDI.restirGI.temporalResamplingParams.enablePermutationSampling));
-                    RESET_ON_CHANGE(ImGui::Checkbox("Fallback Sampling ##GI", (bool*)&m_ui.RTXDI.restirGI.temporalResamplingParams.enableFallbackSampling));
+                    RESET_ON_CHANGE(imGuiCheckboxUInt32("Permutation Sampling ##GI", &m_ui.RTXDI.restirGI.temporalResamplingParams.enablePermutationSampling));
+                    RESET_ON_CHANGE(imGuiCheckboxUInt32("Fallback Sampling ##GI", &m_ui.RTXDI.restirGI.temporalResamplingParams.enableFallbackSampling));
                     RESET_ON_CHANGE(ImGui::SliderFloat("Boiling Filter Strength##GI", &m_ui.RTXDI.restirGI.temporalResamplingParams.boilingFilterStrength, 0.f, 1.f));
                     RESET_ON_CHANGE(ImGui::Combo("Temporal Bias Correction ##GI", (int*)&m_ui.RTXDI.restirGI.temporalResamplingParams.temporalBiasCorrectionMode,
                         "Off\0Basic\0Ray Traced\0"));
@@ -1143,31 +1161,38 @@ void SampleUI::buildUI(void)
                     RESET_ON_CHANGE(ImGui::SliderFloat("Spatial Sampling Radius ##GI", &m_ui.RTXDI.restirGI.spatialResamplingParams.spatialSamplingRadius, 1.f, 64.f));
                     RESET_ON_CHANGE(ImGui::Combo("Spatial Bias Correction ##GI", (int*)&m_ui.RTXDI.restirGI.spatialResamplingParams.spatialBiasCorrectionMode, "Off\0Basic\0Ray Traced\0"));
                     ImGui::Separator();
-                    RESET_ON_CHANGE(ImGui::Checkbox("Final Visibility ##GI", (bool*)&m_ui.RTXDI.restirGI.finalShadingParams.enableFinalVisibility));
-                    RESET_ON_CHANGE(ImGui::Checkbox("Final MIS ##GI", (bool*)&m_ui.RTXDI.restirGI.finalShadingParams.enableFinalMIS));
+                    RESET_ON_CHANGE(imGuiCheckboxUInt32("Final Visibility ##GI", &m_ui.RTXDI.restirGI.finalShadingParams.enableFinalVisibility));
+                    RESET_ON_CHANGE(imGuiCheckboxUInt32("Final MIS ##GI", &m_ui.RTXDI.restirGI.finalShadingParams.enableFinalMIS));
 
                     ImGui::PopItemWidth();
                 }
             }
         }
 
-        if (m_ui.ActualUseStablePlanes() && ImGui::CollapsingHeader("Stable Planes (denoising layers)"))
+        if (ImGui::CollapsingHeader("Stable Planes (denoising layers)"))
         {
-            ImGui::InputInt("Active stable planes", &m_ui.StablePlanesActiveCount);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How many stable planes to allow - 1 is just standard denoising");
-            m_ui.StablePlanesActiveCount = dm::clamp(m_ui.StablePlanesActiveCount, 1, (int)cStablePlaneCount);
-            ImGui::InputInt("Max stable plane vertex depth", &m_ui.StablePlanesMaxVertexDepth);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How deep the stable part of path tracing can go");
-            m_ui.StablePlanesMaxVertexDepth = dm::clamp(m_ui.StablePlanesMaxVertexDepth, 2, (int)cStablePlaneMaxVertexIndex);
-             ImGui::SliderFloat("Path split stop threshold", &m_ui.StablePlanesSplitStopThreshold, 0.0f, 2.0f);
-             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stops splitting if more than this threshold throughput will be on a non-taken branch.\nActual threshold is this value divided by vertexIndex.");
-            ImGui::Checkbox("Primary Surface Replacement", &m_ui.AllowPrimarySurfaceReplacement);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("When stable planes enabled, whether we can use PSR for the first (base) plane");
-            ImGui::Checkbox("Suppress primary plane noisy specular", &m_ui.StablePlanesSuppressPrimaryIndirectSpecular);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("This will suppress noisy specular to primary stable plane by specified amount\nbut only if at least 1 stable plane is also used on the same pixel.\nThis for ex. reduces secondary internal smudgy reflections from internal many bounces in a window.");
-            ImGui::SliderFloat("Suppress primary plane noisy specular amount", &m_ui.StablePlanesSuppressPrimaryIndirectSpecularK, 0.0f, 1.0f);
-            ImGui::SliderFloat("Non-primary plane anti-aliasing fallthrough", &m_ui.StablePlanesAntiAliasingFallthrough, 0.0f, 1.0f);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Divert some radiance on highly curved and edge areas from non-0 plane back\nto plane 0. This reduces aliasing on complex boundary bounces.");
+            if (m_ui.RealtimeMode)
+            {
+                ImGui::InputInt("Active stable planes", &m_ui.StablePlanesActiveCount);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How many stable planes to allow - 1 is just standard denoising");
+                m_ui.StablePlanesActiveCount = dm::clamp(m_ui.StablePlanesActiveCount, 1, (int)cStablePlaneCount);
+                ImGui::InputInt("Max stable plane vertex depth", &m_ui.StablePlanesMaxVertexDepth);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How deep the stable part of path tracing can go");
+                m_ui.StablePlanesMaxVertexDepth = dm::clamp(m_ui.StablePlanesMaxVertexDepth, 2, (int)cStablePlaneMaxVertexIndex);
+                ImGui::SliderFloat("Path split stop threshold", &m_ui.StablePlanesSplitStopThreshold, 0.0f, 2.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stops splitting if more than this threshold throughput will be on a non-taken branch.\nActual threshold is this value divided by vertexIndex.");
+                ImGui::Checkbox("Primary Surface Replacement", &m_ui.AllowPrimarySurfaceReplacement);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("When stable planes enabled, whether we can use PSR for the first (base) plane");
+                ImGui::Checkbox("Suppress primary plane noisy specular", &m_ui.StablePlanesSuppressPrimaryIndirectSpecular);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("This will suppress noisy specular to primary stable plane by specified amount\nbut only if at least 1 stable plane is also used on the same pixel.\nThis for ex. reduces secondary internal smudgy reflections from internal many bounces in a window.");
+                ImGui::SliderFloat("Suppress primary plane noisy specular amount", &m_ui.StablePlanesSuppressPrimaryIndirectSpecularK, 0.0f, 1.0f);
+                ImGui::SliderFloat("Non-primary plane anti-aliasing fallthrough", &m_ui.StablePlanesAntiAliasingFallthrough, 0.0f, 1.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Divert some radiance on highly curved and edge areas from non-0 plane back\nto plane 0. This reduces aliasing on complex boundary bounces.");
+            }
+            else
+            {
+                ImGui::Text("Not available in reference mode");
+            }
         }
 
         if (m_ui.ActualUseStandaloneDenoiser() && ImGui::CollapsingHeader("Standalone Denoiser (NRD)"))
@@ -1225,8 +1250,6 @@ void SampleUI::buildUI(void)
                     m_ui.ReblurSettings.hitDistanceReconstructionMode = (nrd::HitDistanceReconstructionMode)hitDistanceReconstructionMode;
 
                     ImGui::Checkbox("Enable Firefly Filter", &m_ui.ReblurSettings.enableAntiFirefly);
-
-                    ImGui::Checkbox("Enable Performance Mode", &m_ui.ReblurSettings.enablePerformanceMode);
 
                     // ImGui::Checkbox("Enable Diffuse Material Test", &m_ui.ReblurSettings.enableMaterialTestForDiffuse);
                     // ImGui::Checkbox("Enable Specular Material Test", &m_ui.ReblurSettings.enableMaterialTestForSpecular);
@@ -1304,12 +1327,12 @@ void SampleUI::buildUI(void)
         {
             UI_SCOPED_INDENT(indent);
 
-            if (!m_app.GetOMMBaker()->IsEnabled())
+            if (m_app.GetOMMBaker())
             {
-                ImGui::Text("<Opacity Micro-Maps not supported on the current device>");
+                m_app.GetOMMBaker()->DebugGUI(indent, *m_app.GetScene());
             }
             else
-                m_app.GetOMMBaker()->DebugGUI(indent, m_app.GetScene());
+                ImGui::Text("<Opacity Micro-Maps not supported on the current device>");
         }
 
         if (ImGui::CollapsingHeader("Acceleration Structure"))
@@ -1448,7 +1471,7 @@ void SampleUI::buildUI(void)
                 "Disabled\0"
                 "ImagePlaneRayLength\0DominantStablePlaneIndex\0"
                 "StablePlaneVirtualRayLength\0StablePlaneMotionVectors\0"
-                "StablePlaneNormals\0StablePlaneRoughness\0StablePlaneDiffBSDFEstimate\0StablePlaneDiffRadiance\0StablePlaneDiffHitDist\0StablePlaneSpecBSDFEstimate\0StablePlaneSpecRadiance\0StablePlaneSpecHitDist\0"
+                "StablePlaneNormals\0StablePlaneRoughness\0StablePlaneSpecAvg\0StablePlaneDiffBSDFEstimate\0StablePlaneDiffRadiance\0StablePlaneSpecBSDFEstimate\0StablePlaneSpecRadiance\0StablePlaneSpecHitDist\0"
                 "StablePlaneRelaxedDisocclusion\0StablePlaneDiffRadianceDenoised\0StablePlaneSpecRadianceDenoised\0StablePlaneCombinedRadianceDenoised\0StablePlaneViewZ\0StablePlaneThroughput\0StablePlaneDenoiserValidation\0"
                 "StableRadiance\0"
                 "FirstHitBarycentrics\0FirstHitFaceNormal\0FirstHitGeometryNormal\0FirstHitShadingNormal\0FirstHitShadingTangent\0FirstHitShadingBitangent\0FirstHitFrontFacing\0FirstHitThinSurface\0FirstHitShaderPermutation\0"
@@ -1545,12 +1568,13 @@ void SampleUI::buildUI(void)
         ImGui::SetNextWindowSize(ImVec2(defWindowWidth, 0), ImGuiCond_Appearing);
         ImGui::Begin("Material Editor");
         ImGui::PushItemWidth(defItemWidth);
-        ImGui::Text("Material %d: %s", material->GPUDataIndex, material->Name.c_str());
+        ImGui::Text("Material %d: %s.%s ", material->GPUDataIndex, material->ModelName.c_str(), material->Name.c_str());
 
         const bool wasAlphaTestedEnabled = material->EnableAlphaTesting;
         const bool wasTransmissionEnabled = material->EnableTransmission;
         const bool wasExcludedFromNEE = material->ExcludeFromNEE;
         const float alphaCutoffBefore = material->AlphaCutoff;
+        const bool wasSkipRender = material->SkipRender;
         MaterialShadingProperties matPropsBefore = MaterialShadingProperties::Compute(*material);
 
         bool dirty = material->EditorGUI(*m_app.GetMaterialsBaker());
@@ -1562,7 +1586,9 @@ void SampleUI::buildUI(void)
         if (matPropsBefore != matPropsAfter || 
             wasAlphaTestedEnabled != material->EnableAlphaTesting || 
             wasTransmissionEnabled != material->EnableTransmission || 
-            wasExcludedFromNEE != material->ExcludeFromNEE || dirty)
+            wasExcludedFromNEE != material->ExcludeFromNEE ||
+            wasSkipRender != material->SkipRender ||
+            dirty)
         {
             m_app.GetScene()->GetSceneGraph()->GetRootNode()->InvalidateContent();
             m_ui.ResetAccumulation = 1;
@@ -1570,7 +1596,7 @@ void SampleUI::buildUI(void)
 
 		// The domain change might require a rebuild without the Opaque flag
         if (wasAlphaTestedEnabled != material->EnableAlphaTesting || alphaCutoffBefore != alphaCutoffAfter ||
-            matPropsBefore != matPropsAfter)
+            matPropsBefore != matPropsAfter || wasSkipRender != material->SkipRender)
             m_ui.ShaderAndACRefreshDelayedRequest = 1.0f;
 
         if( m_ui.ShaderAndACRefreshDelayedRequest > 0 )
@@ -1706,6 +1732,12 @@ void SampleUI::buildUI(void)
         }
     }
 
+    if ( m_app.GetGame() != nullptr && m_app.GetGame()->IsInitialized() )
+    {
+        m_app.GetGame()->StandaloneGUI(m_app.GetCurrentView(), float2(m_app.GetDisplaySize()));
+    }
+
+    ImGui::PopFont();
     // ImGui::ShowDemoWindow();
 }
 

@@ -11,10 +11,15 @@
 #ifndef __POLYMORPHIC_LIGHT_H__
 #define __POLYMORPHIC_LIGHT_H__
 
+#define DISTANT_LIGHT_DISTANCE          100000.0
+
+static const float kMinSpotlightFalloff = 0.0001f;
+
 static const uint kPolymorphicLightTypeShift = 24;
 static const uint kPolymorphicLightTypeMask = 0xf;
 static const uint kPolymorphicLightShapingEnableBit = 1 << 28;
 static const uint kPolymorphicLightIesProfileEnableBit = 1 << 29;
+static const uint kPolymorphicLightShapingUseMinFalloff = 1 << 30;  // see kMinSpotlightFalloff
 static const float kPolymorphicLightMinLog2Radiance = -8.f;
 static const float kPolymorphicLightMaxLog2Radiance = 40.f;
 

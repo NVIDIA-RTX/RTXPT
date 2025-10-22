@@ -126,7 +126,11 @@ void RtxdiPass::CreatePipelines(nvrhi::BindingLayoutHandle extraBindingLayout /*
 	m_TemporalResamplingPass.Init(m_device, *m_shaderFactory, "app/RTXDI/TemporalResampling.hlsl",
 		{}, useRayQuery, RTXDI_SCREEN_SPACE_GROUP_SIZE, m_bindingLayout, extraBindingLayout, m_bindlessLayout);
 	
-	m_FinalSamplingPass.Init(m_device, *m_shaderFactory, "app/RTXDI/DIFinalShading.hlsl", "main", { { "USE_RAY_QUERY", "1" } }, m_bindingLayout, extraBindingLayout, m_bindlessLayout);
+	std::vector<donut::engine::ShaderMacro> finalShadingMacros = { { "USE_RAY_QUERY", "1" } };
+#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
+	finalShadingMacros.push_back({ "NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP", "1" });
+#endif // NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
+	m_FinalSamplingPass.Init(m_device, *m_shaderFactory, "app/RTXDI/DIFinalShading.hlsl", "main", finalShadingMacros, m_bindingLayout, extraBindingLayout, m_bindlessLayout);
 	
 	m_GISpatialResamplingPass.Init(m_device, *m_shaderFactory, "app/RTXDI/GISpatialResampling.hlsl",
 		{}, useRayQuery, RTXDI_SCREEN_SPACE_GROUP_SIZE, m_bindingLayout, extraBindingLayout, m_bindlessLayout);
@@ -336,10 +340,12 @@ void RtxdiPass::BeginFrame(
 	}
 
 	//Build ReGIR structure 
-	if (m_ImportanceSamplingContext->IsReGIREnabled() && m_BridgeParameters.usingReGIR)
+	const auto& reGIRContext = m_ImportanceSamplingContext->GetReGIRContext();
+	if (m_ImportanceSamplingContext->IsReGIREnabled()
+		&& m_BridgeParameters.usingReGIR
+		&& reGIRContext.GetReGIRStaticParameters().Mode != rtxdi::ReGIRMode::Disabled)
 	{
-		dm::int3 worldGridDispatchSize = {
-			dm::div_ceil(m_ImportanceSamplingContext->GetReGIRContext().GetReGIRLightSlotCount(), RTXDI_GRID_BUILD_GROUP_SIZE), 1, 1 };
+		dm::int3 worldGridDispatchSize = { dm::div_ceil(reGIRContext.GetReGIRLightSlotCount(), RTXDI_GRID_BUILD_GROUP_SIZE), 1, 1 };
 		ExecuteComputePass(commandList, m_PresampleReGIRPass, "Pre-sample ReGir", worldGridDispatchSize, extraBindingSet);
 	}
 }
@@ -427,7 +433,7 @@ void RtxdiPass::FillSharedConstants(struct RtxdiBridgeConstants& bridgeConstants
 	bridgeConstants.reStirGIVaryAgeThreshold = m_BridgeParameters.userSettings.reStirGIVaryAgeThreshold;
 
 	const auto& giSampleMode = m_ImportanceSamplingContext->GetReSTIRGIContext().GetResamplingMode();
-	bridgeConstants.reStirGIEnableTemporalResampling = (giSampleMode == rtxdi::ReSTIRGI_ResamplingMode::Temporal) || (giSampleMode == rtxdi::ReSTIRGI_ResamplingMode::TemporalAndSpatial) ? 1 : 0;
+	bridgeConstants.reStirGIEnableTemporalResampling = ((giSampleMode == rtxdi::ReSTIRGI_ResamplingMode::Temporal) || (giSampleMode == rtxdi::ReSTIRGI_ResamplingMode::TemporalAndSpatial)) ? 1 : 0;
 }
 
 void RtxdiPass::FillDIConstants(ReSTIRDI_Parameters& diParams)

@@ -42,10 +42,21 @@ between the bridge functions.
 #define POLYLIGHT_QT_ENV_ENABLE         0   // environment map quad tree in equal area octahedral mapping
 #define POLYLIGHT_CONFIGURED
 
+// This is a adapter for PolymorphicLight, enabling features as needed by RTXDI
+
+// Polymorphic light config - RTXDI will also need ENV 
+#define POLYLIGHT_SPHERE_ENABLE         1
+#define POLYLIGHT_POINT_ENABLE          1
+#define POLYLIGHT_TRIANGLE_ENABLE       1
+#define POLYLIGHT_DIRECTIONAL_ENABLE    1   // probably not needed as baked in envmap but this need testing
+#define POLYLIGHT_ENV_ENABLE            1
+#define POLYLIGHT_QT_ENV_ENABLE         0   // environment map quad tree in equal area octahedral mapping
+#define POLYLIGHT_CONFIGURED
 
 #include "ShaderParameters.h"
 #include "SurfaceData.hlsli"
 #include "../Shaders/Bindings/ShaderResourceBindings.hlsli"
+#include "../Shaders/Bindings/ReSTIRBindings.hlsli"
 #include "../Shaders/PathTracerBridgeDonut.hlsli"
 
 // RTXDI resources
@@ -170,7 +181,7 @@ void AnyHit(inout RayPayload payload : SV_RayPayload, in RayAttributes attrib : 
 RayHitInfo TraceVisibilityRay(RaytracingAccelerationStructure accelStruct, RayDesc ray)
 {
 #if USE_RAY_QUERY
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> rayQuery;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
     rayQuery.TraceRayInline(accelStruct, RAY_FLAG_NONE, 0xff, ray);
 
     while (rayQuery.Proceed())
@@ -440,8 +451,8 @@ float3 _Schlick_Fresnel(float3 F0, float VdotH)
 //Sampling functions
 float getSurfaceDiffuseProbability(RAB_Surface surface)
 {
-    float diffuseWeight = luminance(surface.GetDiffuse());
-    float specularWeight = luminance(_Schlick_Fresnel(surface.GetSpecular(), dot(surface.GetView(), surface.GetNormal())));
+    float diffuseWeight = Luminance(surface.GetDiffuse());
+    float specularWeight = Luminance(_Schlick_Fresnel(surface.GetSpecular(), dot(surface.GetView(), surface.GetNormal())));
     float sumWeights = diffuseWeight + specularWeight;
     return sumWeights < 1e-7f ? 1.f : (diffuseWeight / sumWeights);
 }
@@ -466,8 +477,8 @@ float RAB_GetLightSampleTargetPdfForSurface(RAB_LightSample lightSample, RAB_Sur
         return 0;
 #endif
 
-    float3 fullBRDF = surface.Eval(toLight);
-    return luminance(fullBRDF * lightSample.radiance) / lightSample.solidAnglePdf;
+    float3 fullBRDF = surface.Eval(toLight).rgb;
+    return Luminance(fullBRDF * lightSample.radiance) / lightSample.solidAnglePdf;
 
 }
 
@@ -776,8 +787,8 @@ float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRad
 {
     float3 L = normalize(samplePosition - surface.GetPosW());
 
-    float3 reflectedRadiance = surface.Eval(L) * sampleRadiance;
-    return max(0, luminance(reflectedRadiance));
+    float3 reflectedRadiance = surface.Eval(L).rgb * sampleRadiance;
+    return max(0, Luminance(reflectedRadiance));
 }
 
 bool RAB_GetConservativeVisibility(RAB_Surface surface, float3 samplePosition)

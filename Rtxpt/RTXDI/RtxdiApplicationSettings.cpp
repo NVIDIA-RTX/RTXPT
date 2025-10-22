@@ -74,13 +74,13 @@ const rtxdi::ReSTIRGI_ResamplingMode GetReSTIRGI_ResamplingMode() { return rtxdi
 const ReSTIRGI_TemporalResamplingParameters getReSTIRGITemporalResamplingParams()
 {
 	ReSTIRGI_TemporalResamplingParameters params = {};
-	params.boilingFilterStrength = 0.2f;
+	params.boilingFilterStrength = 0.35f;
 	params.depthThreshold = 0.1f;
 	params.enableBoilingFilter = true;
 	params.enableFallbackSampling = true;
 	params.enablePermutationSampling = true;
 	params.maxHistoryLength = 10;
-	params.maxReservoirAge = 30;
+	params.maxReservoirAge = 50;
 	params.normalThreshold = 0.6f;
 	params.temporalBiasCorrectionMode = ResTIRGI_TemporalBiasCorrectionMode::Basic;
 

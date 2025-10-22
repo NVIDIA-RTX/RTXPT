@@ -41,14 +41,6 @@
 
 #include <map>
 
-// can be upgraded for special normalmap type (i.e. DXGI_FORMAT_BC5_UNORM) or single channel masks (i.e. DXGI_FORMAT_BC4_UNORM)
-enum class TextureCompressionType
-{
-    Normalmap,
-    GenericSRGB,        // maps to BC7_UNORM_SRGB
-    GenericLinear,      // maps to BC7_UNORM
-};
-
 class Sample : public donut::app::ApplicationBase
 {
     // static constexpr uint32_t c_PathTracerVariants   = 6; // see shaders.cfg and CreatePTPipeline for details on variants
@@ -68,7 +60,7 @@ public:
     const DeltaTreeVizPathVertex *          GetDebugDeltaPathTree() const           { return m_debugDeltaPathTree; }
     uint                                    GetSceneCameraCount() const             { return (uint)m_scene->GetSceneGraph()->GetCameras().size() + 1; }
     uint &                                  SelectedCameraIndex()                   { return m_selectedCameraIndex; }   // 0 is default fps free flight, above (if any) will just use current scene camera
-    const std::unique_ptr<class SampleGame> &     GetGame() const                   { return m_sampleGame; }
+    const std::unique_ptr<class GameScene> &     GetGame() const                   { return m_sampleGame; }
 
     void                                    UpdateSubInstanceContents();
     void                                    UploadSubInstanceData(nvrhi::ICommandList* commandList);
@@ -78,8 +70,7 @@ public:
     std::shared_ptr<donut::engine::Material> FindMaterial( int materialID ) const;
     
     void                                    CollectUncompressedTextures();
-    uint                                    UncompressedTextureCount() const        { return (uint)m_uncompressedTextures.size(); }
-    bool                                    CompressTextures();
+    auto &                                  GetUncompressedTextures()               { return m_uncompressedTextures; }
     void                                    SaveCurrentCamera();
     void                                    LoadCurrentCamera();
 
@@ -108,8 +99,9 @@ public:
     void                                    CreateBlases(nvrhi::ICommandList* commandList);
     void                                    CreateTlas(nvrhi::ICommandList* commandList);
     void                                    CreateAccelStructs(nvrhi::ICommandList* commandList);
-    void                                    UpdateAccelStructs(nvrhi::ICommandList* commandList);
-    void                                    BuildTLAS(nvrhi::ICommandList* commandList, uint32_t frameIndex) const;
+    void                                    RecreateAccelStructs(nvrhi::ICommandList* commandList);
+    void                                    UpdateSkinnedBLASs(nvrhi::ICommandList* commandList, uint32_t frameIndex) const;
+    void                                    BuildTLAS(nvrhi::ICommandList* commandList) const;
     void                                    TransitionMeshBuffersToReadOnly(nvrhi::ICommandList* commandList);
     void                                    BackBufferResizing() override;
     void                                    CreateRenderPasses(bool& exposureResetRequired, nvrhi::CommandListHandle initializeCommandList);
@@ -135,13 +127,14 @@ public:
 
     void                                    DebugDrawLine( float3 start, float3 stop, float4 col1, float4 col2 );
     const donut::app::FirstPersonCamera &   GetCurrentCamera( ) const { return m_camera; }
+    const auto &                            GetCurrentView( ) const { return m_view; }
 
-    void                                    ResetSceneTime( ) { m_sceneTime = 0.; }
+    void                                    ResetSceneTime( );
 
     bool                                    IsEnvMapLoaded() const      { return true; } // with the new EnvMapBaker it's always present (just black)
     const std::string &                     GetEnvMapLocalPath()        { return m_envMapLocalPath; }
     const std::string &                     GetEnvMapOverrideSource()   { return m_envMapOverride; }
-    void                                    SetEnvMapOverrideSource(const std::string & envMapOverride) { m_envMapOverride = envMapOverride; }
+    void                                    SetEnvMapOverrideSource(const std::string & envMapOverride);
     const std::vector<std::filesystem::path> & GetEnvMapMediaList()     { return m_envMapMediaList; }
 
     const std::shared_ptr<EnvMapBaker> &    GetEnvMapBaker() const { return m_envMapBaker; }
@@ -149,6 +142,13 @@ public:
     const std::shared_ptr<MaterialsBaker> & GetMaterialsBaker() const { return m_materialsBaker; }
     const std::shared_ptr<class OmmBaker> & GetOMMBaker() const { return m_ommBaker; }
     const std::unique_ptr<class ZoomTool> & GetZoomTool() const { return m_zoomTool; }
+
+    GLFWwindow *                            GetGLFWWindow() const { return GetDeviceManager()->GetWindow(); }
+
+    int                                     GetAccumulationSampleIndex() const { return m_accumulationSampleIndex; }
+
+    uint2                                   GetRenderSize() const               { return m_renderSize;  } // native render resolution
+    uint2                                   GetDisplaySize() const              { return m_displaySize; } // final output resolution
 
 private:
     void                                    UpdateCameraFromScene( const std::shared_ptr<donut::engine::PerspectiveCamera> & sceneCamera );
@@ -268,11 +268,7 @@ private:
     CommandLineOptions                          m_cmdLine;
 
     // path tracing
-    // nvrhi::ShaderLibraryHandle                  m_PTShaderLibrary[c_PathTracerVariants];
-    // nvrhi::rt::PipelineHandle                   m_PTPipeline[c_PathTracerVariants];
-    // nvrhi::rt::ShaderTableHandle                m_PTShaderTable[c_PathTracerVariants];
     int                                         m_accumulationSampleIndex = 0;  // accumulated so far in the past, so if 0 this is the first.
-    int                                         m_accumulationSampleTarget = 0; // the target to how many we want accumulated (set by UI)
 
     uint64_t                                    m_frameIndex = 0;
     uint                                        m_sampleIndex = 0;            // per-frame sampling index; same as m_accumulationSampleIndex in accumulation mode, otherwise in realtime based on frameIndex%something 
@@ -289,11 +285,6 @@ private:
     // texture compression: used but not compressed textures
     std::map<std::shared_ptr<donut::engine::LoadedTexture>, TextureCompressionType> m_uncompressedTextures;
 
-#if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
-    // Blue noise texture to be used with stochastic texture filtering
-    std::shared_ptr<donut::engine::LoadedTexture>   m_STBNTexture;
-#endif
-
 #if DONUT_WITH_STREAMLINE
     donut::app::StreamlineInterface::DLSSSettings   m_recommendedDLSSSettings = {};
     donut::app::StreamlineInterface::DLSSRROptions  m_lastDLSSRROptions;
@@ -305,7 +296,7 @@ private:
     std::string                                 m_fpsInfo;
     bool                                        m_windowIsInFocus = true;
 
-    std::unique_ptr<class SampleGame>           m_sampleGame;
+    std::unique_ptr<class GameScene>           m_sampleGame;
 
     ProgressBar                                 m_progressLoading;
     ProgressBar                                 m_progressInitializingRenderer;

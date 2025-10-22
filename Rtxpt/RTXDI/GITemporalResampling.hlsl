@@ -38,12 +38,14 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
     {
         // Create GI reservoir from the position and orientation of the first secondary vertex from the Path Tracer
         const float4 secondaryPositionNormal = u_SecondarySurfacePositionNormal[pixelPosition];
-        RTXDI_GIReservoir initialReservoir = RTXDI_MakeGIReservoir(
-            secondaryPositionNormal.xyz,
-            octToNdirUnorm32(asuint(secondaryPositionNormal.w)),
-            u_SecondarySurfaceRadiance[pixelPosition].xyz,
-            /* samplePdf = */ 1.0);
+        const float3 secondaryPositionRadiance = u_SecondarySurfaceRadiance[pixelPosition].xyz;
+        const float  primaryScatterPdf = u_SecondarySurfaceRadiance[pixelPosition].w;
+        RTXDI_GIReservoir initialReservoir = RTXDI_EmptyGIReservoir();
+        if (primaryScatterPdf>0)
+            initialReservoir = RTXDI_MakeGIReservoir( secondaryPositionNormal.xyz, octToNdirUnorm32(asuint(secondaryPositionNormal.w)),
+                                                        secondaryPositionRadiance, primaryScatterPdf);
         
+        // Please note: there's a bug in ReSTIRGIContext::UpdateBufferIndices or similar which breaks 'Disabled' or one or the other sampling modes.
         if (g_RtxdiBridgeConst.reStirGIEnableTemporalResampling)
         {
             RAB_RandomSamplerState rng = RAB_InitRandomSampler(pixelPosition, 5);

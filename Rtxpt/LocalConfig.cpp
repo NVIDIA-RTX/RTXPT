@@ -26,8 +26,8 @@ void LocalConfig::PreferredSceneOverride(std::string& preferredScene)
     }
     if (RTXPT_LOCAL_CONFIG_ID_STRING == "GENERIC_STABLE_LIGHTS")
     {
-        //preferredScene = "bistro.json";
-        preferredScene = "kitchen-with-test-stuff.scene.json";
+        preferredScene = "bistro.scene.json";
+        //preferredScene = "kitchen-with-test-stuff.scene.json";
     }
     if (RTXPT_LOCAL_CONFIG_ID_STRING == "PROC_SKY_TESTING")
     {
@@ -118,12 +118,16 @@ void LocalConfig::PostAppInit(Sample& sample, SampleUIData& sampleUI)
         sampleUI.ToneMappingParams.autoExposure = false;
         sampleUI.RealtimeAA = 0;
         sampleUI.StandaloneDenoiser = false;
-        sampleUI.ReferenceFireflyFilterEnabled = false;
-        sampleUI.RealtimeFireflyFilterEnabled = false;
+        sampleUI.ReferenceFireflyFilterEnabled = true;
+        sampleUI.ReferenceFireflyFilterThreshold = 10.0f;
+        sampleUI.RealtimeFireflyFilterEnabled = true;
+        sampleUI.RealtimeFireflyFilterThreshold = 10.0f;
         sampleUI.RealtimeDiffuseBounceCount = 2;
         sampleUI.ReferenceDiffuseBounceCount = 2;
-        //sampleUI.NEEAT_NarrowTemporalFeedbackEnabled = false;
+        //sampleUI.NEEAT_LocalTemporalFeedbackEnabled = false;
         //sampleUI.RealtimeNoise = false;
+        sampleUI.EnableBloom = false;
+        sampleUI.ToneMappingParams.exposureCompensation = 2.2f;
 #endif
         //sampleUI.EnvironmentMapParams.Enabled = false;
         //sampleUI.ToneMappingParams.exposureCompensation = 5.2f;

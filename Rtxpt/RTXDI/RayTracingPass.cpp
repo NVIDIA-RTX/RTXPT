@@ -39,9 +39,13 @@ bool RayTracingPass::Init(
 
     if (useRayQuery)
     {
+#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
+    macros.push_back({ "NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP", "1" });
+#endif // NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
+
         ComputeShader = shaderFactory.CreateShader(shaderName, "main", &macros, nvrhi::ShaderType::Compute);
         if (!ComputeShader)
-            return false;
+            return false;    
 
         nvrhi::ComputePipelineDesc pipelineDesc;
         if(extraBindingLayout)

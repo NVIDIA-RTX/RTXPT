@@ -13,11 +13,13 @@
 
 #include <donut/core/json.h>
 #include <donut/app/ApplicationBase.h>
+#include <donut/engine/SceneTypes.h>
 #include <json/json.h>
 #include <json/value.h>
 #include <fstream>
 
 using namespace donut;
+using namespace donut::math;
 
 #include <windows.h>
 #include <commctrl.h>
@@ -122,8 +124,18 @@ bool LoadJsonFromFile( const std::filesystem::path & filePath, Json::Value & out
         }
     }
 
-    inFile >> outRootNode;
+    try { inFile >> outRootNode; }
+    catch (const Json::RuntimeError& e) 
+    { donut::log::warning("Caught Json::RuntimeError: %s", e.what()); return false; } 
+    catch (const std::exception& e) 
+    { donut::log::warning("Caught std::exception: %s", e.what()); return false; }
     return true;
+}
+
+std::string SaveJsonToString( const Json::Value & rootNode )
+{
+    Json::StreamWriterBuilder writer;
+    return Json::writeString(writer, rootNode);
 }
 
 bool LoadJsonFromString(const std::string & jsonData, Json::Value& outRootNode)
@@ -594,4 +606,134 @@ std::optional<std::filesystem::file_time_type> GetFileModifiedTime(const std::fi
     }
 
     return ftime;
+}
+
+size_t FindSubStringIgnoreCase(const std::string & text, const std::string & subString) 
+{
+    auto toLower = [](char ch) 
+    { 
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); 
+    };
+
+    if (subString.empty() || text.size() < subString.size())
+        return std::string::npos;
+
+    for (size_t i = 0; i <= text.size() - subString.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < subString.size(); ++j) {
+            if (toLower(text[i + j]) != toLower(subString[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return i;
+    }
+
+    return std::string::npos;
+}
+
+void FPSLimiter::FramerateLimit(int fpsTarget)
+{
+    std::chrono::high_resolution_clock::time_point   nowTimestamp = std::chrono::high_resolution_clock::now();
+    double deltaTime = std::chrono::duration<double>(nowTimestamp - m_lastTimestamp).count();
+    double targetDeltaTime = 1.0 / (double)fpsTarget;
+    double diffFromTarget = targetDeltaTime - deltaTime + m_prevError;
+    if (diffFromTarget > 0.0f)
+    {
+        size_t sleepInMs = std::min(1000, (int)(diffFromTarget * 1000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepInMs));
+    }
+
+    auto prevTime = m_lastTimestamp;
+    m_lastTimestamp = std::chrono::high_resolution_clock::now();
+    double deltaError = targetDeltaTime - std::chrono::duration<double>(m_lastTimestamp - prevTime).count();
+    m_prevError = deltaError * 0.9 + m_prevError * 0.1;     // dampen the spring-like effect, but still remain accurate to any positive/negative creep induced by our sleep mechanism
+    // clamp error handling to 1 frame length
+    if (m_prevError > targetDeltaTime)
+        m_prevError = targetDeltaTime;
+    if (m_prevError < -targetDeltaTime)
+        m_prevError = -targetDeltaTime;
+    // shift last time by error to compensate
+    m_lastTimestamp += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(m_prevError));
+}
+
+bool CompressTextures(std::map<std::shared_ptr<donut::engine::LoadedTexture>, TextureCompressionType> & uncompressedTextures)
+{
+    // if async needed, do something like std::thread([sytemCommand](){ system( sytemCommand.c_str() ); }).detach();
+
+    std::string batchFileName = std::string(getenv("localappdata")) + "\\temp\\donut_compressor.bat";
+    std::ofstream batchFile(batchFileName, std::ios_base::trunc);
+    if (!batchFile.is_open())
+    {
+        log::message(log::Severity::Error, "Unable to write %s", batchFileName.c_str());
+        return false;
+    }
+
+    std::string cmdLine;
+
+    // prefix part
+    //cmdLine += "echo off \n";
+    cmdLine += "ECHO: \n";
+    cmdLine += "WHERE nvtt_export \n";
+    //cmdLine += "ECHO WHERE nvtt_export returns %ERRORLEVEL% \n";
+    cmdLine += "IF %ERRORLEVEL% NEQ 0 (goto :error_tool)\n";
+    cmdLine += "ECHO: \n";
+    cmdLine += "ECHO nvtt_export exists in the Path, proceeding with compression (this might take a while!) \n";
+    cmdLine += "ECHO: \n";
+
+    uint i = 0; uint totalCount = (uint)uncompressedTextures.size();
+    for (auto it : uncompressedTextures)
+    {
+        auto texture = it.first;
+        std::string inPath = texture->path;
+        std::string outPath = std::filesystem::path(inPath).replace_extension(".dds").string();
+
+        cmdLine += "ECHO converting texture " + std::to_string(++i) + " " + " out of " + std::to_string(totalCount) + "\n";
+
+        cmdLine += "nvtt_export";
+        cmdLine += " -f 23"; // this sets format BC7
+        cmdLine += " ";
+
+        if (it.second == TextureCompressionType::Normalmap)
+        {
+            // cmdLine += " --normal-filter 1";
+            // cmdLine += " --normalize";
+            cmdLine += " --no-mip-gamma-correct";
+        }
+        else if (it.second == TextureCompressionType::GenericLinear)
+        {
+            cmdLine += " --no-mip-gamma-correct";
+        }
+        else if (it.second == TextureCompressionType::GenericSRGB)
+        {
+            cmdLine += " --mip-gamma-correct";
+        }
+        // cmdLine += " -q 2";  // 2 is production quality, 1 is "normal" (default)
+
+        cmdLine += " -o \"" + outPath;
+        cmdLine += "\" \"" + inPath + "\"\n";
+    }
+    cmdLine += "ECHO:\n";
+    cmdLine += "pause\n";
+    cmdLine += "ECHO on\n";
+    cmdLine += "exit /b 0\n";
+
+    cmdLine += ":error_tool\n";
+    cmdLine += "ECHO !! nvtt_export.exe not found !!\n";
+    cmdLine += "ECHO nvtt_export.exe is part of the https://developer.nvidia.com/nvidia-texture-tools-exporter package - please install\n";
+    cmdLine += "ECHO and add 'C:/Program Files/NVIDIA Corporation/NVIDIA Texture Tools' or equivalent to your PATH and retry!\n";
+    cmdLine += "pause\n";
+    cmdLine += "ECHO on\n";
+    cmdLine += "exit /b 1\n";
+
+    batchFile << cmdLine;
+    batchFile.close();
+
+    std::string startCmd = " \"\" " + batchFileName;
+    std::system(startCmd.c_str());
+
+    //remove(batchFileName.c_str());
+
+    return true; // TODO: check error code
 }

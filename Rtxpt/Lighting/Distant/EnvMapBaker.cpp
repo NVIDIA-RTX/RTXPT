@@ -29,6 +29,9 @@
 
 #include "../../SampleCommon.h"
 
+#include "../../ShaderDebug.h"
+
+
 using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
@@ -52,8 +55,10 @@ EnvMapBaker::~EnvMapBaker()
     UnloadSourceBackgrounds();
 }
 
-void EnvMapBaker::CreateRenderPasses()
+void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug)
 {
+    m_shaderDebug = shaderDebug;
+
     std::vector<donut::engine::ShaderMacro> shaderMacros;
     //shaderMacros.push_back(donut::engine::ShaderMacro({              "BLEND_DEBUG_BUFFER", "1" }));
 
@@ -79,7 +84,9 @@ void EnvMapBaker::CreateRenderPasses()
             nvrhi::BindingLayoutItem::Texture_SRV(14),
             nvrhi::BindingLayoutItem::Sampler(0),
             nvrhi::BindingLayoutItem::Sampler(1),
-            nvrhi::BindingLayoutItem::Sampler(2)
+            nvrhi::BindingLayoutItem::Sampler(2),
+            nvrhi::BindingLayoutItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX),
+            nvrhi::BindingLayoutItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX)
         };
         m_commonBindingLayout = m_device->createBindingLayout(layoutDesc);
     }
@@ -94,7 +101,9 @@ void EnvMapBaker::CreateRenderPasses()
             nvrhi::BindingLayoutItem::Texture_UAV(1),
             nvrhi::BindingLayoutItem::Sampler(0),
             nvrhi::BindingLayoutItem::Sampler(1),
-            nvrhi::BindingLayoutItem::Sampler(2)
+            nvrhi::BindingLayoutItem::Sampler(2),
+            nvrhi::BindingLayoutItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX),
+            nvrhi::BindingLayoutItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX)
         };
         m_reduceBindingLayout = m_device->createBindingLayout(layoutDesc);
     }
@@ -264,12 +273,14 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMap
     if (!m_BC6UCompressionEnabled)
         m_compressionQuality = 0;
 
+    bool newBuffers = false;
     if (m_targetResolution != m_cubeDim)
     {
+        newBuffers = true;
         m_renderPassesDirty = true;
         InitBuffers(m_targetResolution);
     }
-    m_importanceSamplingBaker->PreUpdate(m_cubemap);
+    m_importanceSamplingBaker->PreUpdate(m_cubemap, newBuffers);
 
     // Load static (background) environment map or procedural sky if enabled
     if (m_sourceBackgroundPath != m_loadedSourceBackgroundPath)
@@ -343,6 +354,8 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
     if (!contentsChanged)
         return contentsChanged;
 
+    RAII_SCOPE(commandList->beginMarker("EnvMapBaker"); , commandList->endMarker(); );
+
     // Constants
     {
         EnvMapBakerConstants consts; memset(&consts, 0, sizeof(consts));
@@ -388,7 +401,9 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
             //nvrhi::BindingSetItem::Texture_UAV(0, m_Cubemap),
             nvrhi::BindingSetItem::Sampler(0, m_pointSampler),
             nvrhi::BindingSetItem::Sampler(1, m_linearSampler),
-            nvrhi::BindingSetItem::Sampler(2, m_equiRectSampler)
+            nvrhi::BindingSetItem::Sampler(2, m_equiRectSampler),
+            nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
+            nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),
     };
     nvrhi::BindingSetHandle bindingSetLowResPrePass = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
     bindingSetDesc.bindings[5] = nvrhi::BindingSetItem::Texture_SRV(2, m_cubemapLowRes );
@@ -396,11 +411,11 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
     nvrhi::BindingSetHandle bindingSetBake = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
 
     {
-        RAII_SCOPE( commandList->beginMarker("EnvMapBaker");, commandList->endMarker(); );
-
         // Low res pre-pass (only needed for proc sky)
         if (proceduralSkyEnabled)
         {
+            RAII_SCOPE(commandList->beginMarker("ProcSkyLowResPrePass"); , commandList->endMarker(); );
+
             nvrhi::ComputeState state;
             state.bindings = { bindingSetLowResPrePass };
             state.pipeline = m_lowResPrePassLayerPSO;
@@ -416,6 +431,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
 
         // Base bake
         {
+            RAII_SCOPE(commandList->beginMarker("ProcSkyBaseBake");, commandList->endMarker(); );
             nvrhi::ComputeState state;
             state.bindings = { bindingSetBake };
             state.pipeline = m_baseLayerPSO;
@@ -447,7 +463,9 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
                     nvrhi::BindingSetItem::Texture_UAV(1, m_cubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(i - 1, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
                     nvrhi::BindingSetItem::Sampler(0, m_pointSampler),
                     nvrhi::BindingSetItem::Sampler(1, m_linearSampler),
-                    nvrhi::BindingSetItem::Sampler(2, m_equiRectSampler)
+                    nvrhi::BindingSetItem::Sampler(2, m_equiRectSampler),
+                    nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
+                    nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),
             };
             nvrhi::BindingSetHandle localBindingSet = m_bindingCache.GetOrCreateBindingSet(localBindingSetDesc, m_reduceBindingLayout);
         

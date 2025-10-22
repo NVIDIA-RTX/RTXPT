@@ -21,8 +21,6 @@
 #error Lighting system requires compile time configuration - see LightingConfig.h (used for all core path tracing) for details; do not enable lights if unused to reduce cost of switch statements and register pressure and similar.
 #endif
 
-#define DISTANT_LIGHT_DISTANCE          100000.0
-
 #define FLT_EPSILON_MINI                (2e-9f)
 #define MAX_SOLID_ANGLE_PDF             (1e10f)
 
@@ -173,9 +171,30 @@ struct SphereLight
         return lightSample;
     }
 
+    bool Eval(const float3 rayPos, const float3 rayDir, inout float3 outRadiance, inout float3 outLightSamplePosition)
+    {
+        if (!IntersectRaySphere(rayPos, rayDir, position, radius, outLightSamplePosition))
+            return false;
+
+        outRadiance = radiance * evaluateLightShaping(shaping, rayPos, outLightSamplePosition);
+
+        return true;
+    }
+
     float CalcSolidAnglePdfForMIS(in const float3 viewerPosition, in const float3 lightSamplePosition)
     {
-        return 0;
+        const float3 lightVector = position - viewerPosition;
+        const float lightDistance2 = dot(lightVector, lightVector);
+        const float radius2 = sq(radius);
+
+        // Compute theta and phi for cone sampling
+
+        const float sinThetaMax2 = radius2 / lightDistance2;
+        const float cosThetaMax = sqrt(max(0.0f, 1.0f - sinThetaMax2));
+
+        // Note: The cone already represents a solid angle effectively so its pdf is already a solid angle pdf
+        const float solidAnglePdf = 1.0f / (2.0f * K_PI * (1.0f - cosThetaMax));
+        return solidAnglePdf;
     }
 
 

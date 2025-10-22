@@ -17,6 +17,28 @@
 // TODO: remove these from here and include directly, only where needed
 #include "Packing.hlsli"
 
+#if (RTXPT_LP_TYPES_USE_16BIT_PRECISION != 0)
+    typedef float16_t       lpfloat; 
+    typedef float16_t2      lpfloat2;
+    typedef float16_t3      lpfloat3;
+    typedef float16_t4      lpfloat4;
+    typedef float16_t3x3    lpfloat3x3;
+    typedef uint16_t        lpuint; 
+    typedef uint16_t2       lpuint2;
+    typedef uint16_t3       lpuint3;
+    typedef uint16_t4       lpuint4;
+#else
+    typedef float           lpfloat;
+    typedef float2          lpfloat2;
+    typedef float3          lpfloat3;
+    typedef float4          lpfloat4;
+    typedef float3x3        lpfloat3x3;
+    typedef uint            lpuint; 
+    typedef uint2           lpuint2;
+    typedef uint3           lpuint3;
+    typedef uint4           lpuint4;
+#endif
+
 // Returns a relative luminance of an input linear RGB color in the ITU-R BT.709 color space
 inline float Luminance(float3 rgb)
 {
@@ -28,6 +50,13 @@ inline float Average(float3 rgb)
 {
     return (rgb.x+rgb.y+rgb.z) / 3.0;
 }
+
+#if (RTXPT_LP_TYPES_USE_16BIT_PRECISION != 0)
+inline lpfloat Average(lpfloat3 rgb)
+{
+    return (rgb.x+rgb.y+rgb.z) / 3.0;
+}
+#endif
 
 // Clamp .rgb by luminance
 float3 LuminanceClamp(float3 signalIn, const float luminanceThreshold)
@@ -69,6 +98,7 @@ float3 ColorFromHash( uint hash )
 
 // *************************************************************************************************************************************
 // Octahedral normal encoding/decoding - see https://knarkowicz.wordpress.com/2014/04/16/octahedron-normal-vector-encoding/
+// Also see https://jcgt.org/published/0003/02/01/ - "Survey of Efficient Representations for Independent Unit Vectors"
 float2 OctWrap(float2 v)
 {
 	return (1.0 - abs(v.yx)) * select(v.xy >= 0.0, 1.0, -1.0);
@@ -95,40 +125,56 @@ uint NDirToOctUnorm32(float3 n)
 {
     float2 p = Encode_Oct(n);
     p = saturate(p.xy * 0.5 + 0.5);
-    return uint(p.x * 0xfffe) | (uint(p.y * 0xfffe) << 16);
+    return uint(p.x * 0xfffe) | (uint(p.y * 0xfffe) << 16);     // TODO: why 0xfffe and not 0xffff? to avoid overflow with 1? also, isn't this causing a drift due to clamping when casting to uint - perhaps +0.5 needed for rounding?
 }
 // Same as Decode_Oct but with decoding from two uint16-s packed into one uint32
 float3 OctToNDirUnorm32(uint pUnorm)
 {
     float2 p;
-    p.x = saturate(float(pUnorm & 0xffff) / 0xfffe);
+    p.x = saturate(float(pUnorm & 0xffff) / 0xfffe);            // TODO: see above
     p.y = saturate(float(pUnorm >> 16) / 0xfffe);
     p = p * 2.0 - 1.0;
     return Decode_Oct(p);
 }
+// Same as Encode_Oct but with encoding into two uint15-s packed into one uint30 with two higher bits left unused for packing additional data
+uint NDirToOctUnorm30(float3 n)
+{
+    float2 p = Encode_Oct(n);
+    p = saturate(p.xy * 0.5 + 0.5);
+    return (uint(p.x * 0x7fff + 0.5) & 0x7fff) | ((uint(p.y * 0x7fff + 0.5) & 0x7fff) << 15);
+}
+// Same as Decode_Oct but with decoding from two uint15-s packed into one uint30 with two higher bits left unused for packing additional data
+float3 OctToNDirUnorm30(uint pUnorm)
+{
+    float2 p;
+    p.x = saturate(float(pUnorm & 0x7fff) / 0x7fff);
+    p.y = saturate(float(pUnorm >> 15) / 0x7fff);
+    p = p * 2.0 - 1.0;
+    return Decode_Oct(p);
+}
+// Use NDirToOctUnorm32/OctToNDirUnorm32 to pack an orthonormal matrix with any handedness
+uint2 PackOrthoMatrix(float3x3 xform)
+{
+    uint2 packed;
+    uint handedness = dot( cross(xform[0],xform[1]), xform[2] ) > 0;  // track handedness
+    packed.x = NDirToOctUnorm30(xform[0].xyz);
+    packed.y = NDirToOctUnorm30(xform[1].xyz);
+    packed.y |= handedness << 31;
+    return packed;
+}
+float3x3 UnpackOrthoMatrix(uint2 packed)
+{
+    float3x3 xform;
+    uint handedness = packed.y >> 31; 
+    packed.y &= 0x7FFFFFFF;
+    xform[0] = OctToNDirUnorm30(packed.x);
+    xform[1] = OctToNDirUnorm30(packed.y);
+    xform[2] = handedness?cross(xform[0], xform[1]):cross(xform[1], xform[0]);
+    return xform;
+}
+
 // *************************************************************************************************************************************
 
-#if (RTXPT_LP_TYPES_USE_16BIT_PRECISION != 0)
-    typedef float16_t       lpfloat; 
-    typedef float16_t2      lpfloat2;
-    typedef float16_t3      lpfloat3;
-    typedef float16_t4      lpfloat4;
-    typedef float16_t3x3    lpfloat3x3;
-    typedef uint16_t        lpuint; 
-    typedef uint16_t2       lpuint2;
-    typedef uint16_t3       lpuint3;
-    typedef uint16_t4       lpuint4;
-#else
-    typedef float           lpfloat;
-    typedef float2          lpfloat2;
-    typedef float3          lpfloat3;
-    typedef float4          lpfloat4;
-    typedef float3x3        lpfloat3x3;
-    typedef uint            lpuint; 
-    typedef uint2           lpuint2;
-    typedef uint3           lpuint3;
-    typedef uint4           lpuint4;
-#endif
 
 float   sq(float x)     { return x * x; }
 float2  sq(float2 x)    { return x * x; }
@@ -446,6 +492,13 @@ lpfloat FastACosLp( lpfloat inX )
     res *= (lpfloat)FastSqrt(1.0 - (float)x); // TODO: do a lpfloat version of a FastSqrt?
     return (inX >= 0) ? res : PI - res; 
 }
+
+// weighted sum of valueA and valueB with safety epsilon for non zero; weights must be >= 0
+float WeightedAverage( float valueA, float weightA, float valueB, float weightB )
+{
+    return (weightA * valueA + weightB * valueB) / (weightA+weightB+1e-12);
+}
+
 #endif
 
 #endif // __UTILS_HLSLI__

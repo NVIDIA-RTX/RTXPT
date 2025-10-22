@@ -44,8 +44,8 @@ float getMetallic(float3 diffuse, float3 spec)
     // This is based on the way that UE4 and Substance Painter 2 converts base+metallic+specular level to diffuse/spec colors
     // We don't have the specular level information, so the assumption is that it is equal to 0.5 (based on the UE4 documentation)
     // Note that I'm using the luminance here instead of the actual colors. The reason is that there's no guaraentee that all RGB channels will end up with the same metallic value
-    float d = luminance(diffuse);
-    float s = luminance(spec);
+    float d = Luminance(diffuse);
+    float s = Luminance(spec);
     if (s == 0) return 0;
     float a = 0.04;
     float b = s + d - 0.08;
@@ -107,7 +107,7 @@ void applyNormalMap(inout ShadingData shadingData, const NormalMapType type, con
     \param[in] tangent Interpolated tangent in world space (xyz) and bitangent sign (w). The tangent is *only* valid when w is != 0.
     \return True if a valid tangent space was computed based on the supplied tangent.
 */
-bool computeTangentSpace(inout ShadingData shadingData, const float4 tangentW)
+bool computeTangentSpace(inout ShadingData shadingData, const float4 tangentW, const bool ignoreTangent)
 {
     // Check that tangent space exists and can be safely orthonormalized.
     // Otherwise invent a tanget frame based on the normal.
@@ -122,7 +122,7 @@ bool computeTangentSpace(inout ShadingData shadingData, const float4 tangentW)
     bool nonZero = dot(tangentW.xyz, tangentW.xyz) > 0.f;
 
     bool valid = tangentW.w != 0.f && nonZero && nonParallel;
-    if (valid)
+    if (!ignoreTangent && valid)
     {
         shadingData.T = normalize(tangentW.xyz - shadingData.N * NdotT);
         shadingData.B = cross(shadingData.N, shadingData.T) * tangentW.w;
@@ -141,7 +141,7 @@ bool computeTangentSpace(inout ShadingData shadingData, const float4 tangentW)
     \param[in,out] shadingData - shading data at hit point; its shading tangent frame will be adjusted.
     \param[in] tangentW - Shading tangent in world space (normalized). The last component is guaranteed to be +-1.0 or zero if tangents are missing.
 */
-void adjustShadingNormal(inout ShadingData shadingData, float4 tangentW, uniform bool recomputeTangentSpace)
+void adjustShadingNormal(inout ShadingData shadingData, float4 tangentW, uniform bool recomputeTangentSpace, const bool ignoreTangent)
 {
     // Note: shadingData.V and Ng below always lie on the same side (as the front-facing flag is computed based on shadingData.V).
     // The shading normal sf.N may lie on either side depending on whether we're shading the front or back.
@@ -161,7 +161,7 @@ void adjustShadingNormal(inout ShadingData shadingData, float4 tangentW, uniform
         shadingData.N = signN * normalize(lerp(Ng, Ns, t));
     }
     if (cosTheta <= kCosThetaThreshold || recomputeTangentSpace)
-        computeTangentSpace(shadingData, tangentW);
+        computeTangentSpace(shadingData, tangentW, ignoreTangent);
 }
 
 #endif // __SHADING_UTILS_HLSLI__

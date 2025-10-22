@@ -37,6 +37,7 @@ namespace donut::engine
     struct TextureData;
 }
 
+class ShaderDebug;
 class EnvMapImportanceSamplingBaker;
 
 // This is used to bake the cubemap with the given inputs. Inputs can be equirectangular envmap image or procedural sky, and directional lights.
@@ -63,7 +64,7 @@ public:
 
     void                            SceneReloaded()                 { m_targetResolution = 0; } // change default target resolution on each scene load
 
-    void                            CreateRenderPasses();
+    void                            CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug);
 
     void                            PreUpdate( nvrhi::ICommandList* commandList, std::string envMapBackgroundPath );    // use to update to figure out GetTargetCubeResolution() default cubemap resolution and needed before Update; Ignore return if not needed.
     // Returns 'true' if contents changed; note: directionalLights must be transformed to Environment map local space. 
@@ -97,6 +98,7 @@ private:
     std::shared_ptr<donut::engine::CommonRenderPasses> m_commonPasses;
     std::shared_ptr<donut::engine::FramebufferFactory> m_framebufferFactory;
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
+    std::shared_ptr<ShaderDebug>    m_shaderDebug;
 
     nvrhi::ShaderHandle             m_lowResPrePassLayerCS;
     nvrhi::ComputePipelineHandle    m_lowResPrePassLayerPSO;

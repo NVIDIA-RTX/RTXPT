@@ -40,6 +40,8 @@ using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
 
+static std::string kNoModel = "<no_model>";
+
 void PTTexture::InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTexture> & loaded, bool _sRGB, bool _normalMap, const std::filesystem::path & mediaPath)
 {
     if (loaded == nullptr)
@@ -72,7 +74,7 @@ void PTMaterial::Write(Json::Value& output)
         output[name] = texJ;
     };
 
-    output["name"] = Name;
+    //output["name"] = Name;
     output["version"] = 1;
 
     saveTexture(output, BaseTexture, "BaseTexture");
@@ -119,6 +121,12 @@ void PTMaterial::Write(Json::Value& output)
     STORE_FIELD(ShadowNoLFadeout);
 
     STORE_FIELD(EnableAsAnalyticLightProxy);
+
+    STORE_FIELD(IgnoreMeshTangentSpace);
+
+    STORE_FIELD(UseDonutEmissiveIntensity);
+
+    STORE_FIELD(SkipRender);
 }
 
 bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache)
@@ -168,12 +176,6 @@ bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath
         output.Loaded = textureCache->LoadTextureFromFileDeferred(fullPath, output.sRGB);
     };
 
-    input["name"] >> this->Name;
-    if (this->Name == "")
-    {
-        donut::log::warning("Unsupported/missing material name"); 
-    }
-
     loadTexture(input, this->BaseTexture, "BaseTexture");
     loadTexture(input, this->OcclusionRoughnessMetallicTexture, "OcclusionRoughnessMetallicTexture");
     loadTexture(input, this->NormalTexture, "NormalTexture");
@@ -219,14 +221,22 @@ bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath
 
     LOAD_FIELD(EnableAsAnalyticLightProxy);
 
+    LOAD_FIELD(IgnoreMeshTangentSpace);
+
+    LOAD_FIELD(UseDonutEmissiveIntensity);
+
+    LOAD_FIELD(SkipRender);
+
     return true;
 }
 
-std::shared_ptr<PTMaterial> PTMaterial::FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache)
+std::shared_ptr<PTMaterial> PTMaterial::FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache, const std::string & modelName, const std::string & name)
 {
     std::shared_ptr<PTMaterial> material = std::make_shared<PTMaterial>();
 
     material->Read(input, mediaPath, textureCache);
+    material->Name = name;
+    material->ModelName = modelName;
 
     return material;
 }
@@ -242,6 +252,40 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
         if( texture.Loaded == nullptr ) return "<nullptr>";
         return texture.LocalPath.string();
     };
+
+    if (ImGui::CollapsingHeader("Special Properties"))
+    {
+        ImGui::Indent();
+        update |= ImGui::Checkbox("Thin surface", &ThinSurface);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.");
+
+        update |= ImGui::Checkbox("Ignore by NEE shadow ray (bias!)", &ExcludeFromNEE);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation\nNote: this isn't physically correct - it adds bias!");
+
+        update |= ImGui::SliderFloat("Shadow NoL Fadeout", &ShadowNoLFadeout, 0.0f, 0.2f);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Low tessellation geometry often has triangle (flat) normals that differ significantly from shading normals. \n"
+            "This causes shading vs shadow discrepancy that exposes triangle edges. One way to mitigate this (other than \n"
+            "having more detailed mesh) is to add additional shadowing falloff to hide the seam. This setting is not \n"
+            "physically correct and adds bias. Setting of 0 means no fadeout (default).");
+
+        update |= ImGui::Checkbox("Enable as analytic light proxy", &EnableAsAnalyticLightProxy);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Any scene object with this material will look at it's parent node in the scenegraph; if the parent contains\n"
+            "an analytic light, the rays falling of this surface will also output radiance from the analytic light.\n"
+            "The more closely the object's mesh resembles the analytic light, the more physically correct results will be.\n");
+
+        update |= ImGui::Checkbox("Emissive intensity from Donut", &UseDonutEmissiveIntensity);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Classic Donut materials can have emissive intensity animation attached; this allows RTXPT to use it\n");
+
+        update |= ImGui::Checkbox("Ignore mesh tangent space", &IgnoreMeshTangentSpace);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("This will ignore tangent space loaded from the mesh and generate new one - can help issues with normals.");
+
+        update |= ImGui::Checkbox("Skip render", &SkipRender);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignore all meshes with this material - sometimes easier than removing the object itself.\nNote: this will not remove it as an emissive light on the light sampling side!");
+
+        ImGui::Unindent();
+    }
 
     const ImVec4 filenameColor = ImVec4(0.474f, 0.722f, 0.176f, 1.0f);
 
@@ -363,28 +407,6 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
         }
     }
 
-    if (ImGui::CollapsingHeader("Special Properties"))
-    {
-        update |= ImGui::Checkbox("Thin surface", &ThinSurface);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.");
-
-        update |= ImGui::Checkbox("Ignore by NEE shadow ray (bias!)", &ExcludeFromNEE);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation\nNote: this isn't physically correct - it adds bias!");
-
-        update |= ImGui::SliderFloat("Shadow NoL Fadeout", &ShadowNoLFadeout, 0.0f, 0.2f);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-            "Low tessellation geometry often has triangle (flat) normals that differ significantly from shading normals. \n"
-            "This causes shading vs shadow discrepancy that exposes triangle edges. One way to mitigate this (other than \n"
-            "having more detailed mesh) is to add additional shadowing falloff to hide the seam. This setting is not \n"
-            "physically correct and adds bias. Setting of 0 means no fadeout (default).");
-
-        update |= ImGui::Checkbox("Enable as analytic light proxy", &EnableAsAnalyticLightProxy);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-            "Any scene object with this material will look at it's parent node in the scenegraph; if the parent contains\n"
-            "an analytic light, the rays falling of this surface will also output radiance from the analytic light.\n"
-            "The more closely the object's mesh resembles the analytic light, the more physically correct results will be.\n");
-    }
-
     if (ImGui::CollapsingHeader("Path Decomposition"))
     {
         ImGui::Indent();
@@ -493,6 +515,12 @@ void PTMaterial::FillData(PTMaterialData & data)
     if (PSDExclude)
         data.Flags |= PTMaterialFlags_PSDExclude;
 
+    if (EnableAsAnalyticLightProxy)
+        data.Flags |= PTMaterialFlags_EnableAsAnalyticLightProxy;
+
+    if (IgnoreMeshTangentSpace)
+        data.Flags |= PTMaterialFlags_IgnoreMeshTangentSpace;
+
     // free parameters
 
     data.BaseOrDiffuseColor = BaseOrDiffuseColor;
@@ -527,12 +555,14 @@ void PTMaterial::FillData(PTMaterialData & data)
 
 std::filesystem::path MaterialsBaker::GetMaterialStoragePath(PTMaterialBase& material)
 {
-    std::filesystem::path inPath = m_materialsPath;
+    std::filesystem::path matPath = m_materialsPath;
     if (!material.SharedWithAllScenes)
-        inPath = m_materialsSceneSpecializedPath;
+        matPath = m_materialsSceneSpecializedPath;
     std::string fileName = material.Name + c_MaterialsExtension;
-    inPath /= fileName;
-    return inPath;
+    if (material.ModelName != kNoModel)
+        fileName = material.ModelName + "." + fileName;
+    matPath /= fileName;
+    return matPath;
 }
 
 MaterialsBaker::MaterialsBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory)
@@ -558,11 +588,20 @@ MaterialsBaker::~MaterialsBaker()
 {
 }
 
+static std::string ModelNameFromModelFileName(const std::string& modelFileName)
+{
+    std::filesystem::path modelFileNamePath = modelFileName;
+    std::filesystem::path modelName = modelFileNamePath.filename();
+    modelName.replace_extension();
+    return modelName.string();
+}
+
 std::shared_ptr<PTMaterial> MaterialsBaker::ImportFromDonut(donut::engine::Material& material)
 {
     std::shared_ptr<PTMaterial> materialPT = std::make_shared<PTMaterial>();
 
     materialPT->Name = material.name;
+    materialPT->ModelName = ModelNameFromModelFileName(material.modelFileName);
 
     materialPT->BaseTexture.InitFromLoadedTexture(material.baseOrDiffuseTexture, true, false, m_mediaPath);
 
@@ -612,36 +651,43 @@ std::shared_ptr<PTMaterial> MaterialsBaker::ImportFromDonut(donut::engine::Mater
     return materialPT;
 }
 
-std::shared_ptr<PTMaterial> MaterialsBaker::Load(const std::string & name)
+std::shared_ptr<PTMaterial> MaterialsBaker::Load(const std::string & modelFileName, const std::string & name)
 {
-    std::string fileName = (name + c_MaterialsExtension);
-    std::filesystem::path pathShared      = m_materialsPath / fileName;
-    std::filesystem::path pathSpecialized = m_materialsSceneSpecializedPath / fileName;
+    std::string modelName = ModelNameFromModelFileName(modelFileName);
 
-    // TODO: refactor to use LoadJsonFromFile
-    // first try scene specific
-    bool shared = false;
-    std::ifstream inFile;
-    inFile.open(pathSpecialized);
+    std::array<std::filesystem::path, 4> candidates;
 
-    if (!inFile.is_open())
-    {
-        inFile.open(pathShared);
-        if (!inFile.is_open())
-        {
-            donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", fileName.c_str()); 
-            return nullptr;
-        }
-        shared = true;
-    }
+    candidates[0] = m_materialsSceneSpecializedPath / (modelName + "." + name + c_MaterialsExtension);
+    candidates[1] = m_materialsSceneSpecializedPath / (name + c_MaterialsExtension);
+    candidates[2] = m_materialsPath                 / (modelName + "." + name + c_MaterialsExtension);
+    candidates[3] = m_materialsPath                 / (name + c_MaterialsExtension);
 
     Json::Value rootJ;
-    inFile >> rootJ;
+    std::string actualLoadedFileName;
+    bool shared = false;
+    for ( int i = 0; i < candidates.size(); i++ )
+    {
+        auto & candidate = candidates[i];
+        if (std::filesystem::exists(candidate))
+            if (LoadJsonFromFile(candidate, rootJ))
+            {
+                actualLoadedFileName = candidate.string(); 
+                shared = i >= 2;
+                if (i%2==1)
+                    modelName = kNoModel;
+                break;
+            }
+    }
+    if (actualLoadedFileName=="")
+    {
+        donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", actualLoadedFileName.c_str()); 
+        return nullptr;
+    }
 
-    std::shared_ptr<PTMaterial> materialPT = materialPT->FromJson(rootJ, m_mediaPath, m_textureCache);
+    std::shared_ptr<PTMaterial> materialPT = materialPT->FromJson(rootJ, m_mediaPath, m_textureCache, modelName, name);
     if (materialPT == nullptr)
     {
-        donut::log::warning("Error while reading material file '%s'", fileName.c_str()); 
+        donut::log::warning("Error while parsing material file '%s'", actualLoadedFileName.c_str()); 
         return nullptr;
     }
     materialPT->SharedWithAllScenes = shared; // this property is not loaded from the file, but determined based on where the file was loaded from
@@ -718,24 +764,28 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
             }
             else
             {
-                std::shared_ptr<PTMaterial> loaded = Load(material->name);
+                std::shared_ptr<PTMaterial> loaded = Load(material->modelFileName, material->name);
                 if (loaded != nullptr)
+                {
                     materialEx->PTMaterial = loaded;
+                }
                 else // ...and if we didn't find it in our .scene.materials.json, then import from Donut!
                 {
                     std::shared_ptr<PTMaterial> materialPT = ImportFromDonut(*material);
                     materialEx->PTMaterial = materialPT;
                     initializedFromDonutCount++;
                 }
+                materialEx->PTMaterial->DonutCounterpart = materialEx.get(); // keep the link - only needed if using material animation from Donut
 
-                auto existing = materialsPTUniqueNames.find(materialEx->PTMaterial->Name);
+                std::string keyName = materialEx->PTMaterial->ModelName+"."+materialEx->PTMaterial->Name;
+                auto existing = materialsPTUniqueNames.find(keyName);
                 if (existing != materialsPTUniqueNames.end() )
                 {
-                    donut::log::warning("Potential error while loading/converting materials for scene '%s' - there are at least two materials with the same name '%s'.\nThis is not supported and will result in errors.",
-                        sceneFilePath.string().c_str(), materialEx->PTMaterial->Name.c_str());
+                    donut::log::warning("Potential error while loading/converting materials for scene '%s' - there are at least two materials with the same name key '%s'.\nThis is not supported and will result in errors.\nIt's possible to fix some name collisions by including Material::materialIndexInModel into the name.",
+                        sceneFilePath.string().c_str(), keyName.c_str());
                 }
                 else
-                    materialsPTUniqueNames.insert(materialEx->PTMaterial->Name);
+                    materialsPTUniqueNames.insert(keyName);
 
                 m_materials.push_back(materialEx->PTMaterial);
 
@@ -841,6 +891,12 @@ void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_
     bool needsUpload = false;
     for (auto& materialPT : m_materials)
     {
+        if (materialPT->UseDonutEmissiveIntensity && materialPT->DonutCounterpart != nullptr && materialPT->EmissiveIntensity != materialPT->DonutCounterpart->emissiveIntensity)
+        {
+            materialPT->EmissiveIntensity = materialPT->DonutCounterpart->emissiveIntensity;
+            materialPT->GPUDataDirty = true;
+        }
+
         if (!materialPT->GPUDataDirty && !m_materialDataWasReset)
             continue;
 
@@ -911,27 +967,15 @@ void MaterialsBaker::LoadAll(std::unordered_map<std::string, std::shared_ptr<PTM
 
 bool MaterialsBaker::LoadSingle(PTMaterialBase & material)
 {
-    std::filesystem::path inPath = m_materialsPath;
-    if (!material.SharedWithAllScenes)
-        inPath = m_materialsSceneSpecializedPath;
-    std::string fileName = material.Name + c_MaterialsExtension;
-    inPath /= fileName;
-
-    std::ifstream inFile;
-    inFile.open(inPath);
-
-    if (!inFile.is_open())
-    {
-        if (!inFile.is_open())
-        {
-            donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", fileName.c_str()); 
-            return false;
-        }
-    }
+    std::filesystem::path inPath = GetMaterialStoragePath(material);
 
     Json::Value rootJ;
-    inFile >> rootJ;
-
+    if ( !LoadJsonFromFile(inPath, rootJ) )
+    {
+        donut::log::warning("No RTXPT material definition file found '%s'- consider doing Scene->Materials->Advanced->Save All", inPath.string().c_str());
+        return false;
+    }
+    assert( material.Name != "" );
     m_deferredTextureLoadInProgress = true;
     return material.Read(rootJ, m_mediaPath, m_textureCache);
 }
@@ -942,14 +986,11 @@ bool MaterialsBaker::SaveSingle(PTMaterialBase & material)
         return false;
     std::filesystem::path outPath = m_materialsPath;
     if (!material.SharedWithAllScenes)
-    {
         outPath = m_materialsSceneSpecializedPath;
-        if (!EnsureDirectoryExists(outPath))
-            return false;
-    }
+    if (!EnsureDirectoryExists(outPath))
 
-    std::string fileName = material.Name + c_MaterialsExtension;
-    outPath /= fileName;
+    assert( material.ModelName != "" && material.Name != "" );
+    outPath = GetMaterialStoragePath(material);
 
     Json::Value rootJ;
     //rootJ["RTXPTMaterialVersion"] = 1;

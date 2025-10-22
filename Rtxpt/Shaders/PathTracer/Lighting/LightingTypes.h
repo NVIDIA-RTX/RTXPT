@@ -11,16 +11,10 @@
 #ifndef __LIGHTING_TYPES_HLSLI__
 #define __LIGHTING_TYPES_HLSLI__
 
-#if !defined(__cplusplus)
-#pragma pack_matrix(row_major)
-#if defined(TARGET_D3D12)
-#define STATIC_ASSERT(X) _Static_assert(X, "failed static assert")
-#else
-#define STATIC_ASSERT(X)
-#endif
-#else
+#include "LightingConfig.h"
+
+#if defined(__cplusplus)
 using namespace donut::math;
-#define STATIC_ASSERT(X) static_assert(X)
 #endif
 
 // Environment map color/intensity and orientation modifiers ("in-scene" settings)
@@ -69,14 +63,13 @@ struct LightingControlData
     float   LightSampling_MIS_Boost;    ///< This is a fixed pdf used for the sampler when doing MIS with main path BSDF
 
     uint    TemporalFeedbackRequired;   ///< Whether the path tracing NEE needs to provide temporal feedback
-    uint    padding0;                   
+    uint    TotalMaxFeedbackCount;      ///< Copy of 'LightsBakerConstants' value, used for debugging
     float   GlobalFeedbackUseRatio;
-    float   NarrowFeedbackUseRatio;
+    float   LocalFeedbackUseRatio;
 
-    uint    FeedbackBufferHeight;       ///< Feedback and tile buffers for direct and indirect are stacked one on top of the other; this is the height of just one (and offset to get from direct to indirect)
     uint    TileBufferHeight;           ///< Feedback and tile buffers for direct and indirect are stacked one on top of the other; this is the height of just one (and offset to get from direct to indirect)
     float   DirectVsIndirectThreshold;  ///< Used to determine whether to use direct vs indirect light caching strategy for current surface
-    uint    padding4;                   ///< 
+    uint2   LocalSamplingResolution;    ///< The resolution of the screen space local sampling buffer (number of tiles x * y)
 
     uint2   LocalSamplingTileJitter;
     uint2   LocalSamplingTileJitterPrev;
@@ -85,9 +78,6 @@ struct LightingControlData
     uint    padding1;
     uint    padding2;
     uint    padding3;
-
-    float4  SceneCameraPos;             ///< Reference center (perhaps rename?) - currently used for debugging viz only
-    // float4  SceneWorldMax;
 
 #if !defined(__cplusplus)
     float   WeightsSum()            { return asfloat(WeightsSumUINT); }
@@ -101,14 +91,16 @@ enum class LightingDebugViewType : int
 {
     Disabled,
 
-    MissingFeedback,
-    FeedbackRaw,
-    FeedbackProcessed,
-    FeedbackHistoric,
-    FeedbackLowRes,
-    FeedbackReadyForNew,
+    MissingFeedbackDirect,
+    MissingFeedbackIndirect,
+    FeedbackRawDirect,
+    FeedbackRawIndirect,
+    FeedbackAfterClear,
+    LowResBlendedFeedback,
 
     TileHeatmap,
+
+    Disocclusion,
 
     ValidateCorrectness,
 
@@ -122,182 +114,281 @@ struct LightsBakerConstants
     uint                    EnvMapImportanceMapResolution;
     uint                    TriangleLightTaskCount;
 
-    uint2                   NarrowSamplingResolution;
+    uint2                   LocalSamplingResolution;
     float                   GlobalFeedbackUseRatio;
-    float                   NarrowFeedbackUseRatio;
+    float                   LocalFeedbackUseRatio;
 
     uint2                   FeedbackResolution;
-    uint2                   LRFeedbackResolution;
+    uint2                   BlendedFeedbackResolution;
 
-    uint                    TotalFeedbackCount;
+    uint                    TotalMaxFeedbackCount;
     uint                    TotalLightCount;
-    uint                    UpdateCounter;              ///< LightBaker's own 'frame' counter (gets reset with LightsBaker::BakeSettings::ResetFeedback and gets incremented on every LightSbaker::Update(...))
-    uint                    _padding2;
+    uint                    UpdateCounter;              ///< LightBaker's own 'frame' counter (gets reset with LightsBaker::BakeSettings::ResetFeedback and gets incremented on every LightSbaker::UpdateFrame(...) and non-first UpdatePreRender after UpdateFrame )
+    uint                    LastFrameTemporalFeedbackAvailable;
 
     uint2                   MouseCursorPos; // for debugging viz only
     float2                  PrevOverCurrentViewportSize; ///< viewPrev.viewportSize / view.viewportSize
 
     int                     DebugDrawType;
     uint                    DebugDrawTileLights;
-    uint                    DebugDrawDirect;
-    uint                    _padding3;
+    uint                    LastFrameLocalSamplesAvailable;
+    uint                    DebugDrawFrustum;
+
+    float                   ImportanceBoostIntensityDelta;
+    float                   ImportanceBoostFrustumMul;
+    float                   ImportanceBoostFrustumFadeRangeExt;
+    float                   ImportanceBoostFrustumFadeRangeInt;
+
+    float3                  SceneCameraPos;
+    float                   SceneAverageContentsDistance;
+
+    float                   DepthDisocclusionThreshold;
+    uint                    EnableMotionReprojection;
+    float                   ReservoirHistoryDropoff;
+    uint                    AntiLagEnabled;
+
+    uint2                   LocalSamplingTileJitter;
+    uint2                   LocalSamplingTileJitterPrev;
+
+    float4                  FrustumPlanes[6];              ///< Left Right Top Bottom Near Far
+    
+    float4                  FrustumCorners[8];
 };
 
 #define RTXPT_INVALID_LIGHT_INDEX                       0xFFFFFFFF
 
-// general settings
-#define RTXPT_LIGHTING_MAX_LIGHTS                       (1 * 1024 * 1024 - 2)           // number of PolymorphicLightInfo (currently 48 bytes each) - 1 million lights is the max; minus 2 to leave space for RTXPT_INVALID_LIGHT_INDEX being always unique even with tuples (which pack light index and counter)
-#define RTXPT_LIGHTING_SAMPLING_PROXY_RATIO             8                               // every light can have this many proxies on average 
-#define RTXPT_LIGHTING_MAX_SAMPLING_PROXIES             RTXPT_LIGHTING_SAMPLING_PROXY_RATIO * RTXPT_LIGHTING_MAX_LIGHTS    // total buffer size required for proxies, worst case scenario
-#define RTXPT_LIGHTING_MAX_SAMPLING_PROXIES_PER_LIGHT   32768                           // one light can have no more than this many proxies (puts bounds on power-based importance sampling component; up to 32768 was tested)
-#define RTXPT_LIGHTING_MIN_WEIGHT_THRESHOLD             1e-7                            // ignore lights under this threshold
-
-// tile (local) sampling settings
-#define RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE        (8) // 6x6 is good; 8x8 is acceptable and will reduce post-processing (P3 pass) cost over 6x6 by around 1.8x; the loss in quality is on small detail and shadows
-#define RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE      (10) // has to be same as RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE or n*2+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE
-#define RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE         (3)
-#define RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE   (7) // that's times RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE in real world pixels
-#define RTXPT_LIGHTING_USE_ADDITIONAL_HISTORY_SAMPLES   (1)
-#define RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT          (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_USE_ADDITIONAL_HISTORY_SAMPLES)
-#define RTXPT_LIGHTING_TOP_UP_SAMPLES                   (256-249) // these go from the main sampling tile size window and strengthen the "core"
-
-// we take, roughly (see FillTile)
-// 1.) one per pixel sample from past most used samples in the RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE window
-// 2.) one per pixel sample from low res buffer RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE window - this helps with sharing most important feedback between neighbours
-// 3.) exactly RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT historic samples from previous frame's feedback 
-// NOTE: must always be less or equal compared to 256, due to current count packing
-#define RTXPT_LIGHTING_NARROW_PROXY_COUNT              (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE  \
-                                                         + RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE \
-                                                         + RTXPT_LIGHTING_HISTORIC_SAMPLING_COUNT + RTXPT_LIGHTING_TOP_UP_SAMPLES)
-
-// environment map quad tree settings
-// (one potential future upgrade is to eliminate subdivisions when child nodes are all equally lit - e.g. there's no point having many nodes within the sun, only enough to capture the sun itself; this could be done with an additional "difference" mip-mapped lookup, produced together with the luminance map)
-// (another potential future upgrade is to have nodes optionally capture & emit color themselves, like emissive triangles do, which would reduce noise and also speed up sampling side but is biased)
-#define RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION        4   // first pass starting point - must be square of 2
-#define RTXPT_LIGHTING_ENVMAP_QT_SUBDIVISIONS           16  // first pass subdivision
-#define RTXPT_LIGHTING_ENVMAP_QT_ADDITIONAL_NODES       (3*RTXPT_LIGHTING_ENVMAP_QT_SUBDIVISIONS) // for each subdivision, one goes out, 4 get added - net is 3 new nodes
-#define RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT   (RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION*RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION + RTXPT_LIGHTING_ENVMAP_QT_ADDITIONAL_NODES)
-#define RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION_DPT  3   // need to stop above subdivision earlier to allow for enough depth to fully subdivide x required times in boost pass
-#define RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION      21  // how many times to subdivide in the boost pass
-#define RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT       (RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION*3+1)
-STATIC_ASSERT( (1u << (2*RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION_DPT)) >= RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT );
-#define RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT       (RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT * RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT)
-
-// Note: in theory can go higher, not fully tested
-STATIC_ASSERT(RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT <= 8192);
-
-// This will not fully clear reservoirs but diminish existing content to 5% (with reprojection). This will help focus on stronger lights at the expense of less influential ones.
-// Note: this doubles the amount of memory used for reservoirs.
-#define RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY   0
-#define RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER 0
-#define RTXPT_LIGHTING_NEEAT_ENABLE_BSDF_FEEDBACK       1           //< provide NEE-AT feedback from BSDF rays hitting emissive surface/sky; helps primarily to speed up convergence / reduce lag
-
-#define RTXPT_LIGHTING_NEEAT_MAX_TOTAL_SAMPLE_COUNT     63
-
-// these are for testing/integration only
-//#define RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF               0.5     //< use constant value BSDF for MIS only; will result in more noise but still be unbiased (used to test BSDF pdf correctness on both MIS ends)
-//#define RTXPT_NEEAT_MIS_OVERRIDE_SOLID_ANGLE_PDF        50      //< use constant value light solid angle pdf for MIS only; will result in more noise but still be unbiased (used to test whether solid angle pdf correctness on both MIS ends)
-
-inline uint ComputeNarrowSampleCount(const float narrowTemporalFeedbackRatio, const uint totalSamples)
+inline uint ComputeLocalSampleCount(const float localTemporalFeedbackRatio, const uint totalSamples)
 {
-    return (uint)((float)(totalSamples-1) * narrowTemporalFeedbackRatio + 0.75f);    // always leave 
+    return (uint)((float)(totalSamples-1) * localTemporalFeedbackRatio + 0.75f);    // always leave 
 }
 
-inline uint ComputeGlobalSampleCount(const float narrowTemporalFeedbackRatio, const uint totalSamples)
+inline uint ComputeGlobalSampleCount(const float localTemporalFeedbackRatio, const uint totalSamples)
 {
-    return totalSamples - (uint)((float)(totalSamples - 1) * narrowTemporalFeedbackRatio + 0.75f);    // always leave 
+    return totalSamples - (uint)((float)(totalSamples - 1) * localTemporalFeedbackRatio + 0.75f);    // always leave 
 }
 
 #if !defined(__cplusplus)
 
-#if 0
-// Note, these are dependent for maximum number of global lights under 0x00FFFFFF and counter under or equal to 0xFF.
-uint PackMiniListLightAndCount(uint globalLightIndex, uint counter)                             { return (globalLightIndex & 0x00FFFFFF) | (((counter-1) & 0xFF) << 24); }
-void UnpackMiniListLightAndCount(uint value, out uint globalLightIndex, out uint counter)       { globalLightIndex = 0x00FFFFFF & value; counter = (value >> 24)+1; }
-uint UnpackMiniListLight(uint value)                                                            { return 0x00FFFFFF & value; }
-uint UnpackMiniListCount(uint value)                                                            { return (value >> 24)+1; }
-#else
 // Note:
+//  * these are dependent for maximum number of global lights under 0x007FFFFF and counter under or equal to 0x1FF.
 //  * sorting algorithms rely on light index being packed in high bits
 //  * sorting/coalescing algorithms rely on counter being packed in low bits so ++ operation is legal
-uint PackMiniListLightAndCount(uint globalLightIndex, uint counter)                             { return ((globalLightIndex & 0x00FFFFFF) << 8) | ((counter-1) & 0xFF); }
-void UnpackMiniListLightAndCount(uint value, out uint globalLightIndex, out uint counter)       { globalLightIndex = value >> 8; counter = (value & 0xFF)+1; }
-uint UnpackMiniListLight(uint value)                                                            { return value >> 8; }
-uint UnpackMiniListCount(uint value)                                                            { return (value & 0xFF)+1; }
+uint PackMiniListLightAndCount(uint globalLightIndex, uint counter)                             { return ((globalLightIndex & 0x007FFFFF) << 9) | ((counter-1) & 0x1FF); }
+void UnpackMiniListLightAndCount(uint value, out uint globalLightIndex, out uint counter)       { globalLightIndex = value >> 9; counter = (value & 0x1FF)+1; }
+uint UnpackMiniListLight(uint value)                                                            { return value >> 9; }
+uint UnpackMiniListCount(uint value)                                                            { return (value & 0x1FF)+1; }
+
+
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+#define LOCAL_SAMPLING_BUFFER_TYPE_SRV Texture3D<uint>
+#define LOCAL_SAMPLING_BUFFER_TYPE_UAV RWTexture3D<uint>
+#else
+#define LOCAL_SAMPLING_BUFFER_TYPE_SRV Buffer<uint>
+#define LOCAL_SAMPLING_BUFFER_TYPE_UAV RWBuffer<uint>
 #endif
 
-// Weighted Reservoir Sampling helper for storing good lights for later reuse.
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE==0
+inline uint LLSB_ComputeBaseAddress(uint2 tilePos, uint2 localSamplingResolution)
+{
+    return (tilePos.x + (tilePos.y * localSamplingResolution.x)) * RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
+}
+#endif
+
+
+
+#define LFR_BUFFERED 1
+
+#if RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 1
+#define RTXPT_FEEDBACK_ACCESS_INDEX(_VAR, _IDX)   _VAR
+#else
+#define RTXPT_FEEDBACK_ACCESS_INDEX(_VAR, _IDX)   _VAR[_IDX]
+#endif
+
+
+// Weighted Reservoir Sampling helper for storing good lights for later reuse. Since our reuse is entirely statistical, we don't actually keep the weights
 // https://www.pbr-book.org/4ed/Sampling_Algorithms/Reservoir_Sampling
 struct LightFeedbackReservoir
 {
-    uint        CandidateIndex;
-    float       CandidateWeight;
-    float       TotalWeight;
+    #define LFR_INDIRECT_CANDIDATE_FLAG         0x80000000u
+    #define LFR_MAX_WEIGHT                      1e12
 
-    static LightFeedbackReservoir make()
+    uint2                                       PixelPos;
+    RWTexture2D<float>                          TextureTotalWeight;
+    RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>  TextureCandidates;
+#if LFR_BUFFERED
+    float                                       TotalWeight;
+    NEEAT_FEEDBACK_CANDIDATE_TYPE               Candidates;
+    bool                                        DirtyW;
+    bool                                        DirtyC;
+#endif
+
+    static LightFeedbackReservoir make(uint2 pixelPos, RWTexture2D<float> textureTotalWeight, RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE> textureCandidates)
     {
         LightFeedbackReservoir ret;
-        ret.CandidateIndex  = RTXPT_INVALID_LIGHT_INDEX;
-        ret.CandidateWeight = 0;
-        ret.TotalWeight     = 0;
-        return ret;
-    }
-    
-    static LightFeedbackReservoir Unpack12Byte( uint3 packed )
-    {
-        LightFeedbackReservoir ret;
-        ret.CandidateIndex  = packed.x;
-        ret.CandidateWeight = asfloat(packed.y);
-        ret.TotalWeight     = asfloat(packed.z);
-        return ret;
-    }
-
-    uint3 Pack12Byte()
-    { 
-        return uint3(CandidateIndex, asuint(CandidateWeight), asuint(TotalWeight));
-    }
-
-    static LightFeedbackReservoir Unpack8Byte(uint2 packed)
-    {
-        LightFeedbackReservoir ret;
-        ret.CandidateIndex    = packed.x;
-        ret.CandidateWeight   = f16tof32(packed.y & 0xFFFF);
-        ret.TotalWeight    = f16tof32(packed.y >> 16);
+        ret.PixelPos            = pixelPos;
+        ret.TextureTotalWeight  = textureTotalWeight;
+        ret.TextureCandidates   = textureCandidates;
+#if LFR_BUFFERED
+        ret.TotalWeight = min( LFR_MAX_WEIGHT, textureTotalWeight[pixelPos] );
+        ret.Candidates  = textureCandidates[pixelPos];
+        ret.DirtyW = false;
+        ret.DirtyC = false;
+#endif
         return ret;
     }
 
-    uint2 Pack8Byte()
+    void CloneFrom(LightFeedbackReservoir other, float scale)
     {
-        return uint2(CandidateIndex, f32tof16(CandidateWeight) | ( f32tof16(TotalWeight) << 16 ) ); 
-    }
-
-    void Add( const float randomValue, const uint candidateIndex, const float candidateWeight )
-    {
-        TotalWeight += candidateWeight;
-        float threshold = saturate(candidateWeight / TotalWeight);
-        if (randomValue < threshold)
+        float otherWeight = other.GetTotalWeight();
+        if (otherWeight > 0)
         {
-            CandidateIndex = candidateIndex;
-            CandidateWeight = candidateWeight;
+            SetTotalWeight(other.GetTotalWeight()*scale);
+            SetCandidatesRaw(other.GetCandidatesRaw());
+        }
+        else
+            Clear();
+    }
+
+    // Clear reservoir to empty - not necessary to set individual slots to 0 but useful for debugging
+    void Clear()
+    {
+        SetTotalWeight(0);
+#if 1 // this is useful for debugging, but should be removed in production
+        for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+            SetCandidate(i, RTXPT_INVALID_LIGHT_INDEX, false);
+#endif
+    }
+
+    bool IsEmpty()
+    {
+        return GetTotalWeight() == 0;
+    }
+
+    float GetTotalWeight()
+    {
+#if LFR_BUFFERED
+        return TotalWeight;
+#else
+        return TextureTotalWeight[PixelPos];
+#endif
+    }
+
+    void SetTotalWeight(float totalWeight)
+    {
+        totalWeight = min( LFR_MAX_WEIGHT, totalWeight );
+#if LFR_BUFFERED
+        TotalWeight = totalWeight;
+        DirtyW = true;
+#else
+        TextureTotalWeight[PixelPos] = totalWeight;
+#endif
+    }
+
+    NEEAT_FEEDBACK_CANDIDATE_TYPE GetCandidatesRaw()
+    {
+#if LFR_BUFFERED
+        return Candidates;
+#else
+        return TextureCandidates[PixelPos];
+#endif
+    }
+
+    void SetCandidatesRaw(NEEAT_FEEDBACK_CANDIDATE_TYPE candidates)
+    {
+#if LFR_BUFFERED
+        Candidates = candidates;
+        DirtyC = true;
+#else
+        TextureCandidates[PixelPos] = candidates;
+#endif
+    }
+
+    uint GetCandidateRaw(uint i)
+    {
+#if LFR_BUFFERED
+        return RTXPT_FEEDBACK_ACCESS_INDEX(Candidates,i);
+#else
+        return RTXPT_FEEDBACK_ACCESS_INDEX(TextureCandidates[PixelPos]),i);
+#endif
+    }
+
+    void SetCandidateRaw(uint i, uint candidateIndex)
+    {
+#if LFR_BUFFERED
+        RTXPT_FEEDBACK_ACCESS_INDEX(Candidates,i) = candidateIndex;
+        DirtyC = true;
+#else
+        RTXPT_FEEDBACK_ACCESS_INDEX(TextureCandidates[PixelPos],i) = candidateIndex;
+#endif
+    }
+
+    void GetCandidate(uint i, out uint candidateIndex, out bool candidateIsIndirect)
+    {
+        candidateIndex = RTXPT_INVALID_LIGHT_INDEX;
+        candidateIsIndirect = false;
+        if (IsEmpty())
+            return;
+
+        candidateIndex = GetCandidateRaw(i);
+        if (candidateIndex != RTXPT_INVALID_LIGHT_INDEX)
+        {
+            candidateIsIndirect = (candidateIndex & LFR_INDIRECT_CANDIDATE_FLAG) != 0;
+            candidateIndex &= ~LFR_INDIRECT_CANDIDATE_FLAG;
         }
     }
 
-    void Merge( const float randomValue, const LightFeedbackReservoir other )
+    void SetCandidate(uint i, uint candidateIndex, bool candidateIsIndirect )
     {
-        if( other.TotalWeight > 0 )
-            Add( randomValue, other.CandidateIndex, other.TotalWeight );
+        SetCandidateRaw(i, candidateIndex | ((candidateIsIndirect)?(LFR_INDIRECT_CANDIDATE_FLAG):(0)) );
     }
 
-    void Retrieve( out uint candidateIndex, out float candidatePdf )
+    // Add single new light source with weight; it will be added stochastically to as many slots as available
+    void Add( const float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH], uint candidateIndex, float candidateWeight, bool candidateIsIndirect )
     {
-        candidateIndex  = CandidateIndex;
-        candidatePdf    = /*TotalCandidates **/ CandidateWeight / TotalWeight;
+        candidateWeight = min(LFR_MAX_WEIGHT, candidateWeight);
+        // NOTE: caller ensures no race condition possible here
+        float totalWeight = GetTotalWeight();
+        totalWeight += candidateWeight;
+        SetTotalWeight(totalWeight);
+        float threshold = saturate(candidateWeight / totalWeight);
+
+        // Bake in indirect flag
+        if (candidateIsIndirect)
+            candidateIndex |= LFR_INDIRECT_CANDIDATE_FLAG;
+
+        // Stochastically add 
+        for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++ )
+            if (randomValues[i] < threshold)
+                SetCandidateRaw(i, candidateIndex);
     }
 
-    void Scale(float factor)
+    // Merge reservoirs - can be used to merge a 3x3 kernel for ex.
+    void Merge( const float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH][RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH], const LightFeedbackReservoir other, float otherScale = 1.0 )
     {
-        CandidateWeight *= factor;
-        TotalWeight *= factor;
+        float otherTotalWeight = min(LFR_MAX_WEIGHT, other.GetTotalWeight() * otherScale);
+        if( otherTotalWeight > 0 )
+        {
+            for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+            {
+                uint lightIndex = other.GetCandidateRaw(i);
+                if (lightIndex != RTXPT_INVALID_LIGHT_INDEX)
+                {
+                    bool candidateIsIndirect = (lightIndex & LFR_INDIRECT_CANDIDATE_FLAG) != 0;
+                    lightIndex &= ~LFR_INDIRECT_CANDIDATE_FLAG;
+                    Add( randomValues[i], lightIndex, otherTotalWeight, candidateIsIndirect );
+                }
+            }
+        }
+    }
+
+    void CommitToStorage()
+    {
+#if LFR_BUFFERED
+        if (DirtyW)
+            TextureTotalWeight[PixelPos] = TotalWeight;
+        if (DirtyC)
+            TextureCandidates[PixelPos] = Candidates;
+#endif
     }
 
     //void Merge( )

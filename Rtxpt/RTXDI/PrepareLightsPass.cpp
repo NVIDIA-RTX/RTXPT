@@ -67,7 +67,7 @@ PrepareLightsPass::PrepareLightsPass(
         nvrhi::BindingLayoutItem::StructuredBuffer_SRV(1),
         nvrhi::BindingLayoutItem::StructuredBuffer_SRV(2),
         nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),
-        nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),
+        //nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),
         nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),
         nvrhi::BindingLayoutItem::Texture_SRV(6),
         nvrhi::BindingLayoutItem::Texture_SRV(7),
@@ -125,7 +125,7 @@ void PrepareLightsPass::CreateBindingSet(RtxdiResources& resources, const Render
         nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_subInstanceData),
         nvrhi::BindingSetItem::StructuredBuffer_SRV(2, m_Scene->GetInstanceBuffer()),
         nvrhi::BindingSetItem::StructuredBuffer_SRV(3, m_Scene->GetGeometryBuffer()),
-        nvrhi::BindingSetItem::StructuredBuffer_SRV(4, m_ommBaker->GetGeometryDebugBuffer()),
+        //nvrhi::BindingSetItem::StructuredBuffer_SRV(4, (m_ommBaker!=nullptr)?(m_ommBaker->GetGeometryDebugBuffer()):(resources.LightDataBuffer.Get())), // yuck
         nvrhi::BindingSetItem::StructuredBuffer_SRV(5, m_materialsBaker->GetMaterialDataBuffer()),
         nvrhi::BindingSetItem::Texture_SRV(6, m_EnvironmentMap ? m_EnvironmentMap->GetEnvMapCube() : m_commonPasses->m_BlackCubeMapArray),
         nvrhi::BindingSetItem::Texture_SRV(7, m_EnvironmentMap ? m_EnvironmentMap->GetImportanceSampling()->GetImportanceMapOnly() : m_commonPasses->m_BlackTexture),
@@ -266,11 +266,11 @@ static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfo
         {
 			float3 flux = spot.color * spot.intensity;
 
-			polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kPoint << kPolymorphicLightTypeShift;
+			polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kPoint << kPolymorphicLightTypeShift | ((spot.outerAngle < 0)?(kPolymorphicLightShapingUseMinFalloff):(0));
 			packLightColor(flux, polymorphic);
 			polymorphic.Base.Center = float3(spot.GetPosition());
             polymorphic.Base.Direction1 = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
-            polymorphic.Base.Direction2 = fp32ToFp16(dm::radians(spot.outerAngle));
+            polymorphic.Base.Direction2 = fp32ToFp16(dm::radians(abs(spot.outerAngle)));
 			polymorphic.Base.Direction2 |= fp32ToFp16(dm::radians(spot.innerAngle)) << 16;
         }
         else
@@ -278,15 +278,15 @@ static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfo
 
             float projectedArea = dm::PI_f * square(spot.radius);
             float3 radiance = spot.color * spot.intensity / projectedArea;
-            float softness = saturate(1.f - spot.innerAngle / spot.outerAngle);
+            float softness = saturate(1.f - spot.innerAngle / abs(spot.outerAngle));
 
-            polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift;
+            polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift | ((spot.outerAngle < 0)?(kPolymorphicLightShapingUseMinFalloff):(0));
             polymorphic.Base.ColorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
             packLightColor(radiance, polymorphic);
             polymorphic.Base.Center = float3(spot.GetPosition());
             polymorphic.Base.Scalars = fp32ToFp16(spot.radius);
             polymorphic.Extended.PrimaryAxis = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
-            polymorphic.Extended.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(spot.outerAngle)));
+            polymorphic.Extended.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(abs(spot.outerAngle))));
             polymorphic.Extended.CosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
         }
 
@@ -297,7 +297,7 @@ static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfo
         auto& spot = static_cast<const SpotLightWithProfile&>(light);
         float projectedArea = dm::PI_f * square(spot.radius);
         float3 radiance = spot.color * spot.intensity / projectedArea;
-        float softness = saturate(1.f - spot.innerAngle / spot.outerAngle);
+        float softness = saturate(1.f - spot.innerAngle / abs(spot.outerAngle));
 
         polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift;
         polymorphic.Base.ColorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
@@ -305,7 +305,7 @@ static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfo
         polymorphic.Base.Center = float3(spot.GetPosition());
         polymorphic.Base.Scalars = fp32ToFp16(spot.radius);
         polymorphic.Extended.PrimaryAxis = packNormalizedVector(float3(normalize(spot.GetDirection())));
-        polymorphic.Extended.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(spot.outerAngle)));
+        polymorphic.Extended.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(abs(spot.outerAngle))));
         polymorphic.Extended.CosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
 
         if (spot.profileTextureIndex >= 0)

@@ -1,7 +1,13 @@
-# RTX Path Tracing v1.6.0
+# RTX Path Tracing v1.7.0
 
 ![Title](./Docs/r-title.png)
 
+## What's new in 1.7.0
+ * New scene (bistro-programmer-art) for stress testing animation and dynamic lighting scenarios
+ * Performance optimizations (10%+ perf gain over 1.6.0)
+ * DirectX (Preview Agility SDK) Opacity Micromaps 
+ 
+See [Releases](https://github.com/NVIDIA-RTX/RTXPT/releases) for more detail and downloads.
 
 ## Overview
 
@@ -36,20 +42,21 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 
 - Windows 10 20H1 (version 2004-10.0.19041) or newer
 - DXR Capable GPU (DirectX Raytracing 1.1 API, or higher)
-- GeForce Game Ready Driver 576.52 or newer
+- GeForce Game Ready Driver 580.88 or newer
 - DirectX 12 or Vulkan API
-- CMake v3.14+
+- CMake v4.02+
 - Visual Studio 2022 (v143 build tools) or later with Windows 10 SDK version 10.0.20348.0 or 10.0.26100.0 or later
 
 
 ## Known Issues
 
 * Enabling Vulkan support requires a couple of manual steps, see [below](#building-vulkan)
-* SER, OMM and Streamline support on Vulkan is currently work in progress
+* SER and OMM support on Vulkan is currently work in progress
 * Running Vulkan on AMD GPUs may trigger a TDR during TLAS building in scenes with null TLAS instances
+* Enabling debug layer on Vulkan will show a number of warnings and errors - fixes are work in progress
 * We recommend using *NVIDIA Nsight Graphics* graphics for frame capture and analysis. If using other GPU performance tuning and debugging tools such as *PIX on Windows*, it is advisable to disable NVRHI_WITH_NVAPI and DONUT_WITH_STREAMLINE variables in CMake to avoid compatibility issues. Please note: disabling these settings results in lower performance and missing features
 * There is a known issue resulting in LIVE_DEVICE DirectX warnings reported at shutdown when Streamline is enabled in Debug builds
-* There is a known issue resulting in black or incorrect transparencies/reflection on some AMD systems with latest drivers; this is being investigated
+* There is a known issue resulting in black or incorrect transparencies/reflection on some AMD systems with latest drivers; this is most likely a driver error and has been reported
 
 ## Folder Structure
 
@@ -96,14 +103,13 @@ At the moment, only Windows builds are fully supported. We are going to add Linu
 Due to interaction with various included libraries, Vulkan support is not enabled by default and needs a couple of additional tweaks on the user side; please find the recommended steps below:
  * Install Vulkan SDK (we tested with VulkanSDK-1.3.290.0) and clear CMake cache (if applicable) to make sure the correct dxc.exe path from Vulkan SDK is set for SPIRV compilation
  * Set DONUT_WITH_VULKAN and NVRHI_WITH_VULKAN CMake variables to ON. DXC_SPIRV_PATH should already have automatically picked up the location of the DXC compiler in the Vulkan SDK during config; if not, please set it manually
- * Disable streamline integration by setting DONUT_WITH_STREAMLINE CMake variable to OFF
  * To run with Vulkan use `--vk` command line parameter
  
 
  ## DirectX 12 Agility SDK
  RTX PT optionally integrates [DirectX 12 Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/). If RTXPT_DOWNLOAD_AND_ENABLE_AGILITY_SDK CMake variable is set to TRUE, the version 717-preview will be automatically downloaded via CMake script and required build variables will be set. If different version is required, please set correct RTXPT_D3D_AGILITY_SDK_PATH and RTXPT_D3D_AGILITY_SDK_VERSION.
 
-Version 717-preview enables native DirectX support for [Shader Execution Reordering](https://devblogs.microsoft.com/directx/ser/). For testing this on Nvidia hardware, a preview driver is required and can be downloaded from https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver 
+Version 717-preview enables native DirectX support for [Shader Execution Reordering](https://devblogs.microsoft.com/directx/ser/) and [Opacity Micromaps](https://devblogs.microsoft.com/directx/omm/). For testing this on Nvidia hardware, a preview driver is required and can be downloaded from https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver 
 
 
 

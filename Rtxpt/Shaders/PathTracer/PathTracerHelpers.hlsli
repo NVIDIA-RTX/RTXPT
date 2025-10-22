@@ -203,10 +203,11 @@ lpfloat ComputeNewScatterFireflyFilterK(const lpfloat currentK, float bouncePDF,
 }
 
 // Experimental: Biased cap to maximum radiance based on current vs starting ray cone spread angle, used as a rough estimate of probability of the path.
-float3 FireflyFilter(float3 signalIn, const float threshold, const float fireflyFilterK)
+lpfloat3 FireflyFilter(lpfloat3 signalIn, const lpfloat threshold, const lpfloat fireflyFilterK)
 {
-    float fireflyFilterThreshold = threshold * fireflyFilterK;
-    float maxR = average( signalIn );   // we used to use 'luminance', but that will actually result in hue shift towards blue!
+    #define FIREFLY_FILTER_RELAX_ON_NON_NOISY_K 6.0    // suggested value to rise the threshold for on direct illumination
+    lpfloat fireflyFilterThreshold = threshold * fireflyFilterK;
+    lpfloat maxR = Average( signalIn );   // we used to use 'luminance', but that will actually result in hue shift towards blue!
     if( maxR > fireflyFilterThreshold )
         signalIn = signalIn / maxR * fireflyFilterThreshold;
     return signalIn;
@@ -313,5 +314,25 @@ float4 QuaternionFromRotationMatrix( float3x3 mat )
     }
     return ret;
 }
+
+float AccumulateHitT( const float avgSpecRadiance, const float specHitT, const float newAvgSpecRadiance, const float newSpecHitT )
+{
+    // perhaps try to do averaging of hitT distances in logarithmic space to avoid low radiance but very far away values overwhelming large but nearby radiances 
+    return WeightedAverage( specHitT, avgSpecRadiance, newSpecHitT, newAvgSpecRadiance );
+}
+
+// obsolete
+// void AccumulateRadianceSpecRatioAndHitT(inout float4 radianceAndSpecRatio, inout float hitT, const float4 newRadianceAndSpecRatio, const float newhitT)
+// {
+//     float prevW = radianceAndSpecRatio.r + radianceAndSpecRatio.g + radianceAndSpecRatio.b;
+//     float newW = newRadianceAndSpecRatio.r + newRadianceAndSpecRatio.g + newRadianceAndSpecRatio.b;
+//     hitT = WeightedAverage( hitT, prevW*radianceAndSpecRatio.a, newhitT, newW*newRadianceAndSpecRatio.a );
+//     radianceAndSpecRatio.a = WeightedAverage( radianceAndSpecRatio.a, prevW, newRadianceAndSpecRatio.a, newW );
+//     radianceAndSpecRatio.rgb += newRadianceAndSpecRatio.rgb;
+// }
+
+// user-specific conversion between 32bit uint path ID and pixel location (other things can get packed in if needed)
+uint2   PathIDToPixel( uint id )        { return uint2( id >> 16, id & 0xFFFF ); }
+uint    PathIDFromPixel( uint2 pixel )  { return pixel.x << 16 | pixel.y; }
 
 #endif // __PATH_TRACER_HELPERS_HLSLI__

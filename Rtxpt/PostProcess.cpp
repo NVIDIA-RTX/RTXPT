@@ -55,6 +55,9 @@ PostProcess::PostProcess( nvrhi::IDevice* device, std::shared_ptr<donut::engine:
             shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISER_PREPARE_INPUTS", "1" }));
             shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISER_DLSS_RR", "1" }));
             break;
+        case(ComputePassType::NoDenoiserFinalMerge):
+            shaderMacros.push_back(donut::engine::ShaderMacro({ "NO_DENOISER_FINAL_MERGE", "1" }));
+            break;
         case(ComputePassType::DummyPlaceholder): shaderMacros.push_back(donut::engine::ShaderMacro({ "DUMMY_PLACEHOLDER_EFFECT", "1" })); break;
         };
         m_computeShaders[i] = shaderFactory->CreateShader("app/PostProcess.hlsl", "main", &shaderMacros, nvrhi::ShaderType::Compute);

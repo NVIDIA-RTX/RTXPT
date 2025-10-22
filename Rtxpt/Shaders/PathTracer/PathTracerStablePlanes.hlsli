@@ -72,11 +72,11 @@ namespace PathTracer
 
         // Testing the xforms - virt should always transform to rayDir here
         // float3 virt = mul( (float3x3)newPath.imageXform, lobe.Wo );
-        // if (workingContext.debug.IsDebugPixel() && oldPath.getVertexIndex()==1)
+        // if (workingContext.Debug.IsDebugPixel() && oldPath.getVertexIndex()==1)
         // {
-        //     workingContext.debug.Print(oldPath.getVertexIndex()+0, rayDir );
-        //     workingContext.debug.Print(oldPath.getVertexIndex()+1, lobe.Wo );
-        //     workingContext.debug.Print(oldPath.getVertexIndex()+2, virt );
+        //     workingContext.Debug.Print(oldPath.getVertexIndex()+0, rayDir );
+        //     workingContext.Debug.Print(oldPath.getVertexIndex()+1, lobe.Wo );
+        //     workingContext.Debug.Print(oldPath.getVertexIndex()+2, virt );
         // }
 
         // clear dominant flag if it this lobe isn't dominant but we were on a dominant path
@@ -97,19 +97,22 @@ namespace PathTracer
 #if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // build
         const uint vertexIndex = path.getVertexIndex();
         const uint currentSPIndex = path.getStablePlaneIndex();
+        const uint2 pixelPos = path.GetPixelPos();
 
         if (vertexIndex == 1)
-            workingContext.stablePlanes.StoreFirstHitRayLengthAndClearDominantToZeroCenter(path.sceneLength);
+            workingContext.StablePlanes.StoreFirstHitRayLengthAndClearDominantToZero(pixelPos, path.sceneLength);
 
         bool setAsBase = true;    // if path no longer stable, stop and set as a base
         float passthroughOverride = 0.0;
-        if ( (vertexIndex < workingContext.ptConsts.maxStablePlaneVertexDepth) && !pathStopping) // Note: workingContext.ptConsts.maxStablePlaneVertexDepth already includes cStablePlaneMaxVertexIndex and MaxBounceCount
+        if ( (vertexIndex < workingContext.PtConsts.maxStablePlaneVertexDepth) && !pathStopping) // Note: workingContext.PtConsts.maxStablePlaneVertexDepth already includes cStablePlaneMaxVertexIndex and MaxBounceCount
         {
             DeltaLobe deltaLobes[cMaxDeltaLobes]; uint deltaLobeCount; float nonDeltaPart;
             bridgedData.bsdf.evalDeltaLobes(bridgedData.shadingData, deltaLobes, deltaLobeCount, nonDeltaPart);
+            deltaLobeCount = max( cMaxDeltaLobes-1, deltaLobeCount );
+
             bool potentiallyVolumeTransmission = false;
 
-            float pathThp = average(path.thp);    // perhaps give it another 10% just to avoid blocking at the end of a dark volume since all other pixels will be dark
+            float pathThp = Average(path.thp);    // perhaps give it another 10% just to avoid blocking at the end of a dark volume since all other pixels will be dark
 
             const float nonDeltaIgnoreThreshold = (1e-5);
             const float deltaIgnoreThreshold    = (0.001f);   
@@ -120,15 +123,15 @@ namespace PathTracer
 
             // prune non-noticeable delta lobes
 #if USE_THP_PRIORITIZED_PRUNING
-            const float neverIgnoreThreshold = workingContext.ptConsts.stablePlanesSplitStopThreshold / float(vertexIndex); // TODO: add screen space dither to threshold?
+            const float neverIgnoreThreshold = workingContext.PtConsts.stablePlanesSplitStopThreshold / float(vertexIndex); // TODO: add screen space dither to threshold?
             float nonZeroDeltaLobesThp[cMaxDeltaLobes];
 #endif
-            int nonZeroDeltaLobes[cMaxDeltaLobes];
+            int nonZeroDeltaLobes[cMaxDeltaLobes]; for (int i = 0; i < cMaxDeltaLobes; i++ ) nonZeroDeltaLobes[i] = 0;
             int nonZeroDeltaLobeCount = 0;
             for (int k = 0; k < deltaLobeCount; k++)
             {
                 DeltaLobe lobe = deltaLobes[k];
-                const float thp = average(lobe.thp);
+                const float thp = Average(lobe.thp);
                 if (thp>deltaIgnoreThreshold)
                 {
                     nonZeroDeltaLobes[nonZeroDeltaLobeCount] = k;	// TODO: there is a weirdness on AMD where this doesn't get filled 
@@ -141,11 +144,11 @@ namespace PathTracer
             }
 
             #if 0 // a way of debugging the loop above - right click on the pixel to debug; info is in the Debugging panel in the UI
-            if (workingContext.debug.IsDebugPixel() && vertexIndex == 1)
+            if (workingContext.Debug.IsDebugPixel() && vertexIndex == 1)
             {
-                workingContext.debug.Print( 0, deltaLobeCount );
-                workingContext.debug.Print( 1, float4( nonZeroDeltaLobeCount, nonZeroDeltaLobes[0], nonZeroDeltaLobes[1], nonZeroDeltaLobes[2] ) );
-                //workingContext.debug.Print( 2, float4( nonZeroDeltaLobeCount, nonZeroDeltaLobesThp[0], nonZeroDeltaLobesThp[1], nonZeroDeltaLobesThp[2] ) );
+                workingContext.Debug.Print( 0, deltaLobeCount );
+                workingContext.Debug.Print( 1, float4( nonZeroDeltaLobeCount, nonZeroDeltaLobes[0], nonZeroDeltaLobes[1], nonZeroDeltaLobes[2] ) );
+                //workingContext.Debug.Print( 2, float4( nonZeroDeltaLobeCount, nonZeroDeltaLobesThp[0], nonZeroDeltaLobesThp[1], nonZeroDeltaLobesThp[2] ) );
             }
             #endif
 
@@ -162,21 +165,21 @@ namespace PathTracer
                 //         }
 
                 // in case plane index 0, we must stop at first non-direct junction; we can only continue if there's only one delta lobe and no non-delta at all (this then becomes just primary surface replacement)
-                bool allowPSR = workingContext.ptConsts.allowPrimarySurfaceReplacement && (nonZeroDeltaLobeCount == 1) && (currentSPIndex == 0) && !potentiallyVolumeTransmission;
+                bool allowPSR = workingContext.PtConsts.allowPrimarySurfaceReplacement && (nonZeroDeltaLobeCount == 1) && (currentSPIndex == 0) && !potentiallyVolumeTransmission;
                 bool canReuseExisting = (currentSPIndex != 0) && (nonZeroDeltaLobeCount > 0);
                 canReuseExisting |= allowPSR;
                 canReuseExisting &= !hasNonDeltaLobes;       // stop on any diffuse lobe
 
                 int availablePlaneCount = 0; int availablePlanes[cStablePlaneCount];
             
-                workingContext.stablePlanes.GetAvailableEmptyPlanes(availablePlaneCount, availablePlanes);
+                workingContext.StablePlanes.GetAvailableEmptyPlanes(pixelPos, availablePlaneCount, availablePlanes);
 
                 // when "Dominant bounce" material setting is set to "None (Surface)", and we're already on a split (currentSPIndex > 0), then make sure we can't reuse current path to go on, it has to stop and collect guide buffers
                 canReuseExisting &= (currentSPIndex == 0) || (bridgedData.shadingData.mtl.getPSDDominantDeltaLobeP1()>0);
             
                 // an example of debugging path decomposition logic for the specific pixel selected in the UI, at the second bounce (vertex index 2)
-                // if (workingContext.debug.IsDebugPixel() && vertexIndex == 2)
-                //     workingContext.debug.Print( 0, currentSPIndex, availablePlaneCount, canReuseExisting, nonZeroDeltaLobeCount );
+                // if (workingContext.Debug.IsDebugPixel() && vertexIndex == 2)
+                //     workingContext.Debug.Print( 0, currentSPIndex, availablePlaneCount, canReuseExisting, nonZeroDeltaLobeCount );
 
 #if USE_THP_PRIORITIZED_PRUNING
                 float prunedThpTotal = 0.0;
@@ -221,20 +224,20 @@ namespace PathTracer
                     // split and then trace ray & enqueue hit for further traversal after this path is completed
                     PathState splitPath = PathTracer::SplitDeltaPath(path, rayDir, bridgedData, deltaLobes[lobeToExplore], lobeToExplore, true, workingContext);
                     splitPath.setStablePlaneIndex(availablePlanes[i]);
-                    workingContext.stablePlanes.StoreExplorationStart(availablePlanes[i], PathPayload::pack(splitPath).packed);
+                    workingContext.StablePlanes.StoreExplorationStart(pixelPos, availablePlanes[i], PathPayload::pack(splitPath).packed);
 
                     #if 0 // way of debugging stable plane index 1 / split path stuff
                     if (splitPath.getStablePlaneIndex() == 1)
                     {
                         // PathPayload pathPayload = PathPayload::pack(splitPath); 
-                        // // const uint4 packed[6] = pathPayload.packed;
+                        // // const uint4 packed[5] = pathPayload.packed;
                         // 
                         // PathState testPath = PathPayload::unpack(pathPayload, PACKED_HIT_INFO_ZERO);
 
-                        workingContext.debug.DrawDebugViz( float4(DbgShowNormalSRGB(deltaLobes[lobeToExplore].dir), 1) ); 
+                        workingContext.Debug.DrawDebugViz( float4(DbgShowNormalSRGB(deltaLobes[lobeToExplore].dir), 1) ); 
 
-                        if (workingContext.debug.IsDebugPixel() /*&& vertexIndex == 2*/)
-                            workingContext.debug.Print( 0, float4( deltaLobes[lobeToExplore].dir, deltaLobes[lobeToExplore].probability ) );
+                        if (workingContext.Debug.IsDebugPixel() /*&& vertexIndex == 2*/)
+                            workingContext.Debug.Print( 0, float4( deltaLobes[lobeToExplore].dir, deltaLobes[lobeToExplore].probability ) );
 
                     }
                     #endif
@@ -255,8 +258,8 @@ namespace PathTracer
         if (setAsBase)
         {
             // move surface world pos to first transform starting point reference frame; we then rotate it with the rotation-only imageXform, and place it back into worldspace (we used to have the whole transform but this takes too much space in payload...)
-            const Ray cameraRay = Bridge::computeCameraRay( workingContext.pixelPos, /*path.getCounter(PackedCounters::SubSampleIndex)*/ 0 );   // note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
-            float3 worldXFormFrom   = cameraRay.origin + cameraRay.dir * workingContext.stablePlanes.LoadFirstHitRayLength(workingContext.pixelPos);
+            const Ray cameraRay = Bridge::computeCameraRay( pixelPos );   // note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
+            float3 worldXFormFrom   = cameraRay.origin + cameraRay.dir * workingContext.StablePlanes.LoadFirstHitRayLength(pixelPos);
             float3 imagePosW        = mul((float3x3)path.imageXform, bridgedData.shadingData.posW-worldXFormFrom)+worldXFormFrom;
             float3 prevImagePosW    = mul((float3x3)path.imageXform, bridgedData.prevPosW-worldXFormFrom)+worldXFormFrom;
 
@@ -276,30 +279,11 @@ namespace PathTracer
             // diffBSDFEstimate = lerp( diffBSDFEstimate, 0.5.xxx, passthroughOverride * 0.5 );
             // specBSDFEstimate = lerp( specBSDFEstimate, 0.5.xxx, passthroughOverride * 0.5 );
 
-            workingContext.stablePlanes.StoreStablePlaneCenter(currentSPIndex, vertexIndex, path.hitPacked, path.stableBranchID, rayDir, path.sceneLength, path.thp, 
+            workingContext.StablePlanes.StoreStablePlane(pixelPos, currentSPIndex, vertexIndex, path.hitPacked, path.stableBranchID, rayDir, path.sceneLength, path.thp, 
                 motionVectors, roughness, worldNormal, diffBSDFEstimate, specBSDFEstimate, path.hasFlag(PathFlags::stablePlaneOnDominantBranch));
             
             // since we're building the planes and we've found a base plane, terminate here and the nextHit contains logic for continuing from other split paths if any (enqueued with .StoreExplorationStart)
             path.terminate();
-        }
-#elif PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES // fill
-        
-        const int bouncesFromStablePlane = path.getCounter(PackedCounters::BouncesFromStablePlane);
-        if (workingContext.ptConsts.useReSTIRGI && bouncesFromStablePlane == 1 && path.hasFlag(PathFlags::stablePlaneOnDominantBranch))
-        {
-            // Store the position and orientation of the first secondary vertex for ReSTIR GI
-            Bridge::StoreSecondarySurfacePositionAndNormal(PathIDToPixel(path.id), bridgedData.shadingData.posW, bridgedData.shadingData.N);
-
-            // an example of debugging secondary surface pos & normal for the specific pixel selected in the UI, at all touched bounces
-            // if (workingContext.debug.IsDebugPixel())
-            //     workingContext.debug.Print(path.getVertexIndex(), bridgedData.shadingData.posW);
-        }
-
-        path.denoiserSampleHitTFromPlane = StablePlaneAccumulateSampleHitT( path.denoiserSampleHitTFromPlane, rayTCurrent, bouncesFromStablePlane, path.isDeltaOnlyPath() );
-
-        if (!path.hasFlag(PathFlags::stablePlaneOnBranch)) // not on stable branch, we need to capture emission
-        {
-            path.secondaryL += surfaceEmission * path.thp;
         }
 #endif
     }
@@ -307,6 +291,7 @@ namespace PathTracer
 #if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES // fill only
     inline void StablePlanesOnScatter(inout PathState path, const BSDFSample bs, const WorkingContext workingContext)
     {
+        const uint2 pixelPos = path.GetPixelPos();
         const bool wasOnStablePlane = path.hasFlag(PathFlags::stablePlaneOnPlane);
         if( wasOnStablePlane ) // if we previously were on plane, remember the first scatter type
         {
@@ -324,28 +309,19 @@ namespace PathTracer
             bool onStablePath = false;
             for (uint spi = 0; spi < cStablePlaneCount; spi++)
             {
-                const uint planeBranchID = workingContext.stablePlanes.GetBranchIDCenter(spi);
+                const uint planeBranchID = workingContext.StablePlanes.GetBranchID(pixelPos, spi);
                 if (planeBranchID == cStablePlaneInvalidBranchID)
                     continue;
 
                 // changing the stable plane for the future
                 if (StablePlaneIsOnPlane(planeBranchID, path.stableBranchID))
                 {
-                    workingContext.stablePlanes.CommitDenoiserRadiance(path.getStablePlaneIndex(), path.denoiserSampleHitTFromPlane,
-                        path.denoiserDiffRadianceHitDist, path.denoiserSpecRadianceHitDist,
-                        path.secondaryL, path.hasFlag(PathFlags::stablePlaneBaseScatterDiff),
-                        path.hasFlag(PathFlags::stablePlaneOnDeltaBranch),
-                        path.hasFlag(PathFlags::stablePlaneOnDominantBranch));
-                    path.setFlag(PathFlags::stablePlaneOnPlane, true);
-                    path.setFlag(PathFlags::stablePlaneOnDeltaBranch, false);
+                    workingContext.StablePlanes.CommitDenoiserRadiance(path);
                     path.setStablePlaneIndex(spi);
-                    path.setFlag(PathFlags::stablePlaneOnDominantBranch, spi == workingContext.stablePlanes.LoadDominantIndexCenter());
+                    path.setFlag(PathFlags::stablePlaneOnDominantBranch, spi == workingContext.StablePlanes.LoadDominantIndex(pixelPos));
                     path.setCounter(PackedCounters::BouncesFromStablePlane, 0);
-                    path.denoiserSampleHitTFromPlane    = 0.0;
-                    path.denoiserDiffRadianceHitDist    = lpfloat4(0,0,0,0);
-                    path.denoiserSpecRadianceHitDist    = lpfloat4(0,0,0,0);
-                    path.secondaryL                     = 0;
                     onStablePath = true;
+
                     break;
                 }
 
@@ -365,69 +341,18 @@ namespace PathTracer
         if (!path.hasFlag(PathFlags::stablePlaneOnPlane))
             path.incrementCounter(PackedCounters::BouncesFromStablePlane);
     }
-
-    inline void StablePlanesHandleNEE(const PathState preScatterPath, inout PathState outPath, lpfloat3 diffuseRadiance, lpfloat3 specularRadiance, lpfloat sampleDistance, const WorkingContext workingContext)
-    {
-        uint stablePlaneIndex = preScatterPath.getStablePlaneIndex();
-
-        const int bouncesFromStablePlane = 1+preScatterPath.getCounter(PackedCounters::BouncesFromStablePlane); // since it's NEE, it's +1!
-        float accSampleDistance = StablePlaneAccumulateSampleHitT( preScatterPath.denoiserSampleHitTFromPlane, sampleDistance, bouncesFromStablePlane, false );
-        accSampleDistance = lpfloat( min(accSampleDistance, HLF_MAX) );
-
-        lpfloat3 preScatterThpLP = (lpfloat3)preScatterPath.thp;
-        diffuseRadiance *= preScatterThpLP;     // account for the path throughput: have to do it here since we're adding samples at different path vertices
-        specularRadiance *= preScatterThpLP;    // account for the path throughput: have to do it here since we're adding samples at different path vertices
-
-        if (preScatterPath.hasFlag(PathFlags::stablePlaneOnPlane)) // we cound use bouncesFromStablePlane==0 for perf here, but needs testing
-            //(path.getVertexIndex() == captureVertexIndex)
-        {
-
-            // this is the NEE at the denoising base surface - we've got separate inputs for diffuse and specular lobes, so capture them separately
-            // there is no need to do StablePlaneCombineWithHitTCompensation - this always happens first
-            outPath.denoiserDiffRadianceHitDist = lpfloat4( diffuseRadiance, accSampleDistance );
-            outPath.denoiserSpecRadianceHitDist = lpfloat4( specularRadiance, accSampleDistance );
-        }
-        else //if( !(workingContext.ptConsts.stablePlanesSkipIndirectNoiseP0 && preScatterPath.getStablePlaneIndex() == 0 && (bouncesFromStablePlane)>2) )
-        {
-            // this is one of the subsequent bounces past the denoising surface - it got scattered through a diffuse or specular lobe so we use that to determine where to capture
-            float3 neeSum = diffuseRadiance+specularRadiance;
-            outPath.secondaryL += neeSum;	// <- there's a bug somewhere on this codepath unfortunately
-        }
-    }
 #endif
 
-    inline bool StablePlanesHandleMiss(inout PathState path, float3 emission, const float3 rayOrigin, const float3 rayDir, const float rayTCurrent, const WorkingContext workingContext)
+    inline void StablePlanesHandleMiss(inout PathState path, float3 emission, const float3 rayOrigin, const float3 rayDir, const float rayTCurrent, const WorkingContext workingContext)
     {
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // build
+        const uint2 pixelPos = path.GetPixelPos();
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // build; during build, every miss is a denoising layer base by traversal design, so store the properties
         const uint vertexIndex = path.getVertexIndex();
         if (vertexIndex == 1)
-            workingContext.stablePlanes.StoreFirstHitRayLengthAndClearDominantToZeroCenter(kMaxRayTravel);
-        float3 motionVectors = Bridge::computeSkyMotionVector(workingContext.pixelPos);
-        workingContext.stablePlanes.StoreStablePlaneCenter(path.getStablePlaneIndex(), vertexIndex, path.hitPacked, path.stableBranchID, rayDir, path.sceneLength, path.thp, 
+            workingContext.StablePlanes.StoreFirstHitRayLengthAndClearDominantToZero(pixelPos, kMaxRayTravel);
+        float3 motionVectors = Bridge::computeSkyMotionVector(path.GetPixelPos());
+        workingContext.StablePlanes.StoreStablePlane(pixelPos, path.getStablePlaneIndex(), vertexIndex, path.hitPacked, path.stableBranchID, rayDir, path.sceneLength, path.thp, 
             motionVectors, 1, -rayDir, 1.xxx, 1.xxx, path.hasFlag(PathFlags::stablePlaneOnDominantBranch));
-        return true; // collect the emission!
-#elif PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES // fill
-
-        const int bouncesFromStablePlane = path.getCounter(PackedCounters::BouncesFromStablePlane);
-        if (workingContext.ptConsts.useReSTIRGI && bouncesFromStablePlane == 1 && path.hasFlag(PathFlags::stablePlaneOnDominantBranch))
-        {
-            // Imagine a position and orientation for the environment and store it for ReSTIR GI
-            const float3 worldPos = rayOrigin + rayDir * kMaxSceneDistance;
-            const float3 normal = -rayDir;
-            Bridge::StoreSecondarySurfacePositionAndNormal(PathIDToPixel(path.id), worldPos, normal);
-        }
-
-        path.denoiserSampleHitTFromPlane = StablePlaneAccumulateSampleHitT( path.denoiserSampleHitTFromPlane, kMaxSceneDistance, bouncesFromStablePlane, path.isDeltaOnlyPath() );
-
-        // an example of debugging path decomposition info for the specific pixel selected in the UI, at all touched bounces
-        //if (workingContext.debug.IsDebugPixel())
-        //    workingContext.debug.Print(path.getVertexIndex(), path.getStablePlaneIndex(), bouncesFromStablePlane, path.denoiserSampleHitTFromPlane, 42);
-
-        if (!path.hasFlag(PathFlags::stablePlaneOnBranch)) // not on stable branch, we need to capture emission
-        {
-            path.secondaryL += emission * path.thp;
-        }
-        return false; // tell path tracer that we're handling this radiance (or it was handled in MODE==1)
 #endif
     }
 #endif
@@ -439,7 +364,7 @@ inline void DeltaTreeVizHandleMiss(inout PathState path, const float3 rayOrigin,
     if (path.hasFlag(PathFlags::deltaTreeExplorer))
     {
         DeltaTreeVizPathVertex info = DeltaTreeVizPathVertex::make(path.getVertexIndex(), path.stableBranchID, 0xFFFFFFFF, path.thp, 0.0, rayOrigin + rayDir * rayTCurrent, path.hasFlag(PathFlags::stablePlaneOnDominantBranch)); // empty info for sky
-        workingContext.debug.DeltaTreeVertexAdd( info );
+        workingContext.Debug.DeltaTreeVertexAdd( info );
         return;
     }
 }
@@ -450,7 +375,7 @@ inline void DeltaTreeVizHandleHit(inout PathState path, const float3 rayOrigin, 
     {
         // just continue - it has already been updated with an offset
         PathPayload packedPayload = PathPayload::pack(path);
-        workingContext.debug.DeltaSearchStackPush(packedPayload);
+        workingContext.Debug.DeltaSearchStackPush(packedPayload);
     }
     else
     {
@@ -459,7 +384,7 @@ inline void DeltaTreeVizHandleHit(inout PathState path, const float3 rayOrigin, 
         bridgedData.bsdf.evalDeltaLobes(bridgedData.shadingData, info.deltaLobes, info.deltaLobeCount, info.nonDeltaPart);
 
         // use deltaTreeContinueRecursion to give up on searching after buffers are filled in; can easily happen in complex meshes with clean reflection/transmission materials
-        bool deltaTreeContinueRecursion = workingContext.debug.DeltaTreeVertexAdd( info );
+        bool deltaTreeContinueRecursion = workingContext.Debug.DeltaTreeVertexAdd( info );
         deltaTreeContinueRecursion &= vertexIndex <= cStablePlaneMaxVertexIndex;
 
         if (!hasFinishedSurfaceBounces)
@@ -478,7 +403,7 @@ inline void DeltaTreeVizHandleHit(inout PathState path, const float3 rayOrigin, 
                     if (deltaPath.getVertexIndex() <= cStablePlaneMaxVertexIndex)
                         for (uint spi = 0; spi < cStablePlaneCount; spi++)
                         {
-                            const uint planeBranchID = workingContext.stablePlanes.GetBranchIDCenter(spi);
+                            const uint planeBranchID = workingContext.StablePlanes.GetBranchID(pixelPos, spi);
                             if (planeBranchID != cStablePlaneInvalidBranchID && StablePlaneIsOnPlane(planeBranchID, deltaPath.stableBranchID))
                             {
                                 deltaPath.setFlag(PathFlags::stablePlaneOnPlane, true);
@@ -487,12 +412,12 @@ inline void DeltaTreeVizHandleHit(inout PathState path, const float3 rayOrigin, 
 
                                 // picking dominant flag from the actual build pass stable planes to be faithful debug for the StablePlanes system, which executed before this
                                 const uint stablePlaneIndex = deltaPath.getStablePlaneIndex();
-                                const uint dominantSPIndex = workingContext.stablePlanes.LoadDominantIndexCenter();
+                                const uint dominantSPIndex = workingContext.StablePlanes.LoadDominantIndex(pixelPos);
                                 deltaPath.setFlag(PathFlags::stablePlaneOnDominantBranch, stablePlaneIndex == dominantSPIndex && deltaPath.hasFlag(PathFlags::stablePlaneOnPlane) );
                             }
                         }
                     
-                    deltaTreeContinueRecursion &= workingContext.debug.DeltaSearchStackPush(PathPayload::pack(deltaPath));
+                    deltaTreeContinueRecursion &= workingContext.Debug.DeltaSearchStackPush(PathPayload::pack(deltaPath));
                 }
             }
         }

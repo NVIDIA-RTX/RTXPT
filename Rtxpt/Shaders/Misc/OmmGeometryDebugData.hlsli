@@ -14,15 +14,15 @@
 
 struct GeometryDebugData
 {
-    uint ommArrayDataBufferIndex;
-    uint ommArrayDataBufferOffset;
-    uint ommDescArrayBufferIndex;
-    uint ommDescArrayBufferOffset;
+    unsigned int ommArrayDataBufferIndex;
+    unsigned int ommArrayDataBufferOffset;
+    unsigned int ommDescArrayBufferIndex;
+    unsigned int ommDescArrayBufferOffset;
 
-    uint ommIndexBufferIndex;
-    uint ommIndexBufferOffset;
-    uint ommIndexBuffer16Bit; // (bool) 16 or 32 bit indices.
-    uint _pad0;
+    unsigned int ommIndexBufferIndex;
+    unsigned int ommIndexBufferOffset;
+    unsigned int ommIndexBuffer16Bit; // (bool) 16 or 32 bit indices.
+    unsigned int _pad0;
 };
 
 #endif // __OMM_GEOMETRY_DEBUG_DATA_HLSLI__

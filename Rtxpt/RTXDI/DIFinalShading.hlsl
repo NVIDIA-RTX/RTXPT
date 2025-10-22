@@ -62,44 +62,38 @@ bool getFinalSample(const uint2 reservoirPos, const RAB_Surface surface, out flo
     return true;
 }
 
-bool ReSTIRDIFinalContribution(const uint2 reservoirPos, const uint2 pixelPos, const RAB_Surface surface, out float3 diffuseContribution, out float3 specularContribution, out float hitDistance)
+bool ReSTIRDIFinalContribution(const uint2 reservoirPos, const uint2 pixelPos, const RAB_Surface surface, out float4 newRadianceAndSpecAvg, out float newSpecHitT)
 {
     // Note: there's a bug in specular contribution being passed as diffuse in case of specglossy material (for ex. glass bottles in Bistro) - it could be an issue with packing/unpacking of the surface/bsdf data
 
-    diffuseContribution = 0.0.xxx;
-    specularContribution = 0.0.xxx;
-    hitDistance = 0.0;
+    newRadianceAndSpecAvg = 0.0;
+    newSpecHitT = 0.0;
 
     PathTracer::PathLightSample ls = PathTracer::PathLightSample::make();
 
     if (getFinalSample(reservoirPos, surface, ls.Li, ls.Direction, ls.Distance))
     {
         // Apply sample shading
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-        float3 bsdfThpDiff, bsdfThpSpec;
-        surface.Eval(ls.Direction, bsdfThpDiff, bsdfThpSpec);
-#else
-#error denoiser requires specular split currently but easy to switch back
-        float3 bsdfThp = surface.Eval(ls.dir);
-#endif
+
+        float4 bsdfThpComb = surface.Eval(ls.Direction);
 
         float3 pathThp = Unpack_R11G11B10_FLOAT(u_Throughput[pixelPos]);
 
         // Compute final radiance reaching the camera (there's no firefly filter for ReSTIR here unfortunately)
-        diffuseContribution = bsdfThpDiff * ls.Li * pathThp;
-        specularContribution = bsdfThpSpec * ls.Li * pathThp;
+        newRadianceAndSpecAvg.rgb = bsdfThpComb.rgb * ls.Li * pathThp;
+        newRadianceAndSpecAvg.a = bsdfThpComb.a * Average(ls.Li * pathThp);
 
 #if 0 // applying firefly filter here doesn't actually help so let's save on few instructions
         diffuseRadiance = FireflyFilter(diffuseRadiance, g_Const.ptConsts.fireflyFilterThreshold, 1.0);
         specularRadiance = FireflyFilter(specularRadiance, g_Const.ptConsts.fireflyFilterThreshold, 1.0);
 #endif
 
-        hitDistance = ls.Distance;
+        newSpecHitT = ls.Distance; // it's simply distance to source as we know our surface is dominant denoising layer
     }
  
     // useful for debugging!
     DebugContext debug;
-    debug.Init(pixelPos, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
+    debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
 
     switch (g_Const.debug.debugViewType)
     {
@@ -107,11 +101,11 @@ bool ReSTIRDIFinalContribution(const uint2 reservoirPos, const uint2 pixelPos, c
         debug.DrawDebugViz(pixelPos, float4(ls.Li, 1));
         break;
     case (int)DebugViewType::ReSTIRDIFinalContribution:
-        debug.DrawDebugViz(pixelPos, float4(diffuseContribution + specularContribution, 1));
+        debug.DrawDebugViz(pixelPos, float4(newRadianceAndSpecAvg.rgb, 1));
         break;
     }
     
-    return any(diffuseContribution+specularContribution)>0;
+    return any(newRadianceAndSpecAvg.rgb)>0;
 }
 
 #ifndef USE_AS_INCLUDE
@@ -126,30 +120,22 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
     if (!RAB_IsSurfaceValid(surface))
         return;
 
-    float3 diffuseContribution, specularContribution = 0;;
-    float hitDistance;
+    float4 newRadianceAndSpecAvg;
+    float newSpecHitT;
 
-    if (ReSTIRDIFinalContribution(reservoirPos, pixelPos, surface, diffuseContribution, specularContribution, hitDistance))
+    if (ReSTIRDIFinalContribution(reservoirPos, pixelPos, surface, newRadianceAndSpecAvg, newSpecHitT))
     {
         if (g_Const.ptConsts.denoisingEnabled)
         {
-            StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
-
-            uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
-            uint address = stablePlanes.PixelToAddress(pixelPos, dominantStablePlaneIndex);
-
-            float4 denoiserDiffRadianceHitDist;
-            float4 denoiserSpecRadianceHitDist;
-            UnpackTwoFp32ToFp16(u_StablePlanesBuffer[address].DenoiserPackedRadianceHitDist, denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
-
-            denoiserDiffRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserDiffRadianceHitDist, diffuseContribution, hitDistance);
-            denoiserSpecRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserSpecRadianceHitDist, specularContribution, hitDistance);
-
-            u_StablePlanesBuffer[address].DenoiserPackedRadianceHitDist = PackTwoFp32ToFp16(denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
+            uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+            float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
+            float specHitDist   = u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist;
+            u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist = AccumulateHitT( radiance.a, specHitDist, newRadianceAndSpecAvg.a, newSpecHitT );
+            u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16(radiance.rgba+newRadianceAndSpecAvg.rgba);
         }
         else
         {
-            u_OutputColor[pixelPos] += float4(diffuseContribution + specularContribution, 0);
+            u_OutputColor[pixelPos] += float4(newRadianceAndSpecAvg.rgb, 0);
         }
     }
 

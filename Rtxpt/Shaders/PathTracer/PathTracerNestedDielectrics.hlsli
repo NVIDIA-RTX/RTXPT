@@ -47,6 +47,9 @@ namespace PathTracer
     */
     inline bool HandleNestedDielectrics(inout SurfaceData surfaceData, inout PathState path, const WorkingContext workingContext)
     {
+        if (surfaceData.shadingData.mtl.isThinSurface())
+            return true; 
+
         // Check for false intersections.
         uint nestedPriority = surfaceData.shadingData.mtl.getNestedPriority();
         if (!path.interiorList.isTrueIntersection(nestedPriority))
@@ -60,15 +63,15 @@ namespace PathTracer
             if (path.getCounter(PackedCounters::RejectedHits) < kMaxRejectedHits)
             {
 #if 0 && ENABLE_DEBUG_VIZUALISATIONS && ENABLE_DEBUG_LINES_VIZ // do debugging for rejected pixels too!
-                if (workingContext.debug.IsDebugPixel())
+                if (workingContext.Debug.IsDebugPixel())
                 {
                     // IoR debugging - .x - "outside", .y - "interior", .z - frontFacing, .w - "eta" (eta is isFrontFace?outsideIoR/insideIoR:insideIoR/outsideIoR)
-                    // workingContext.debug.Print(path.getVertexIndex()-1, float4(-42,-42,-42,-42) ); //float4(surfaceData.shadingData.IoR, surfaceData.interiorIoR, surfaceData.shadingData.frontFacing, surfaceData.bsdf.data.eta) );
+                    // workingContext.Debug.Print(path.getVertexIndex()-1, float4(-42,-42,-42,-42) ); //float4(surfaceData.shadingData.IoR, surfaceData.interiorIoR, surfaceData.shadingData.frontFacing, surfaceData.bsdf.data.eta) );
                     // path segment
-                    workingContext.debug.DrawLine(path.origin, surfaceData.shadingData.posW, 0.4.xxx, 0.1.xxx);
-                    workingContext.debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.T * workingContext.debug.LineScale()*0.2, float3(0.1, 0, 0), float3(0.5, 0, 0));
-                    workingContext.debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.B * workingContext.debug.LineScale()*0.2, float3(0, 0.1, 0), float3(0, 0.5, 0));
-                    workingContext.debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.N * workingContext.debug.LineScale()*0.2, float3(0, 0, 0.1), float3(0, 0, 0.5));
+                    workingContext.Debug.DrawLine(path.origin, surfaceData.shadingData.posW, 0.4.xxx, 0.1.xxx);
+                    workingContext.Debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.T * workingContext.Debug.LineScale()*0.2, float3(0.1, 0, 0), float3(0.5, 0, 0));
+                    workingContext.Debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.B * workingContext.Debug.LineScale()*0.2, float3(0, 0.1, 0), float3(0, 0.5, 0));
+                    workingContext.Debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.N * workingContext.Debug.LineScale()*0.2, float3(0, 0, 0.1), float3(0, 0, 0.5));
                 }
 #endif
 

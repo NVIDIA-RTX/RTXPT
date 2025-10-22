@@ -20,7 +20,6 @@
 using namespace donut::math;
 
 #include "RenderTargets.h"
-#include "PostProcess.hlsl"
 #include "Shaders/SampleConstantBuffer.h"
 
 namespace donut::engine
@@ -42,6 +41,7 @@ public:
         RELAXDenoiserFinalMerge,
         REBLURDenoiserFinalMerge,
         DLSSRRDenoiserPrepareInputs,
+        NoDenoiserFinalMerge,
         DummyPlaceholder,
 
         MaxCount

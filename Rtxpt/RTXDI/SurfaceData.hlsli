@@ -86,18 +86,17 @@ struct PathTracerSurfaceData
 		return _planeHash;
 	}
 
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-	void Eval(const float3 wo, out float3 diffuse, out float3 specular)
+	float4 Eval(const float3 wo)
 	{
 		float3 wiLocal = _ToLocal(_V);
 		float3 woLocal = _ToLocal(wo);
 
 		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
 
-		bsdf.eval(wiLocal, woLocal, diffuse, specular);
+		return bsdf.eval(wiLocal, woLocal);
 	}
 
-	void EvalRoughnessClamp(lpfloat minRoughness, const float3 wo, out float3 diffuse, out float3 specular)
+	float4 EvalRoughnessClamp(lpfloat minRoughness, const float3 wo)
 	{
 		StandardBSDFData roughBsdf = _data;
 		roughBsdf.SetRoughness( max(roughBsdf.Roughness(), minRoughness) );
@@ -107,24 +106,7 @@ struct PathTracerSurfaceData
 
 		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, roughBsdf);
 
-		bsdf.eval(wiLocal, woLocal, diffuse, specular);
-	}
-#endif
-
-	float3 Eval(const float3 wo)
-	{
-		float3 wiLocal = _ToLocal(_V);
-		float3 woLocal = _ToLocal(wo);
-
-		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
-
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-		float3 diffuse, specular;
-		bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/, diffuse, specular);
-		return diffuse + specular;
-#else
-		return bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/);
-#endif
+		return bsdf.eval(wiLocal, woLocal);
 	}
 
 	float evalPdfReference(const float3 wo)
@@ -186,13 +168,7 @@ struct PathTracerSurfaceData
 		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
 
 		result.wo = _FromLocal(woLocal);
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-		float3 diffuse, specular;
-		bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/, diffuse, specular);
-		result.weight = (diffuse + specular) / result.pdf;
-#else
-		result.weight = bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/) / result.pdf;
-#endif
+        result.weight = bsdf.eval(wiLocal, woLocal).rgb / result.pdf;
 		result.lobe = (uint)(woLocal.z > 0.f ? (uint)LobeType::DiffuseReflection : (uint)LobeType::DiffuseTransmission);
 
 		return true;
@@ -414,7 +390,7 @@ bool isValidPixelPosition(int2 pixelPosition)
 PathTracerSurfaceData getGBufferSurfaceImpl(uint2 pixelPosition, StablePlane sp, uint dominantStablePlaneIndex, uint stableBranchID)
 {
 	DebugContext debug;
-	debug.Init(pixelPosition, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
+	debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
 
     PackedHitInfo packedHitInfo; 
 	float3 rayDir;
@@ -430,7 +406,7 @@ PathTracerSurfaceData getGBufferSurfaceImpl(uint2 pixelPosition, StablePlane sp,
     if ((hit.isValid() && hit.getType() == HitType::Triangle))
     {
         // Load shading surface
-        const Ray cameraRay = Bridge::computeCameraRay( pixelPosition, 0 );
+        const Ray cameraRay = Bridge::computeCameraRay( pixelPosition );
         RayCone rayCone = RayCone::make(0, g_Const.ptConsts.camera.PixelConeSpreadAngle).propagateDistance(sceneLength);       
         SampleGenerator sampleGenerator = SampleGenerator::make(SampleGeneratorVertexBase::make(pixelPosition, 0, Bridge::getSampleIndex()));
 
@@ -489,10 +465,10 @@ PathTracerSurfaceData getGBufferSurfaceImpl(int2 pixelPosition)
 	    return PathTracerSurfaceData::makeEmpty();
 
     // Init globals
-    StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPosition, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
+    StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
 
     // Figure out the shading plane
-    uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
+    uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndex(pixelPosition);
     uint stableBranchID = stablePlanes.GetBranchID(pixelPosition, dominantStablePlaneIndex);
     return getGBufferSurfaceImpl(pixelPosition, stablePlanes.LoadStablePlane(pixelPosition, dominantStablePlaneIndex), dominantStablePlaneIndex, stableBranchID);
 }

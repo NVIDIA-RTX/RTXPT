@@ -11,10 +11,12 @@
 #ifndef __LIGHTS_BAKER_HLSL__
 #define __LIGHTS_BAKER_HLSL__
 
-#define LLB_NUM_COMPUTE_THREADS         128
-#define LLB_LOCAL_BLOCK_SIZE            32
+// this will enable various valdiation passes which will debug print or otherwise indicate issues with the algorithm or input data / buffers setup
+#define LLB_ENABLE_VALIDATION           0
 
-#define LLB_SCRATCH_BUFFER_SIZE         (48*1024*1024)
+#define LLB_NUM_COMPUTE_THREADS         128
+#define LLB_NUM_COMPUTE_THREADS_2D      8
+#define LLB_LOCAL_BLOCK_SIZE            32
 
 #define RTXPT_LIGHTING_CPJ_BLOCKSIZE    1024
 
@@ -42,18 +44,17 @@ struct SamplingProxyBuildProcTask
     uint FillProxyIndexTo;      // this task needs to fill to this index                                    
 };
 
+#define LLB_SCRATCH_BUFFER_SIZE         (48*1024*1024) // this is in bytes
+
 #if defined(__cplusplus)
 static_assert( sizeof(EmissiveTrianglesProcTask) * LLB_MAX_PROC_TASKS <= LLB_SCRATCH_BUFFER_SIZE ); // does it fit
 static_assert( sizeof(SamplingProxyBuildProcTask) * LLB_MAX_PROXY_PROC_TASKS <= LLB_SCRATCH_BUFFER_SIZE ); // does it fit
 static_assert( (RTXPT_LIGHTING_MAX_LIGHTS / LLB_MAX_TRIANGLES_PER_TASK * 2) <= LLB_MAX_PROC_TASKS );
 #endif
 
-
 #if !defined(__cplusplus)
 
 #pragma pack_matrix(row_major)
-
-#define LLB_ENABLE_VALIDATION 0
 
 #define NON_PATH_TRACING_PASS 1
 
@@ -67,12 +68,15 @@ static_assert( (RTXPT_LIGHTING_MAX_LIGHTS / LLB_MAX_TRIANGLES_PER_TASK * 2) <= L
 #include "../Shaders/PathTracer/Utils/Math/MathHelpers.hlsli"
 #include "../Shaders/PathTracer/Lighting/LightingTypes.h"
 #include "../Shaders/PathTracer/Lighting/LightingConfig.h"
+#include "../Shaders/PathTracer/Lighting/PolymorphicLightPTConfig.h"
 #include "../Shaders/PathTracer/Lighting/PolymorphicLight.hlsli"
 #include "../Shaders/PathTracer/Lighting/LightingAlgorithms.hlsli"
 #include "../Shaders/PathTracer/Utils/NoiseAndSequences.hlsli"
 #include "../Shaders/PathTracer/Utils/SampleGenerators.hlsli"
 
-ConstantBuffer<LightsBakerConstants>        g_const                         : register(b0);
+//ConstantBuffer<LightsBakerConstants>        g_const                         : register(b0);
+StructuredBuffer<LightsBakerConstants>      t_const                         : register(t20);
+#define g_const t_const[0]
 
 RWStructuredBuffer<LightingControlData>     u_controlBuffer                 : register(u0);
 
@@ -89,31 +93,33 @@ RWBuffer<uint>                              u_perLightProxyCounters         : re
 RWBuffer<uint>                              u_lightSamplingProxies          : register(u9);
 RWTexture2D<uint>                           u_envLightLookupMap             : register(u10);
 
-RWTexture2D<uint2>                          u_feedbackReservoirBuffer       : register(u12);    //  this is the raw "reservoirs" coming from previous frame - historic light indices that need remapping!
-RWTexture2D<uint>                           u_processedFeedbackBuffer       : register(u13);    //  this is the partially processed feedback data, with old light indices matched to new and holes filled but NOT yet reprojected
-RWTexture2D<uint2>                          u_reprojectedFeedbackBuffer     : register(u14);    //  this is u_reprojectedFeedbackBuffer but reprojected, plus .y contains historic samples that bypass NEE
-RWTexture2D<uint>                           u_reprojectedLRFeedbackBuffer   : register(u15);
-RWTexture3D<uint>                           u_narrowSamplingBuffer          : register(u16);
+// feedback reservoirs
+RWTexture2D<float>                          u_feedbackTotalWeight           : register(u11);    // these are the main reservoir working surfaces
+RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>  u_feedbackCandidates            : register(u12);    // these are the main reservoir working surfaces
+RWTexture2D<float>                          u_feedbackTotalWeightScratch    : register(u13);    // these are temporary surfaces used to reproject into in P1 and consumed by P2 (and in some cases Clear)
+RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>  u_feedbackCandidatesScratch     : register(u14);    // these are temporary surfaces used to reproject into in P1 and consumed by P2 (and in some cases Clear)
+RWTexture2D<float>                          u_feedbackTotalWeightBlended    : register(u15);    // this is where the early feedback is blended together
+RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>  u_feedbackCandidatesBlended     : register(u16);    // this is where the early feedback is blended together
 
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-RWTexture2D<uint2>                          u_feedbackReservoirBufferScratch: register(u17);
-#endif
+RWTexture2D<float>                          u_historyDepth                  : register(u17);
+LOCAL_SAMPLING_BUFFER_TYPE_UAV              u_localSamplingBuffer           : register(u18);
 
-Texture2D<float>                            t_depthBuffer                   : register(t10);     //< unused, we have very simple reprojection that relies on motion vectors only, errors are tolerated
+Texture2D<float>                            t_depthBuffer                   : register(t10);    // engine's depth buffer
 Texture2D<float3>                           t_motionVectors                 : register(t11);
 Texture2D<float4>                           t_envRadianceAndImportanceMap   : register(t12);
+Buffer<float>                               t_historicLightWeights          : register(t13);
 
-StructuredBuffer<SubInstanceData>   t_SubInstanceData                       : register(t1);
-StructuredBuffer<InstanceData>      t_InstanceData                          : register(t2);
-StructuredBuffer<GeometryData>      t_GeometryData                          : register(t3);
-StructuredBuffer<PTMaterialData>    t_PTMaterialData                        : register(t5);
+StructuredBuffer<SubInstanceData>           t_SubInstanceData               : register(t1);
+StructuredBuffer<InstanceData>              t_InstanceData                  : register(t2);
+StructuredBuffer<GeometryData>              t_GeometryData                  : register(t3);
+StructuredBuffer<PTMaterialData>            t_PTMaterialData                : register(t5);
 
-VK_BINDING(0, 1) ByteAddressBuffer t_BindlessBuffers[]                  : register(t0, space1);
-VK_BINDING(1, 1) Texture2D t_BindlessTextures[]                         : register(t0, space2);
+VK_BINDING(0, 1) ByteAddressBuffer          t_BindlessBuffers[]             : register(t0, space1);
+VK_BINDING(1, 1) Texture2D                  t_BindlessTextures[]            : register(t0, space2);
 
-SamplerState                                    s_point                 : register(s0);
-SamplerState                                    s_linear                : register(s1);
-SamplerState                                    s_materialSampler       : register(s2);
+SamplerState                                s_point                         : register(s0);
+SamplerState                                s_linear                        : register(s1);
+SamplerState                                s_materialSampler               : register(s2);
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -124,7 +130,7 @@ void DebugDrawLightTriangle(const PolymorphicLightInfoFull lightInfo, float4 col
 void DebugDrawLightDirectional(const PolymorphicLightInfoFull lightInfo, float4 color, float4 lineColor);
 void DebugDrawLightEnvironment(const PolymorphicLightInfoFull lightInfo, float4 color, float4 lineColor);
 void DebugDrawLightEnvironmentQuad(const PolymorphicLightInfoFull lightInfo, float4 color, float4 lineColor);
-void DebugDrawLight(const PolymorphicLightInfoFull lightInfo, float alpha);
+void DebugDrawLight(const PolymorphicLightInfoFull lightInfo, float alpha, float3 colMul = float3(1,1,1), float3 colAdd = float3(0,0,0));
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 [numthreads(LLB_NUM_COMPUTE_THREADS, 1, 1)]
@@ -137,6 +143,65 @@ void ResetPastToCurrentHistory( uint lightIndex : SV_DispatchThreadID )
     u_historyRemapPastToCurrent[lightIndex] = RTXPT_INVALID_LIGHT_INDEX;
 }
 
+float DistanceFromFrustum( float3 position )
+{
+    float distMin = 0;
+    for (int i = 0; i < 5; i++ )
+    {
+        float dist = dot( position, g_const.FrustumPlanes[i].xyz ) - g_const.FrustumPlanes[i].w;
+        distMin = min( distMin, dist );
+    }
+    return max( 0, -distMin );
+}
+
+float ImportanceBooster( const PolymorphicLightInfoFull packedLightInfo, const uint lightIndex, const float unboostedWeight )
+{
+    float boostedWeight = unboostedWeight;
+    if( g_const.ImportanceBoostFrustumMul > 0 ) 
+    {
+        float relDistance = 0;
+        // directional lights have no position, so fix their distance to a constant
+        PolymorphicLightType lightType = PolymorphicLight::DecodeType(packedLightInfo);
+        if ( lightType == kEnvironmentQuad || lightType == kEnvironment || lightType == kDirectional )
+        {
+            // add small boost to distant lights to balance out other lights getting a boost on average - this should need proper math
+            relDistance = (0.8*g_const.ImportanceBoostFrustumFadeRangeExt+0.2*g_const.ImportanceBoostFrustumFadeRangeInt);
+        }
+        else
+        {
+            relDistance = length(packedLightInfo.Base.Center - g_const.SceneCameraPos) / g_const.ImportanceBoostFrustumFadeRangeInt;
+            relDistance = max( relDistance, DistanceFromFrustum(packedLightInfo.Base.Center) / g_const.ImportanceBoostFrustumFadeRangeExt );
+            // ^ these 2 can (and should) be combined in some ratio for really large scenes
+        }
+        boostedWeight *= 1 + g_const.ImportanceBoostFrustumMul / (1+relDistance);
+    }
+    if( g_const.LastFrameTemporalFeedbackAvailable && g_const.ImportanceBoostIntensityDelta > 0 ) 
+    {
+        uint lightIndexHistoric = u_historyRemapCurrentToPast[lightIndex];
+        float historicWeight = (lightIndexHistoric != RTXPT_INVALID_LIGHT_INDEX)?(t_historicLightWeights[lightIndex]):(0);
+        
+        float delta = boostedWeight - historicWeight*1.5; // current threshold is 1.5 - avoids lights that gradually increase in intensity grabbing too much attention 
+        if (delta>0)
+        {
+            boostedWeight += g_const.ImportanceBoostIntensityDelta * delta;
+        }
+    }
+
+#if 0 // debug draw
+    float dbgBoostVizScale = 10.0;
+    float dbgBoostViz = (boostedWeight - unboostedWeight)/(unboostedWeight*dbgBoostVizScale);
+    if (dbgBoostViz > 0.01)
+    {
+        const float alpha = 1.66 * sqrt(saturate(dbgBoostViz*5-0.5));
+        //const float3 heatColor = GradientHeatMap( sqrt( 1e-7+saturate(  )) );
+        const float3 heatColor = GradientHeatMap( sqrt( 1e-7+saturate( dbgBoostViz ) ) );
+        //do gradient heat color code based on boosted weight vs unboosted weight
+        DebugDrawLight(packedLightInfo, alpha, float3(0, 0, 0), heatColor );
+    }
+#endif
+    return boostedWeight;
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// ENVMAP SECTION
 ///
@@ -146,7 +211,7 @@ float4 EnvironmentComputeRadianceAndWeight( uint dim, uint x, uint y )
     uint mipLevel = g_const.EnvMapImportanceMapMIPCount - dimLog2 - 1;
     float areaMul = 1u << (mipLevel*2); //pow(4.0,mipLevel);
     float4 value = t_envRadianceAndImportanceMap.Load( int3( x, y, mipLevel ) ).rgba;
-    float weight = areaMul * max( 0, value.a * average(g_const.EnvMapParams.ColorMultiplier) * g_const.DistantVsLocalRelativeImportance );
+    float weight = areaMul * max( 0, value.a * Average(g_const.EnvMapParams.ColorMultiplier) * g_const.DistantVsLocalRelativeImportance );
     return float4( value.rgb * g_const.EnvMapParams.ColorMultiplier, weight );
 };
 //
@@ -222,7 +287,7 @@ EnvironmentQuadLight LoadEnvironmentQuadLight( uint lightIndex )
 [numthreads(LLB_NUM_COMPUTE_THREADS, 1, 1)]       // dispatch is (FEIS_TARGET_QUADTREE_NODE_COUNT, 1, 1)
 void EnvLightsBackupPast( uint lightIndex : SV_DispatchThreadID )
 {
-    if( lightIndex >= RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT )
+    if( lightIndex >= RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT )
         return;
 
     const LightingControlData controlInfo = u_controlBuffer[0];
@@ -232,18 +297,18 @@ void EnvLightsBackupPast( uint lightIndex : SV_DispatchThreadID )
         EnvironmentQuadLight light = LoadEnvironmentQuadLight(lightIndex);
         value = EQTNodePack(light.NodeDim, light.NodeX, light.NodeY);
     }
-    u_scratchList[lightIndex] = value;        // history is backed up in RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT
+    u_scratchList[lightIndex] = value;        // history is backed up in RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT
 }
 //
 #define ENV_LIGHTS_BAKE_THREADS 128
-#define SUBDIVISION_MAX_NODES max(RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT, RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT)
+#define SUBDIVISION_MAX_NODES max(RTXPT_NEEAT_ENVMAP_QT_UNBOOSTED_NODE_COUNT, RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT)
 groupshared uint    g_nodes[SUBDIVISION_MAX_NODES];
 groupshared uint    g_nodePackedWeights[SUBDIVISION_MAX_NODES];
 groupshared uint    g_findMaxPacked;
 [numthreads(ENV_LIGHTS_BAKE_THREADS, 1, 1)] // note, Dispatch size is (1, 1, 1)
 void EnvLightsSubdivideBase( uint groupThreadID : SV_GroupThreadId )
 {
-    const uint baseNodeCount = RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION*RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION;
+    const uint baseNodeCount = RTXPT_NEEAT_ENVMAP_QT_BASE_RESOLUTION*RTXPT_NEEAT_ENVMAP_QT_BASE_RESOLUTION;
 
     // Init base nodes
     for( int i = 0; i < (baseNodeCount+ENV_LIGHTS_BAKE_THREADS-1)/ENV_LIGHTS_BAKE_THREADS; i++ )
@@ -252,12 +317,12 @@ void EnvLightsSubdivideBase( uint groupThreadID : SV_GroupThreadId )
 
         if( lightIndex < baseNodeCount )
         {
-            uint nodeDim    = RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION;
-            uint nodeX      = lightIndex / RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION;
-            uint nodeY      = lightIndex % RTXPT_LIGHTING_ENVMAP_QT_BASE_RESOLUTION;
+            uint nodeDim    = RTXPT_NEEAT_ENVMAP_QT_BASE_RESOLUTION;
+            uint nodeX      = lightIndex / RTXPT_NEEAT_ENVMAP_QT_BASE_RESOLUTION;
+            uint nodeY      = lightIndex % RTXPT_NEEAT_ENVMAP_QT_BASE_RESOLUTION;
             
             g_nodes[lightIndex]             = EQTNodePack(nodeDim, nodeX, nodeY);
-            g_nodePackedWeights[lightIndex] = EnvironmentComputeWeightForQTBuild(nodeDim, nodeX, nodeY, lightIndex, RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION_DPT);
+            g_nodePackedWeights[lightIndex] = EnvironmentComputeWeightForQTBuild(nodeDim, nodeX, nodeY, lightIndex, RTXPT_NEEAT_ENVMAP_QT_BOOST_SUBDIVISION_DPT);
         }
     }
     
@@ -267,7 +332,7 @@ void EnvLightsSubdivideBase( uint groupThreadID : SV_GroupThreadId )
     // Quad tree build 
     GroupMemoryBarrierWithGroupSync(); // g_nodes/g_nodeWeights were touched, have to sync
     uint nodeCount = baseNodeCount; // every thread keeps their node count
-    for( int si = 0; si < RTXPT_LIGHTING_ENVMAP_QT_SUBDIVISIONS; si++ ) // we know exactly how many subdivisions we'll make
+    for( int si = 0; si < RTXPT_NEEAT_ENVMAP_QT_SUBDIVISIONS; si++ ) // we know exactly how many subdivisions we'll make
     {
         // uint nodeCount = baseNodeCount + si * 3; // we could also do this - makes no difference
         // find the max value
@@ -287,8 +352,10 @@ void EnvLightsSubdivideBase( uint groupThreadID : SV_GroupThreadId )
         uint packed = g_findMaxPacked;
         int globalMaxIndex = UNPACK_12UI(packed);
 
-        // if (packed == 0)
-        //     DebugPrint("Shouldn't ever happen");
+#if LLB_ENABLE_VALIDATION
+        if (packed == 0)
+            DebugPrint("packed == 0 - shouldn't ever happen!");
+#endif
 
         uint nodeDim; uint nodeX; uint nodeY;
         EQTNodeUnpack( g_nodes[globalMaxIndex], nodeDim, nodeX, nodeY );
@@ -307,48 +374,48 @@ void EnvLightsSubdivideBase( uint groupThreadID : SV_GroupThreadId )
             uint newNodeIndex = (groupThreadID==0)?(globalMaxIndex):(nodeCount+groupThreadID-1);  // reusing the existing node's storage in the first thread, allocating new for remaining 3
 
             g_nodes[newNodeIndex]         = EQTNodePack( nodeDim, nodeX, nodeY );
-            g_nodePackedWeights[newNodeIndex] = EnvironmentComputeWeightForQTBuild(nodeDim, nodeX, nodeY, newNodeIndex, RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION_DPT);
+            g_nodePackedWeights[newNodeIndex] = EnvironmentComputeWeightForQTBuild(nodeDim, nodeX, nodeY, newNodeIndex, RTXPT_NEEAT_ENVMAP_QT_BOOST_SUBDIVISION_DPT);
         }
 
         GroupMemoryBarrierWithGroupSync(); // since we've just modified g_nodes and g_nodePackedWeights, we must sync up
         nodeCount += 3; // we're always adding 4 new nodes, one in the place of the old one and 3 new ones, so update the count
     }
 
-    if( nodeCount != RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT )
+#if LLB_ENABLE_VALIDATION
+    if( nodeCount != RTXPT_NEEAT_ENVMAP_QT_UNBOOSTED_NODE_COUNT )
         DebugPrint("Node number overflow/underflow");
+#endif
 
-    for( int i = 0; i < (RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT+ENV_LIGHTS_BAKE_THREADS-1)/ENV_LIGHTS_BAKE_THREADS; i++ )
+    for( int i = 0; i < (RTXPT_NEEAT_ENVMAP_QT_UNBOOSTED_NODE_COUNT+ENV_LIGHTS_BAKE_THREADS-1)/ENV_LIGHTS_BAKE_THREADS; i++ )
     {
         uint lightIndex = i * ENV_LIGHTS_BAKE_THREADS + groupThreadID;
-        if (lightIndex < RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT)
-            u_scratchList[RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT+lightIndex*RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT] = g_nodes[lightIndex]; // spread out our "seed" nodes with RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT space between them
+        if (lightIndex < RTXPT_NEEAT_ENVMAP_QT_UNBOOSTED_NODE_COUNT)
+            u_scratchList[RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT+lightIndex*RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT] = g_nodes[lightIndex]; // spread out our "seed" nodes with RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT space between them
     }
 }
 
-[numthreads(ENV_LIGHTS_BAKE_THREADS, 1, 1)] // note, Dispatch size is (RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT, 1, 1)
+[numthreads(ENV_LIGHTS_BAKE_THREADS, 1, 1)] // note, Dispatch size is (RTXPT_NEEAT_ENVMAP_QT_UNBOOSTED_NODE_COUNT, 1, 1)
 void EnvLightsSubdivideBoost( uint groupThreadID : SV_GroupThreadId, uint groupID : SV_GroupID )
 {
     const uint baseNodeCount = 1;
 
-    const uint globalNodeBaseIndex     = groupID * RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT;
+    const uint globalNodeBaseIndex     = groupID * RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT;
 
     // Init base node
-    uint baseNode = u_scratchList[RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT + globalNodeBaseIndex];
+    uint baseNode = u_scratchList[RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT + globalNodeBaseIndex];
     uint nodeDim; uint nodeX; uint nodeY;
     EQTNodeUnpack( baseNode, nodeDim, nodeX, nodeY );
 
     g_nodes[0]             = baseNode; //EQTNodePack(nodeDim, nodeX, nodeY);
     g_nodePackedWeights[0] = EnvironmentComputeWeightForQTBuild(nodeDim, nodeX, nodeY, 0, 0);
 
-    // DebugPrint("", groupID, nodeDim, nodeX, nodeY, g_nodePackedWeights[0]);
-    
     if( groupThreadID == 0 )
         g_findMaxPacked = 0;
 
     // Quad tree build 
     GroupMemoryBarrierWithGroupSync(); // g_nodes/g_nodeWeights were touched, have to sync
     uint nodeCount = baseNodeCount; // every thread keeps their node count
-    for( int si = 0; si < RTXPT_LIGHTING_ENVMAP_QT_BOOST_SUBDIVISION; si++ ) // we know exactly how many subdivisions we'll make
+    for( int si = 0; si < RTXPT_NEEAT_ENVMAP_QT_BOOST_SUBDIVISION; si++ ) // we know exactly how many subdivisions we'll make
     {
         // find the max value
         const uint itemsPerThread = (nodeCount + ENV_LIGHTS_BAKE_THREADS - 1) / ENV_LIGHTS_BAKE_THREADS;
@@ -367,8 +434,10 @@ void EnvLightsSubdivideBoost( uint groupThreadID : SV_GroupThreadId, uint groupI
         uint packed = g_findMaxPacked;
         int globalMaxIndex = UNPACK_12UI(packed);
 
-        // if (packed == 0)
-        //     DebugPrint("Shouldn't ever happen");
+#if LLB_ENABLE_VALIDATION
+        if (packed == 0)
+            DebugPrint("2: packed == 0 - shouldn't ever happen");
+#endif
 
         uint nodeDim; uint nodeX; uint nodeY;
         EQTNodeUnpack( g_nodes[globalMaxIndex], nodeDim, nodeX, nodeY );
@@ -394,15 +463,17 @@ void EnvLightsSubdivideBoost( uint groupThreadID : SV_GroupThreadId, uint groupI
         nodeCount += 3; // we're always adding 4 new nodes, one in the place of the old one and 3 new ones, so update the count
     }
 
-    if( nodeCount != RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT )
+#if LLB_ENABLE_VALIDATION
+    if( nodeCount != RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT )
         DebugPrint("Node number overflow/underflow (boost)");
+#endif
 
-    for( int i = 0; i < (RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT+ENV_LIGHTS_BAKE_THREADS-1)/ENV_LIGHTS_BAKE_THREADS; i++ )
+    for( int i = 0; i < (RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT+ENV_LIGHTS_BAKE_THREADS-1)/ENV_LIGHTS_BAKE_THREADS; i++ )
     {
         uint lightIndex = i * ENV_LIGHTS_BAKE_THREADS + groupThreadID;
-        if (lightIndex < RTXPT_LIGHTING_ENVMAP_QT_BOOST_NODES_MULT)
+        if (lightIndex < RTXPT_NEEAT_ENVMAP_QT_BOOST_NODES_MULT)
         {
-            // u_scratchList[RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT+globalNodeBaseIndex+lightIndex] = g_nodes[lightIndex];
+            // u_scratchList[RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT+globalNodeBaseIndex+lightIndex] = g_nodes[lightIndex];
 
             // bake in-place!
             uint outLightIndex = globalNodeBaseIndex+lightIndex;
@@ -412,7 +483,6 @@ void EnvLightsSubdivideBoost( uint groupThreadID : SV_GroupThreadId, uint groupI
             float4 radianceAndWeight = EnvironmentComputeRadianceAndWeight(envLight.NodeDim, envLight.NodeX, envLight.NodeY);
             envLight.Radiance = radianceAndWeight.rgb;
             envLight.Weight = radianceAndWeight.a;
-            //DebugPrint("", envLight.Weight);
 
             uint uniqueID = Hash32CombineSimple( Hash32CombineSimple(Hash32(envLight.NodeX), Hash32(envLight.NodeY)), Hash32(envLight.NodeDim) );
 
@@ -422,7 +492,6 @@ void EnvLightsSubdivideBoost( uint groupThreadID : SV_GroupThreadId, uint groupI
             float3 localDir = oct_to_ndir_equal_area_unorm(subTexelPos);
             float3 worldDir = EnvironmentQuadLight::ToWorld(localDir);
             lightFull.Base.Center = worldDir * DISTANT_LIGHT_DISTANCE;
-            //DebugPrint("", lightFull.Base.Center );
         #endif
 
             u_lightsBuffer[outLightIndex] = lightFull.Base;
@@ -450,7 +519,7 @@ void EnvLightsSubdivideBoost( uint groupThreadID : SV_GroupThreadId, uint groupI
 [numthreads(FILL_THREAD_COUNT, FILL_THREAD_COUNT, 1)]
 void EnvLightsFillLookupMap( uint lightIndex : SV_GroupID, uint2 threadID : SV_GroupThreadID )
 {
-    if( lightIndex >= RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT )
+    if( lightIndex >= RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT )
         return;
 
     EnvironmentQuadLight light = LoadEnvironmentQuadLight(lightIndex);
@@ -495,7 +564,7 @@ bool EnvLightNodeIsInside( uint nodeDim_A, uint nodeX_A, uint nodeY_A, uint node
 [numthreads(LLB_NUM_COMPUTE_THREADS, 1, 1)]       // dispatch is (FEIS_TARGET_QUADTREE_NODE_COUNT, 1, 1)
 void EnvLightsMapPastToCurrent( uint historicIndex : SV_DispatchThreadID )
 {
-    if( historicIndex >= RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT )
+    if( historicIndex >= RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT )
         return;
 
     const LightingControlData controlInfo = u_controlBuffer[0];
@@ -541,7 +610,6 @@ void BakeEmissiveTriangles( uint dispatchThreadID : SV_DispatchThreadID, uint gr
     PTMaterialData material = t_PTMaterialData[materialIndex];
 
     //DebugPrint( "tID {0}; fgii {1}, fgi {2}, ng {3}", dispatchThreadID, instance.firstGeometryInstanceIndex, instance.firstGeometryIndex, instance.numGeometries  );
-
     // if( task.EmissiveLightMappingOffset != (instance.firstGeometryInstanceIndex + task.GeometryIndex) )
     //     DebugPrint( "ELMO {0}, FGII {1}, GI{2}", task.EmissiveLightMappingOffset, instance.firstGeometryIndex, task.GeometryIndex );
 
@@ -676,10 +744,6 @@ void BakeEmissiveTriangles( uint dispatchThreadID : SV_DispatchThreadID, uint gr
         //     // DebugTriangle( triLight.base, triLight.base+float3(0.0, 0.5, 0.0), triLight.base+float3(0.5, 0.0, 0.5), float4( 0, 1, 0, 1 ) );
         //     // DebugTriangle( triLight.base, triLight.base+float3(0.0, 0.0, 0.5), triLight.base+float3(0.5, 0.5, 0.0), float4( 0, 0, 1, 1 ) );
         // }
-        // 
-        // //DebugTriangle( triLight.base, triLight.base+triLight.edge1, triLight.base+triLight.edge2, float4( triLight.radiance, 1 ) );
-
-        // float emissiveFlux = PolymorphicLight::GetPower(triLight.Store());
 
         uint uniqueID = Hash32CombineSimple( Hash32CombineSimple(Hash32(subIndex), Hash32(task.InstanceIndex)), Hash32(task.GeometryIndex) );
 
@@ -764,6 +828,33 @@ float3 ConvertMotionVectorToPixelSpace( int2 pixelPosition, float3 motionVector)
     return motionVector;
 }
 
+[numthreads(1, 1, 1)]
+void UpdateControlBufferMultipass( )
+{
+    // we want to copy over these without messing with sampling stuff
+    u_controlBuffer[0].LocalSamplingTileJitter              = g_const.LocalSamplingTileJitter           ;
+    u_controlBuffer[0].LocalSamplingTileJitterPrev          = g_const.LocalSamplingTileJitterPrev       ;
+    u_controlBuffer[0].LocalFeedbackUseRatio                = g_const.LocalFeedbackUseRatio             ;
+    u_controlBuffer[0].LastFrameTemporalFeedbackAvailable   = g_const.LastFrameTemporalFeedbackAvailable;
+    u_controlBuffer[0].LastFrameLocalSamplesAvailable       = g_const.LastFrameLocalSamplesAvailable    ;
+}
+
+#define GENERATE_MERGE_RANDOMS(_SG) \
+float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH][RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH]; \
+{ for (int _i = 0; _i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; _i++) for (int _j = 0; _j < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; _j++) randomValues[_i][_j] = sampleNext1D(_SG); }
+
+[numthreads(8, 8, 1)]
+void ClearAntiLagFeedback( uint2 dispatchThreadID : SV_DispatchThreadID )
+{
+    uint2 pixelPos = dispatchThreadID;
+    if( pixelPos.x >= g_const.FeedbackResolution.x || pixelPos.y >= g_const.FeedbackResolution.y )
+        return;
+
+    LightFeedbackReservoir reservoir = LightFeedbackReservoir::make(pixelPos.xy, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch);
+    reservoir.Clear();
+    reservoir.CommitToStorage();
+}
+
 [numthreads(8, 8, 1)]
 void ClearFeedbackHistory( uint2 dispatchThreadID : SV_DispatchThreadID )
 {
@@ -771,46 +862,52 @@ void ClearFeedbackHistory( uint2 dispatchThreadID : SV_DispatchThreadID )
 
     uint2 pixelPos = dispatchThreadID;
 
-    bool indirect = false; // prevent direct and indirect parts, which are stacked one on the other, bleeding into each other
-    if( pixelPos.y >= g_const.FeedbackResolution.y )
-    {
-        indirect = true;
-        pixelPos.y -= g_const.FeedbackResolution.y;
-    }
-
     if( pixelPos.x >= g_const.FeedbackResolution.x || pixelPos.y >= g_const.FeedbackResolution.y )
         return;
 
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-    if( controlInfo.LastFrameTemporalFeedbackAvailable )
+    u_historyDepth[pixelPos] = t_depthBuffer[pixelPos];
+
+    LightFeedbackReservoir reservoir = LightFeedbackReservoir::make(pixelPos.xy, u_feedbackTotalWeight, u_feedbackCandidates);
+
+#if 1 // retain some of past reservoir info
+    if( controlInfo.LastFrameTemporalFeedbackAvailable || g_const.AntiLagEnabled)
     {
-        float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace( pixelPos, t_motionVectors[pixelPos] );
-        int2 prevPixelPos = int2( float2(pixelPos) + screenSpaceMotion.xy + 0.5.xx /* + sampleNext2D(sampleGenerator)*/ );
+        const float dropOffFactor = g_const.ReservoirHistoryDropoff;
+        reservoir.CloneFrom( LightFeedbackReservoir::make(pixelPos, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch), dropOffFactor);
+#if 1 // allow for neighbours to contribute as well
+        static const uint c_directNeighbourCount = 4;
+        static const int2 c_directNeighbourOffsets[c_directNeighbourCount] = { int2(-1, 0), int2(+1, 0), int2( 0,-1), int2( 0,+1), //int2(-1,-1), int2(+1,-1), int2(-1,+1), int2(+1,+1) 
+                                                                            };
 
-        // if wrong/missing motion vectors, use current as backup
-        if( !(all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy)) )
-            prevPixelPos = pixelPos;
-
-        LightFeedbackReservoir pastReservoir = LightFeedbackReservoir::Unpack8Byte(u_feedbackReservoirBufferScratch[ (uint2)prevPixelPos.xy + uint2(0, indirect?g_const.FeedbackResolution.y:0) ]);
-        pastReservoir.Scale(0.05);
-        if( !(f16tof32(f32tof16(pastReservoir.CandidateWeight)) > 0 && pastReservoir.TotalWeight > pastReservoir.CandidateWeight ) )
-            pastReservoir = LightFeedbackReservoir::make();
-        u_feedbackReservoirBuffer[(uint2)pixelPos.xy + uint2(0, indirect?g_const.FeedbackResolution.y:0)] = pastReservoir.Pack8Byte();
+        SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( dispatchThreadID.xy, 0, g_const.UpdateCounter ), (SampleGeneratorEffectSeed)1, false, 1 );
+        for( int i = 0; i < c_directNeighbourCount; i++ )
+        {
+            int2 srcCoord = clamp( int2(pixelPos)+c_directNeighbourOffsets[i], int2(0,0), int2(g_const.FeedbackResolution) - 1.xx );
+            LightFeedbackReservoir reservoirSrc = LightFeedbackReservoir::make(srcCoord, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch);
+            
+            if (!reservoirSrc.IsEmpty())
+            {
+                GENERATE_MERGE_RANDOMS(sampleGenerator);
+                reservoir.Merge( randomValues, reservoirSrc, dropOffFactor * dropOffFactor );
+            }
+        }
+#endif
+        if (reservoir.GetTotalWeight() < 1e-12)
+            reservoir.Clear();
     }
     else
 #endif
     {
-        LightFeedbackReservoir emptyReservoir = LightFeedbackReservoir::make();
-        u_feedbackReservoirBuffer[dispatchThreadID.xy] = emptyReservoir.Pack8Byte();
+        reservoir.Clear();
     }
+    reservoir.CommitToStorage();
 
-
-    if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackReadyForNew && g_const.DebugDrawDirect == !indirect )
+    if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackAfterClear )
     {
-        LightFeedbackReservoir reservoir = LightFeedbackReservoir::Unpack8Byte( u_feedbackReservoirBuffer[ (uint2)pixelPos.xy + uint2(0, indirect?g_const.FeedbackResolution.y:0) ] );
-        
-        uint dbgLightIndex = reservoir.CandidateIndex;
+        LightFeedbackReservoir reservoir = LightFeedbackReservoir::make(pixelPos.xy, u_feedbackTotalWeight, u_feedbackCandidates);
 
+        uint dbgLightIndex; bool isIndirect;
+        reservoir.GetCandidate(0, dbgLightIndex, isIndirect);
         DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(dbgLightIndex)), 0.95) );
     }
 }
@@ -838,12 +935,15 @@ void ComputeWeights( uint dispatchThreadID : SV_DispatchThreadID, uint groupThre
     float blockWeightSum = 0.0;
     for( int lightIndex = from; lightIndex < to; lightIndex ++ )
     {
+#if LLB_ENABLE_VALIDATION
         if( lightIndex >= g_const.TotalLightCount )
             DebugPrint( "Danger, overflow", groupThreadID, from, to );
+#endif
 
         PolymorphicLightInfoFull packedLightInfo = LoadLight( lightIndex );
 
         float weight = ComputeWeight(controlInfo, packedLightInfo);
+        weight = ImportanceBooster( packedLightInfo, lightIndex, weight );
         u_lightWeights[ lightIndex ] = weight;
         blockWeightSum += weight;
     }
@@ -867,7 +967,7 @@ void ComputeWeights( uint dispatchThreadID : SV_DispatchThreadID, uint groupThre
 [numthreads(LLB_NUM_COMPUTE_THREADS, 1, 1)]
 void ComputeProxyCounts( uint dispatchThreadID : SV_DispatchThreadID, uint groupThreadID : SV_GroupThreadId )
 {
-#if 0
+#if LLB_ENABLE_VALIDATION
     if( dispatchThreadID == 0 )
     {
         float testSum = 0;
@@ -875,7 +975,7 @@ void ComputeProxyCounts( uint dispatchThreadID : SV_DispatchThreadID, uint group
         for( int lightIndex = 0; lightIndex < g_const.TotalLightCount; lightIndex ++ )
             testSum += u_lightWeights[ lightIndex ];
 
-        if( !RelativelyEqual( controlInfo.WeightsSum(), testSum, 5e-5f ) )
+        if( !RelativelyEqual( controlInfo.WeightsSum(), testSum, 1e-4f ) )
             DebugPrint( "Compute weight sum {0}, test: {1}", controlInfo.WeightsSum(), testSum );
     }
 #endif
@@ -891,14 +991,12 @@ void ComputeProxyCounts( uint dispatchThreadID : SV_DispatchThreadID, uint group
     const float weightSum = asfloat(controlInfo.WeightsSumUINT);
 
     // this is what comes from past frame's feedback on light usage
-    uint validFeedbackCount = g_const.TotalFeedbackCount - u_perLightProxyCounters[g_const.TotalLightCount];
-    //if (validFeedbackCount != controlInfo.ValidFeedbackCount)
-    //    DebugPrint("Error in valid feedback count", validFeedbackCount, controlInfo.ValidFeedbackCount);
+    uint validFeedbackCount = g_const.TotalMaxFeedbackCount - u_perLightProxyCounters[g_const.TotalLightCount]; // u_perLightProxyCounters[g_const.TotalLightCount] contains number of empty (invalid) feedback indices
+#if LLB_ENABLE_VALIDATION
+    if (validFeedbackCount != controlInfo.ValidFeedbackCount)
+        DebugPrint("Error in valid feedback count", validFeedbackCount, controlInfo.ValidFeedbackCount);
+#endif
     const float feedbackWeight = (float)u_perLightProxyCounters[lightIndex] * weightSum / (float)max( 1.0, validFeedbackCount );
-
-    // if( dispatchThreadID==0 )
-    //     DebugPrint("Valid count {0} ", validFeedbackCount );
-
 
     // combine computed light weights with historical usage-based feedback weight
     const float lightWeight = lerp( u_lightWeights[ lightIndex ], feedbackWeight, g_const.GlobalFeedbackUseRatio );
@@ -962,9 +1060,6 @@ void ComputeProxyBaselineOffsets( uint groupThreadID : SV_GroupThreadId )
     const LightingControlData controlInfo = u_controlBuffer[0];
     const uint lightCount = g_const.TotalLightCount;
 
-    // if( groupThreadID == 0 )
-    //     DebugPrint( "", lightCount );
-
     if (groupThreadID == 0)
         u_lightSamplingProxies[0] = 0;
 
@@ -990,8 +1085,10 @@ void ComputeProxyBaselineOffsets( uint groupThreadID : SV_GroupThreadId )
         counter += totalSum;
     }
 
+#if LLB_ENABLE_VALIDATION
     if( groupThreadID == 0 && counter != u_controlBuffer[0].SamplingProxyCount )
         DebugPrint( "Proxies count error {0} != {1}", counter, u_controlBuffer[0].SamplingProxyCount );
+#endif
 }
 #endif
 
@@ -1012,9 +1109,6 @@ void CreateProxyJobs( uint dispatchThreadID : SV_DispatchThreadID, uint groupThr
 
     uint lightSamplingProxies = u_perLightProxyCounters[lightIndex];
 
-    // if( lightIndex < 15000 && lightSamplingProxies != (nextBaseIndex - storageBaseIndex) )
-    //     DebugPrint( "M {0}, {1}, c{2}, n{3}", lightIndex, lightSamplingProxies, storageBaseIndex, nextBaseIndex );
-
     uint tasksRequired = (lightSamplingProxies + LLB_MAX_PROXIES_PER_TASK - 1) / LLB_MAX_PROXIES_PER_TASK;
     uint taskBaseIndex;
     InterlockedAdd( u_controlBuffer[0].ProxyBuildTaskCount, tasksRequired, taskBaseIndex );
@@ -1032,7 +1126,7 @@ void CreateProxyJobs( uint dispatchThreadID : SV_DispatchThreadID, uint groupThr
 
         localTotal += task.FillProxyIndexTo - task.FillProxyIndexFrom;
     }
-#if 1
+#if LLB_ENABLE_VALIDATION
     if( localTotal != lightSamplingProxies )
         DebugPrint( "Danger, danger danger {0} != {1}", localTotal, lightSamplingProxies );
 #endif
@@ -1054,13 +1148,16 @@ void ExecuteProxyJobs( uint dispatchThreadID : SV_DispatchThreadID)
     {
         u_lightSamplingProxies[proxyIndex] = task.LightIndex;
 
+#if LLB_ENABLE_VALIDATION
         if( task.ProxyIndexBase > proxyIndex )
             DebugPrint( "Danger, strange mismatch - barrier missing?" );
+#endif
     }
 }
 
-uint RemapPastToCurrent(const LightingControlData controlInfo, uint historicLightIndex)
+uint RemapPastToCurrent(uint historicLightIndex)
 {
+    const LightingControlData controlInfo = u_controlBuffer[0];
     uint lightIndex = RTXPT_INVALID_LIGHT_INDEX;
     if (historicLightIndex != RTXPT_INVALID_LIGHT_INDEX)
     {
@@ -1072,7 +1169,9 @@ uint RemapPastToCurrent(const LightingControlData controlInfo, uint historicLigh
             if ( lightIndex >= g_const.TotalLightCount )
             {
                 lightIndex = RTXPT_INVALID_LIGHT_INDEX;
+#if LLB_ENABLE_VALIDATION
                 DebugPrint( "3 - Danger, overflow {0}", lightIndex );
+#endif
             }
         }
         // else
@@ -1084,143 +1183,138 @@ uint RemapPastToCurrent(const LightingControlData controlInfo, uint historicLigh
     return lightIndex;
 }
 
-[numthreads(16, 16, 1)]
-void UpdateFeedbackIndices( uint2 dispatchThreadID : SV_DispatchThreadID )
+// * update historic indices to current frame indices (and set to RTXPT_INVALID_LIGHT_INDEX invalid ones)
+// * update global per-light counters
+// * strip indirect samples from reservoir and process
+[numthreads(LLB_NUM_COMPUTE_THREADS_2D, LLB_NUM_COMPUTE_THREADS_2D, 1)] 
+void ProcessFeedbackHistoryP0( uint2 dispatchThreadID : SV_DispatchThreadID )
 {
-    const LightingControlData controlInfo = u_controlBuffer[0];
+    uint2 pixelPos = dispatchThreadID.xy;
 
-    uint2 pixelCoord = dispatchThreadID.xy;
-
-    // bool indirect = pixelCoord.y >= g_const.FeedbackResolution.y;
-
-    LightFeedbackReservoir reservoir = LightFeedbackReservoir::Unpack8Byte( u_feedbackReservoirBuffer[ (uint2)pixelCoord.xy ] );
-    
-    reservoir.CandidateIndex = RemapPastToCurrent(controlInfo, reservoir.CandidateIndex);
-   
-    u_feedbackReservoirBuffer[ (uint2)pixelCoord.xy ] = reservoir.Pack8Byte();
-}
-
-LightFeedbackReservoir SampleFeedback(int2 coord, bool indirect)
-{
-    if( !(all(coord >= 0.xx) && all(coord < g_const.FeedbackResolution.xy)) )
-        return LightFeedbackReservoir::make();
-
-    LightFeedbackReservoir reservoir = LightFeedbackReservoir::Unpack8Byte( u_feedbackReservoirBuffer[ (uint2)coord.xy + uint2(0, indirect?g_const.FeedbackResolution.y:0) ] );
-
-    uint lightIndex = reservoir.CandidateIndex;
-
-    // Empty is completely valid
-    if (lightIndex == RTXPT_INVALID_LIGHT_INDEX)
-        return LightFeedbackReservoir::make();
-
-    reservoir.CandidateIndex = lightIndex;
-    return reservoir;
-}
-
-bool SampleFeedback(int2 coord, bool indirect, inout uint lightIndex)
-{
-    LightFeedbackReservoir reservoir = SampleFeedback(coord, indirect);
-    lightIndex = reservoir.CandidateIndex;
-    return lightIndex != RTXPT_INVALID_LIGHT_INDEX;
-}
-
-static const uint c_directNeighbourCount = 5;
-static const int2 c_directNeighbourOffsets[c_directNeighbourCount] = {     int2( 0, 0),
-                                int2(-1, 0), int2(+1, 0), int2( 0,-1), int2( 0,+1),
-                                //int2(-1,-1), int2(+1,-1), int2(-1,+1), int2(+1,+1) 
-                                };
-
-// Flood fill empty neighbours and apply feedback into global sampler
-[numthreads(16, 16, 1)] void ProcessFeedbackHistoryP0( uint2 dispatchThreadID : SV_DispatchThreadID, uint2 groupID : SV_GroupID )
-{
-    uint2 pixelCoord = dispatchThreadID.xy;
-
-    bool indirect = false; // prevent direct and indirect parts, which are stacked one on the other, bleeding into each other
-    if( pixelCoord.y >= g_const.FeedbackResolution.y )
+    uint lightIndicesAll[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH]; // direct AND indirect
+    uint lightIndicesIndirect[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH]; // indirect ONLY
+    for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
     {
-        indirect = true;
-        pixelCoord.y -= g_const.FeedbackResolution.y;
+        lightIndicesAll[i] = RTXPT_INVALID_LIGHT_INDEX;
+        lightIndicesIndirect[i] = RTXPT_INVALID_LIGHT_INDEX;
     }
 
-    uint lightIndex = RTXPT_INVALID_LIGHT_INDEX;
-
-    if( pixelCoord.x < g_const.FeedbackResolution.x && pixelCoord.y < g_const.FeedbackResolution.y )
+    if( pixelPos.x < g_const.FeedbackResolution.x && pixelPos.y < g_const.FeedbackResolution.y )
     {
-        if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackRaw || g_const.DebugDrawType == (int)LightingDebugViewType::MissingFeedback )
+        LightFeedbackReservoir historicReservoir = LightFeedbackReservoir::make(pixelPos, u_feedbackTotalWeight, u_feedbackCandidates);
+
+        // TODO: change all these to UniformSampleSequenceGenerator
+        SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( pixelPos, 0, g_const.UpdateCounter ), (SampleGeneratorEffectSeed)2, false, 1 );
+
+        // map history (last frame's) indices to corresponding current (if any)
+        // strip indirect and place them in lightIndicesIndirect for later processing
+        uint dbgLightIndexDirect = RTXPT_INVALID_LIGHT_INDEX;
+        uint dbgLightIndexIndirect = RTXPT_INVALID_LIGHT_INDEX;
+        if (!historicReservoir.IsEmpty())
         {
-            uint dbgLightIndex = 0;
-            bool hasSample = SampleFeedback( int2(pixelCoord), indirect, dbgLightIndex ) && dbgLightIndex != RTXPT_INVALID_LIGHT_INDEX;
-
-            if( g_const.DebugDrawType == (int)LightingDebugViewType::MissingFeedback && g_const.DebugDrawDirect == !indirect )
-                DebugPixel( pixelCoord.xy, float4( 1 - hasSample, hasSample*0.3, 0, 0.95) );
-            if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackRaw && g_const.DebugDrawDirect == !indirect )
-                DebugPixel( pixelCoord.xy, float4( ColorFromHash(Hash32(dbgLightIndex)), 0.95) );
-        }
-
-        SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( pixelCoord, 0, g_const.UpdateCounter ) );
-
-        LightFeedbackReservoir reservoir = SampleFeedback( int2(pixelCoord)+c_directNeighbourOffsets[0], indirect );
-
-        if ( reservoir.CandidateIndex == RTXPT_INVALID_LIGHT_INDEX )    // search neighbourhood but only if center is invalid
-        {
-            for( int i = 1; i < c_directNeighbourCount; i++ )
+            bool stillValid = false;
+            for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
             {
-                LightFeedbackReservoir other = SampleFeedback( int2(pixelCoord)+c_directNeighbourOffsets[i], indirect );
-                if( other.CandidateIndex == RTXPT_INVALID_LIGHT_INDEX )
-                    continue;
-                other.Scale(0.05); // TODO; move this outside - make the central one 20x larger :)
-                reservoir.Merge( sampleNext1D( sampleGenerator ), other );
-                //reservoir.Add( sampleNext1D( sampleGenerator ), other.CandidateIndex, other.CandidateWeight * ((i==0)?20:1) );
+                uint candidateIndex; bool candidateIsIndirect;
+                historicReservoir.GetCandidate(i, candidateIndex, candidateIsIndirect);
+                candidateIndex = RemapPastToCurrent(candidateIndex);
+                lightIndicesAll[i] = candidateIndex;
+                
+                if (candidateIndex != RTXPT_INVALID_LIGHT_INDEX) // just for debugging
+                {
+                    if (candidateIsIndirect) 
+                        dbgLightIndexIndirect = candidateIndex;
+                    else
+                        dbgLightIndexDirect = candidateIndex;
+                }
+
+                if (candidateIsIndirect) // strip indirect from reservoir and place in separate lightIndicesIndirect list
+                {
+                    lightIndicesIndirect[i] = candidateIndex;
+                    candidateIndex = RTXPT_INVALID_LIGHT_INDEX;
+                }
+
+                // save only 
+                historicReservoir.SetCandidate(i, candidateIndex, candidateIsIndirect);
+                
+                if (candidateIndex != RTXPT_INVALID_LIGHT_INDEX)
+                    stillValid = true;
             }
+            if (!stillValid)
+                historicReservoir.Clear();
         }
-        lightIndex = reservoir.CandidateIndex;
 
-        if (lightIndex == RTXPT_INVALID_LIGHT_INDEX)
-            reservoir = LightFeedbackReservoir::make();
+        historicReservoir.CommitToStorage();
 
-    #if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-        u_feedbackReservoirBufferScratch[pixelCoord.xy + uint2(0, indirect?g_const.FeedbackResolution.y:0)] = reservoir.Pack8Byte();
-    #endif
+        bool hasDirect = dbgLightIndexDirect != RTXPT_INVALID_LIGHT_INDEX;
+        bool hasIndirect = dbgLightIndexIndirect != RTXPT_INVALID_LIGHT_INDEX;
 
-        // write processed index - this is now current frame's index; only do this for direct lighting
-    #if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER == 0
-        if( !indirect )
-    #endif
-            u_processedFeedbackBuffer[pixelCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)] = lightIndex;
+        float alpha = 1.0;
+        if( g_const.DebugDrawType == (int)LightingDebugViewType::MissingFeedbackDirect )
+            DebugPixel( pixelPos.xy, float4( 1 - hasDirect, hasDirect*0.3, 0, alpha) );
+        if( g_const.DebugDrawType == (int)LightingDebugViewType::MissingFeedbackIndirect )
+            DebugPixel( pixelPos.xy, float4( 1 - hasIndirect, hasIndirect*0.3, 0, alpha) );
+        if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackRawDirect )
+        {
+            #if 0
+            uint a = historicReservoir.GetCandidateRaw(0);
+            uint b = historicReservoir.GetCandidateRaw(1);
+            if (a==RTXPT_INVALID_LIGHT_INDEX)
+                DebugPixel( pixelPos.xy, float4( 1.0, 0.5, 0.0, 1.0 ) );
+            else if (b==RTXPT_INVALID_LIGHT_INDEX)
+                DebugPixel( pixelPos.xy, float4( 0.5, 1.0, 0.0, 1.0 ) );
+            else if (a==b)
+                DebugPixel( pixelPos.xy, float4( 0.2, 0.0, 1.0, 1.0 ) );
+            else
+                DebugPixel( pixelPos.xy, float4( 0.0, 1.0, 0.0, 1.0 ) );
+            #else
+            DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(dbgLightIndexDirect)), alpha) );
+            #endif
+        }
+        if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackRawIndirect )
+            DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(dbgLightIndexIndirect)), alpha) );
     }
 
-    // // for debugging
-    // if (lightIndex != RTXPT_INVALID_LIGHT_INDEX)
-    //     InterlockedAdd( u_controlBuffer[0].ValidFeedbackCount, 1 );
+    // do something with lightIndicesIndirect here
 
-#if 0 // simple verison with no wave intrinsics - for reference & debugging
-    InterlockedAdd( u_perLightProxyCounters[min(lightIndex, g_const.TotalLightCount)], 1 ); // when lightIndex == RTXPT_INVALID_LIGHT_INDEX, we store "non-valid feedback" in the special last place
-#else // optimized wave intrinsics variants
-    // new SM 6.5 version!
-    uint4 matchingBitmask = WaveMatch(lightIndex);
-    uint4 matchingCount4 = countbits(matchingBitmask);
-    uint matchingCount = matchingCount4.x+matchingCount4.y+matchingCount4.z+matchingCount4.w;
-    #if 0
-    int4 highLanes = (int4)(firstbithigh(matchingBitmask) | uint4(0, 0x20, 0x40, 0x60));
-    // The signed max should be the highest lane index in the group.
-    uint highLane = (uint)max(max(max(highLanes.x, highLanes.y), highLanes.z), highLanes.w);
-    bool weAreFirst = WaveGetLaneIndex() == highLane;
-    #else // simpler version? seems at least as fast
-    bool weAreFirst = WaveMultiPrefixCountBits(1, matchingBitmask) == 0;
-    #endif
-    if (weAreFirst)
-    {
-        // we use u_perLightProxyCounters[g_const.TotalLightCount] as the place for NonValidFeedbackCount to avoid storing it separately; when lightIndex == RTXPT_INVALID_LIGHT_INDEX, it's stored there
-        InterlockedAdd( u_perLightProxyCounters[min(lightIndex, g_const.TotalLightCount)], matchingCount );
-    }
+#if RTXPT_LIGHTING_COUNT_ONLY_ONE_GLOBAL_FEEDBACK
+    for (int i = 0; i < 1; i++ )
+#else
+    for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++ )
 #endif
-}
+    {
+        uint lightIndex = lightIndicesAll[i];
 
-int2 MirrorCoord( const int2 inCoord, const int2 maxResolution )
-{
-    int2 ret = select(inCoord>=0, inCoord, -inCoord);
-    ret = select(ret<maxResolution, ret, 2*maxResolution-2-ret);
-    return clamp( ret, 0.xx, maxResolution ); // no handling of more than 1 screen away
+    #if LLB_ENABLE_VALIDATION
+        if (lightIndex != RTXPT_INVALID_LIGHT_INDEX)
+            InterlockedAdd( u_controlBuffer[0].ValidFeedbackCount, 1 );
+    #endif
+
+    #if TARGET_VULKAN // simple verison with no wave intrinsics - for reference & debugging
+        InterlockedAdd( u_perLightProxyCounters[min(lightIndex, g_const.TotalLightCount)], 1 ); // when lightIndex == RTXPT_INVALID_LIGHT_INDEX, we store "non-valid feedback" in the special last place
+    #else // TARGET_D3D12, optimized wave intrinsics variants for dx12 SM 6.5
+        // new SM 6.5 version!
+        uint4 matchingBitmask = WaveMatch(lightIndex);
+        uint4 matchingCount4 = countbits(matchingBitmask);
+        uint matchingCount = matchingCount4.x+matchingCount4.y+matchingCount4.z+matchingCount4.w;
+        #if 0
+        int4 highLanes = (int4)(firstbithigh(matchingBitmask) | uint4(0, 0x20, 0x40, 0x60));
+        // The signed max should be the highest lane index in the group.
+        uint highLane = (uint)max(max(max(highLanes.x, highLanes.y), highLanes.z), highLanes.w);
+        bool weAreFirst = WaveGetLaneIndex() == highLane;
+        #else // simpler version? seems at least as fast
+        bool weAreFirst = WaveMultiPrefixCountBits(1, matchingBitmask) == 0;
+        #endif
+        if (weAreFirst)
+        {
+            // we use u_perLightProxyCounters[g_const.TotalLightCount] as the place for NonValidFeedbackCount to avoid storing it separately; when lightIndex == RTXPT_INVALID_LIGHT_INDEX, it's stored there
+            InterlockedAdd( u_perLightProxyCounters[min(lightIndex, g_const.TotalLightCount)], matchingCount );
+        }
+    #endif
+
+        // not needed with wave intrinsics
+        // GroupMemoryBarrierWithGroupSync();
+    }
 }
 
 // these are used <only> for filling in the gaps
@@ -1235,126 +1329,237 @@ uint SampleLightGlobal(inout SampleGenerator sampleGenerator)
     return u_lightSamplingProxies[indexInIndex];
 }
 
-uint SampleLightLocalHistoric(uint2 tilePos, bool indirect, inout SampleGenerator sampleGenerator)
+int2 MirrorCoord( const int2 inCoord, const int2 maxResolution )
 {
-    const LightingControlData controlInfo = u_controlBuffer[0];
-
-    uint indexInIndex = sampleGenerator.Next() % RTXPT_LIGHTING_NARROW_PROXY_COUNT;
-
-    return RemapPastToCurrent(controlInfo, UnpackMiniListLight(u_narrowSamplingBuffer[ uint3(tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), indexInIndex) ]));
+    int2 ret = select(inCoord>=0, inCoord, -inCoord);
+    ret = select(ret<maxResolution, ret, 2*maxResolution-2-ret);
+    return clamp( ret, 0.xx, maxResolution-1.xx ); // no handling of more than 1 screen away
 }
 
-// This is where reprojection happens, as well as insertion of historical sampling
-[numthreads(8, 8, 1)] void ProcessFeedbackHistoryP1( uint2 dispatchThreadID : SV_DispatchThreadID )
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+uint3 LSB_Address( uint2 tilePos, uint index )  { return uint3( tilePos, index ); }
+#else
+uint  LSB_Address( uint2 tilePos, uint index )  { return LLSB_ComputeBaseAddress( tilePos, g_const.LocalSamplingResolution ) + index; }
+#endif
+
+
+uint SampleLightLocalHistoric(uint2 pixelPos, inout SampleGenerator sampleGenerator)
 {
     const LightingControlData controlInfo = u_controlBuffer[0];
 
-    bool indirect = false; // prevent direct and indirect parts, which are stacked one on the other, bleeding into each other
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-    if( dispatchThreadID.y >= g_const.FeedbackResolution.y )
+    if (!controlInfo.LastFrameLocalSamplesAvailable)
+        return RTXPT_INVALID_LIGHT_INDEX;
+
+    uint2 tilePos = (pixelPos + controlInfo.LocalSamplingTileJitterPrev) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
+
+    uint indexInIndex = sampleGenerator.Next() % RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
+
+    return RemapPastToCurrent(UnpackMiniListLight(u_localSamplingBuffer[ LSB_Address(tilePos.xy, indexInIndex) ]));
+}
+
+// returns false if disoccluded
+bool Reproject( int2 pixelPos, out int2 historicPixelPos )
+{
+    float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace( pixelPos, t_motionVectors[pixelPos] );
+
+    if( g_const.EnableMotionReprojection )
     {
-        indirect = true;
-        dispatchThreadID.y -= g_const.FeedbackResolution.y;
+        historicPixelPos = int2( float2(pixelPos) + screenSpaceMotion.xy + 0.5.xx /*+ (sampleNext2D(sampleGenerator)-0.5.xx) * 0.5*/ );
+        bool disocclusion = false;
+        if (!(all(historicPixelPos >= 0.xx) && all(historicPixelPos < g_const.FeedbackResolution.xy)) )
+            disocclusion = true;
+        else
+        {
+            float historicDepth = u_historyDepth[historicPixelPos];
+            float currentDepth = t_depthBuffer[pixelPos];
+            disocclusion |= max( historicDepth / currentDepth, currentDepth / historicDepth ) > g_const.DepthDisocclusionThreshold;
+        }
+        if (disocclusion)
+            historicPixelPos = pixelPos;
+        return !disocclusion;
     }
-#endif
+    else
+        historicPixelPos = pixelPos;
+    return true;
+}
+
+// * low res pre-processing that fills in "blended" buffers
+[numthreads(LLB_NUM_COMPUTE_THREADS_2D, LLB_NUM_COMPUTE_THREADS_2D, 1)] 
+void ProcessFeedbackHistoryP1a( uint2 dispatchThreadID : SV_DispatchThreadID )
+{
+    const LightingControlData controlInfo = u_controlBuffer[0];
+
+    int2 pixelPosLR = dispatchThreadID;
+
+    if( dispatchThreadID.x >= g_const.FeedbackResolution.x || dispatchThreadID.y >= g_const.FeedbackResolution.y )
+        return;
+
+    LightFeedbackReservoir reservoirBlended = LightFeedbackReservoir::make(pixelPosLR, u_feedbackTotalWeightBlended, u_feedbackCandidatesBlended);
+    reservoirBlended.Clear();
+
+    SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( pixelPosLR.xy, 0, g_const.UpdateCounter ), (SampleGeneratorEffectSeed)3, false, 1 );
+
+    int expandMargin = 1;
+    for( int x = -expandMargin; x < RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE+expandMargin; x++ )
+        for( int y = -expandMargin; y < RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE+expandMargin; y++ )
+        {
+            int2 pixelPos = pixelPosLR * RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE + int2(x, y);
+            pixelPos = clamp( int2(pixelPos), int2(0,0), int2(g_const.FeedbackResolution) - 1.xx );
+
+            float baseWeight = 1.0;
+            if (x<0 || y<0 || x>=RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE || y >= RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE)
+                baseWeight = g_const.ReservoirHistoryDropoff;
+            
+            int2 prevPixelPos;
+            if (Reproject( pixelPos, prevPixelPos ) && g_const.LastFrameTemporalFeedbackAvailable)
+            {
+                LightFeedbackReservoir reservoirSrc = LightFeedbackReservoir::make(prevPixelPos, u_feedbackTotalWeight, u_feedbackCandidates);
+
+                if (!reservoirSrc.IsEmpty())
+                {
+                    GENERATE_MERGE_RANDOMS(sampleGenerator);
+                    reservoirBlended.Merge( randomValues, reservoirSrc, baseWeight );
+                }
+            }
+            if (g_const.AntiLagEnabled)
+            {
+                float antiLagWeight = 0.02; // can be small because it's going to be only data available if reprojection failed
+                LightFeedbackReservoir reservoirSrc = LightFeedbackReservoir::make(pixelPos, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch);
+                if (!reservoirSrc.IsEmpty())
+                {
+                    GENERATE_MERGE_RANDOMS(sampleGenerator);
+                    reservoirBlended.Merge( randomValues, reservoirSrc, antiLagWeight*baseWeight );
+                }
+            }
+        }
+
+    if( g_const.DebugDrawType == (int)LightingDebugViewType::LowResBlendedFeedback )
+    {
+        uint dbgLightIndex; bool isIndirect;
+        for( int x = 0; x < RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE; x++ )
+            for( int y = 0; y < RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE; y++ )
+            {
+                int2 pixelPos = pixelPosLR * RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE + int2(x, y);
+                reservoirBlended.GetCandidate(0, dbgLightIndex, isIndirect);
+
+                #if 0
+                uint a = reservoirBlended.GetCandidateRaw(0);
+                uint b = reservoirBlended.GetCandidateRaw(1);
+                if (a==RTXPT_INVALID_LIGHT_INDEX)
+                    DebugPixel( pixelPos.xy, float4( 1.0, 0.5, 0.0, 1.0 ) );
+                else if (b==RTXPT_INVALID_LIGHT_INDEX)
+                    DebugPixel( pixelPos.xy, float4( 0.5, 1.0, 0.0, 1.0 ) );
+                else if (a==b)
+                    DebugPixel( pixelPos.xy, float4( 0.2, 0.0, 1.0, 1.0 ) );
+                else
+                    DebugPixel( pixelPos.xy, float4( 0.0, 1.0, 0.0, 1.0 ) );
+                #else
+                DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(dbgLightIndex)), 1.0) );
+                #endif
+            }
+    }
+    
+    // make sure it reservoirBlended always has valid light indices even when it's empty - simplifies things later on
+    for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+    {
+        uint resLightIndex = reservoirBlended.GetCandidateRaw(i);
+        if ( resLightIndex == RTXPT_INVALID_LIGHT_INDEX)
+        {
+            resLightIndex = SampleLightGlobal(sampleGenerator);
+            reservoirBlended.SetCandidateRaw(i, resLightIndex);
+        }
+    }
+    reservoirBlended.CommitToStorage();
+}
+
+// * main processing pass with reprojection
+[numthreads(LLB_NUM_COMPUTE_THREADS_2D, LLB_NUM_COMPUTE_THREADS_2D, 1)] 
+void ProcessFeedbackHistoryP1b( uint2 dispatchThreadID : SV_DispatchThreadID )
+{
+    const LightingControlData controlInfo = u_controlBuffer[0];
+
+    int2 pixelPos = dispatchThreadID;
 
     if( dispatchThreadID.x >= g_const.FeedbackResolution.x || dispatchThreadID.y >= g_const.FeedbackResolution.y )
         return;
  
-    SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( dispatchThreadID.xy, 0, g_const.UpdateCounter ), SampleGeneratorEffectSeed::Base, false, 1 );
+    SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( pixelPos.xy, 0, g_const.UpdateCounter ), (SampleGeneratorEffectSeed)4, false, 1 );
 
     {
-        int2 pixelPos = dispatchThreadID;
-        float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace( pixelPos, t_motionVectors[pixelPos] );
-        int2 prevPixelPos = int2( float2(pixelPos) + screenSpaceMotion.xy + 0.5.xx /* + sampleNext2D(sampleGenerator)*/ );
+        int2 prevPixelPos;
+        bool reprojectionValid = Reproject( pixelPos, prevPixelPos );
 
-        // if wrong/missing motion vectors, use current as backup
-        if( !(all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy)) )
-            prevPixelPos = pixelPos;
-
-        // note: it might not be a bad idea to stochastically ignore 10% of motion vectors and sample from original - this catches reflected speculars in lateral motion that stay in place
+        if (g_const.DebugDrawType == (int)LightingDebugViewType::Disocclusion )
+            DebugPixel( pixelPos, float4(1-reprojectionValid, reprojectionValid, 0, 1.0 + reprojectionValid*0.5) );
+        
+        float reprojectionWeight = reprojectionValid?1.0:0.0;
 
         // part 1: sample direct feedback buffer
-        uint lightIndex = RTXPT_INVALID_LIGHT_INDEX;
-        if( all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy) )
-            lightIndex = u_processedFeedbackBuffer[prevPixelPos + uint2(0, indirect?g_const.FeedbackResolution.y:0)].x;
+        LightFeedbackReservoir reservoirTarget = LightFeedbackReservoir::make(pixelPos, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch);
+        
+        if (g_const.LastFrameTemporalFeedbackAvailable)
+            reservoirTarget.CloneFrom(LightFeedbackReservoir::make(prevPixelPos, u_feedbackTotalWeight, u_feedbackCandidates), reprojectionWeight);
+        else
+            reservoirTarget.Clear();
 
-        // part 2:
-        uint lightIndexHistoric = RTXPT_INVALID_LIGHT_INDEX;
-        if( all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy) && controlInfo.LastFrameLocalSamplesAvailable )
+        // part 1a: this relies on blended feedback to allow for some sharing between neighbours but blended feedback can also be used to pre-warm the cache so it's useful either way
+        static const float neighbourWeight = g_const.ReservoirHistoryDropoff;
+        int2 srcCoordLR = pixelPos / RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE.xx;
+        LightFeedbackReservoir reservoirSrc = LightFeedbackReservoir::make(srcCoordLR, u_feedbackTotalWeightBlended, u_feedbackCandidatesBlended);
+        if (!reservoirSrc.IsEmpty())
         {
-            uint2 tilePos = (prevPixelPos+controlInfo.LocalSamplingTileJitterPrev) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
-            lightIndexHistoric = SampleLightLocalHistoric(tilePos, indirect, sampleGenerator);
-            // if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
-            //     lightIndex = SampleLightLocalHistoric(tilePos, indirect, sampleGenerator);
+            GENERATE_MERGE_RANDOMS(sampleGenerator);
+            reservoirTarget.Merge( randomValues, reservoirSrc, neighbourWeight );
         }
-        if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
-            lightIndex = SampleLightGlobal(sampleGenerator);
-        if( lightIndexHistoric == RTXPT_INVALID_LIGHT_INDEX )
-            lightIndexHistoric = SampleLightGlobal(sampleGenerator); // historic can be invalid if there is no mapping (light no longer present)
 
-        // uint2 tilePos = prevPixelPos / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
-        // if( all(tilePos == uint2(7,7)) )
-        //     DebugPrint( "P:{0}, I1:{1}, I2:{2}", prevPixelPos, lightIndex, lightIndexHistoric );
+        #if 0
+        uint a = reservoirTarget.GetCandidateRaw(0);
+        uint b = reservoirTarget.GetCandidateRaw(1);
+        if (a==RTXPT_INVALID_LIGHT_INDEX)
+            DebugPixel( pixelPos.xy, float4( 1.0, 0.5, 0.0, 1.0 ) );
+        else if (b==RTXPT_INVALID_LIGHT_INDEX)
+            DebugPixel( pixelPos.xy, float4( 0.5, 1.0, 0.0, 1.0 ) );
+        else if (a==b)
+            DebugPixel( pixelPos.xy, float4( 0.2, 0.0, 1.0, 1.0 ) );
+        else
+            DebugPixel( pixelPos.xy, float4( 0.0, 1.0, 0.0, 1.0 ) );
+        #endif
 
-        u_reprojectedFeedbackBuffer[pixelPos + uint2(0, indirect?g_const.FeedbackResolution.y:0)] = uint2( lightIndex, lightIndexHistoric );
-
-        if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackProcessed && g_const.DebugDrawDirect == !indirect )
-            DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(lightIndex)), 0.95) );
-        if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackHistoric && g_const.DebugDrawDirect == !indirect )
-            DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(lightIndexHistoric)), 0.95) );
-    }
-
-    if( dispatchThreadID.x < g_const.LRFeedbackResolution.x || dispatchThreadID.y < g_const.LRFeedbackResolution.y )
-    {
-        LightFeedbackReservoir reservoir = LightFeedbackReservoir::make();
-
-        int2 blockTopLeft    = dispatchThreadID.xy * RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE;
-        for( uint x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; x++ )
-            for( uint y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; y++ )
+        // part 2: fill up missing data; leave TotalWeight as is (could be 0) to avoid unnecessary reuse later, but TotalWeight is ignored when building local samplers
+        for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+        {
+            uint resLightIndex = reservoirTarget.GetCandidateRaw(i);
+            if ( resLightIndex == RTXPT_INVALID_LIGHT_INDEX)
             {
-                uint2 pixelPos = blockTopLeft + uint2(x,y);
+                //DebugPixel( reservoirTarget.PixelPos, float4( 1, 0, 0, 1.0) );
 
-                float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace( pixelPos, t_motionVectors[pixelPos] );
-                int2 prevPixelPos = int2( float2(pixelPos) + screenSpaceMotion.xy + 0.5.xx );
+                if (g_const.LastFrameTemporalFeedbackAvailable)
+                if (reprojectionValid) // there's no point trying to get correct replacement from local historinc sampler if reprojection isn't valid
+                    resLightIndex = SampleLightLocalHistoric(prevPixelPos, sampleGenerator);
 
-                if( all(prevPixelPos >= 0.xx) && all(prevPixelPos < g_const.FeedbackResolution.xy) )
-                {
-                    LightFeedbackReservoir other = SampleFeedback( prevPixelPos, indirect );
-                    reservoir.Add( sampleNext1D( sampleGenerator ), other.CandidateIndex, other.CandidateWeight );
-                }
+                if ( resLightIndex == RTXPT_INVALID_LIGHT_INDEX)
+                    resLightIndex = SampleLightGlobal(sampleGenerator);
+
+                reservoirTarget.SetCandidateRaw(i, resLightIndex);
             }
-
-        uint lightIndex = reservoir.CandidateIndex;
-        if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
-            lightIndex = SampleLightGlobal(sampleGenerator);
-
-        u_reprojectedLRFeedbackBuffer[dispatchThreadID.xy + uint2(0, indirect?g_const.LRFeedbackResolution.y:0)] = lightIndex;
-
-        if( g_const.DebugDrawType == (int)LightingDebugViewType::FeedbackLowRes && g_const.DebugDrawDirect == !indirect )
-            for( int x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; x++ )
-                for( int y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE; y++ )
-                 {
-                     uint2 pixelPos = blockTopLeft + uint2(x,y);
-                     DebugPixel( pixelPos.xy, float4( ColorFromHash(Hash32(lightIndex)), 0.95) );
-                 }
+            //else
+            //    DebugPixel( reservoirTarget.PixelPos, float4( 0, 0, 0, 1.0) );
+        }
+        reservoirTarget.CommitToStorage();
     }
 }
 
-// This fills the local sampling tile buffer (u_narrowSamplingBuffer) with light indices - it does not find duplicates and sort 
-void FillTile( uint2 tilePos, bool indirect )
+// This fills the local sampling tile buffer (u_localSamplingBuffer) with light indices - it does not find duplicates and sort 
+void FillTile( uint2 tilePos )
 {
     const LightingControlData controlInfo = u_controlBuffer[0];
     int margin = (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE - RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE)/2;
     int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - (int2)controlInfo.LocalSamplingTileJitter;
     int2 windowTopLeft  = (int2)cellTopLeft - margin;
-    int2 lrWindowTopLeft = int2( float2(cellTopLeft+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE*0.5) / RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE*0.5 + 0.5.xx );
 
     uint currentlyCollectedCount = 0;
 
     bool debugTile = all( g_const.MouseCursorPos >= cellTopLeft ) && all((g_const.MouseCursorPos-cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
-
-    uint2 actualTilePos = tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0);  // support for handling of indirect as well
 
     for ( int x = 0; x < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
         for ( int y = 0; y < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; y++ )
@@ -1362,59 +1567,61 @@ void FillTile( uint2 tilePos, bool indirect )
             int2 pixelPos = windowTopLeft + int2(x,y);
             int2 srcCoord = MirrorCoord(pixelPos, g_const.FeedbackResolution);
 
-            uint lightIndexA = u_reprojectedFeedbackBuffer[srcCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)].x;
+            LightFeedbackReservoir reservoir = LightFeedbackReservoir::make(srcCoord, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch);
 
-            if ( lightIndexA == RTXPT_INVALID_LIGHT_INDEX )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
+            for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
             {
-                DebugPixel( cellTopLeft, float4(1,0,0,1) );
-                DebugPrint("Bad light read from {0} - missing barrier or etc?", srcCoord);
-            }
+                uint lightIndex = reservoir.GetCandidateRaw(i);
 
-            u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndexA, 1 );
-
-#if RTXPT_LIGHTING_USE_ADDITIONAL_HISTORY_SAMPLES
-            uint lightIndexH = u_reprojectedFeedbackBuffer[srcCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)].y;  // note, .y is historic samples!
-            if ( lightIndexH == RTXPT_INVALID_LIGHT_INDEX )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
-            {
-                DebugPixel( cellTopLeft, float4(1,0,0,1) );
-                DebugPrint("Bad historic light read from {0} - missing barrier or etc?", srcCoord);
-            }
-            u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndexH, 1 );
+#if LLB_ENABLE_VALIDATION
+                if ( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
+                {
+                    DebugPixel( cellTopLeft, float4(1,0,0,1) );
+                    DebugPrint("Bad light read from {0} - missing barrier or etc?", srcCoord);
+                }
 #endif
+
+                u_localSamplingBuffer[ LSB_Address(tilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 1 );
+            }
+
         }
 
-    for( int x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
-        for( int y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE; y++ )
-        {
-            int2 lrPixelPos = lrWindowTopLeft + int2(x,y);
-            int2 lrSrcCoord = MirrorCoord(lrPixelPos, g_const.LRFeedbackResolution);
-
-            uint lightIndex = u_reprojectedLRFeedbackBuffer[lrSrcCoord + uint2(0, indirect?g_const.LRFeedbackResolution.y:0)].x;
-            if( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
-                DebugPrint("LR bad light read from {0} - missing barrier or etc?", lrSrcCoord);
-
-            u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 1 );
-        }  
-
     SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( tilePos, 0, g_const.UpdateCounter ) );
+    const float2 cellCenter = float2(cellTopLeft+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE*0.5);
+    const float radius = RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE * 4.0f;
     for ( int i = 0; i < RTXPT_LIGHTING_TOP_UP_SAMPLES; i++ )
     {
-        uint ox = sampleGenerator.Next() % RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
-        uint oy = sampleGenerator.Next() % RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE;
+        float2 offset = (sampleNext2D(sampleGenerator) - 0.5) * radius;
+        uint oi = sampleGenerator.Next() % RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH;
 
-        int2 pixelPos = cellTopLeft + int2(ox,oy);
+        int2 pixelPos = int2(cellCenter + offset + 0.5.xx);
         int2 srcCoord = MirrorCoord(pixelPos, g_const.FeedbackResolution);
 
-        uint lightIndex = u_reprojectedFeedbackBuffer[srcCoord + uint2(0, indirect?g_const.FeedbackResolution.y:0)].x;  // note, .y is historic samples!
-        u_narrowSamplingBuffer[ uint3(actualTilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 1 );
+#if 0 // use actual samples
+        LightFeedbackReservoir reservoir = LightFeedbackReservoir::make(srcCoord, u_feedbackTotalWeightScratch, u_feedbackCandidatesScratch);
+#else // use "blended" samples
+        int2 srcCoordLR = srcCoord / RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE.xx;
+        LightFeedbackReservoir reservoir = LightFeedbackReservoir::make(srcCoordLR, u_feedbackTotalWeightBlended, u_feedbackCandidatesBlended);
+#endif
+        uint lightIndex = reservoir.GetCandidateRaw(oi);
+#if LLB_ENABLE_VALIDATION
+        if ( lightIndex == RTXPT_INVALID_LIGHT_INDEX )
+        {
+            DebugPixel( cellTopLeft, float4(1,0,0,1) );
+            DebugPrint("2: Bad light read from {0} - missing barrier or etc?", srcCoord);
+        }
+#endif
+        u_localSamplingBuffer[ LSB_Address(tilePos, currentlyCollectedCount++) ] = PackMiniListLightAndCount( lightIndex, 1 );
+
     }
 
-    if ( currentlyCollectedCount != RTXPT_LIGHTING_NARROW_PROXY_COUNT )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
+#if LLB_ENABLE_VALIDATION
+    if ( currentlyCollectedCount != RTXPT_LIGHTING_LOCAL_PROXY_COUNT )// || lightIndexB == RTXPT_INVALID_LIGHT_INDEX )
     {
         DebugPixel( cellTopLeft, float4(1,0,0,1) );
-        DebugPrint("Wrong number of lights in FillTile {0}, {1} - missing barrier or etc?", actualTilePos, currentlyCollectedCount);
+        DebugPrint("Wrong number of lights in FillTile {0}, {1} - missing barrier or etc?", tilePos, currentlyCollectedCount);
     }
-
+#endif
  }
 
 [numthreads(8, 8, 1)]
@@ -1423,27 +1630,20 @@ void ProcessFeedbackHistoryP2( uint2 dispatchThreadID : SV_DispatchThreadID )
     const LightingControlData controlInfo = u_controlBuffer[0];
     uint2 tilePos = dispatchThreadID.xy;
 
-    bool indirect = false; // prevent direct and indirect parts, which are stacked one on the other, bleeding into each other
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-    if( tilePos.y >= g_const.NarrowSamplingResolution.y )
-    {
-        indirect = true;
-        tilePos.y -= g_const.NarrowSamplingResolution.y;
-    }
-#endif
-
-    if( tilePos.x >= g_const.NarrowSamplingResolution.x || tilePos.y >= g_const.NarrowSamplingResolution.y )
+    if( tilePos.x >= g_const.LocalSamplingResolution.x || tilePos.y >= g_const.LocalSamplingResolution.y )
         return;
 
-    FillTile(tilePos, indirect);
+    FillTile(tilePos);
 }
 
+#if 0 // OLD CODE
+// Reference version
 [numthreads(8, 8, 1)]
 void ProcessFeedbackHistoryP3a( uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadId )
 {
     const LightingControlData controlInfo = u_controlBuffer[0];
     uint2 tilePos = dispatchThreadID.xy;
-    if( tilePos.x >= g_const.NarrowSamplingResolution.x || tilePos.y >= g_const.NarrowSamplingResolution.y*2 )
+    if( tilePos.x >= g_const.LocalSamplingResolution.x || tilePos.y >= g_const.LocalSamplingResolution.y*2 )
         return;
 
     int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - (int2)controlInfo.LocalSamplingTileJitter;
@@ -1452,161 +1652,25 @@ void ProcessFeedbackHistoryP3a( uint3 dispatchThreadID : SV_DispatchThreadID, ui
 
 #if 0
     SortedLightList
-    SortedLightLLRBTree<RTXPT_LIGHTING_NARROW_PROXY_COUNT> container = SortedLightLLRBTree<RTXPT_LIGHTING_NARROW_PROXY_COUNT>::empty();
+    SortedLightLLRBTree<RTXPT_LIGHTING_LOCAL_PROXY_COUNT> container = SortedLightLLRBTree<RTXPT_LIGHTING_LOCAL_PROXY_COUNT>::empty();
 #else
-    HashBucketSortTable<RTXPT_LIGHTING_NARROW_PROXY_COUNT> container = HashBucketSortTable<RTXPT_LIGHTING_NARROW_PROXY_COUNT>::empty();
+    HashBucketSortTable<RTXPT_LIGHTING_LOCAL_PROXY_COUNT> container = HashBucketSortTable<RTXPT_LIGHTING_LOCAL_PROXY_COUNT>::empty();
 #endif
 
-    for( uint i = 0; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
-        container.InsertOrIncCounter( UnpackMiniListLight(u_narrowSamplingBuffer[ uint3(tilePos, i) ]), debugTile );
+    for( uint i = 0; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
+        container.InsertOrIncCounter( UnpackMiniListLight(u_localSamplingBuffer[ LSB_Address(tilePos, i) ]), debugTile );
 
-    int sampleCount = container.Store(u_narrowSamplingBuffer, tilePos, debugTile);
-    if( sampleCount != RTXPT_LIGHTING_NARROW_PROXY_COUNT )
+    int sampleCount = container.Store(u_localSamplingBuffer, tilePos, debugTile);
+    if( sampleCount != RTXPT_LIGHTING_LOCAL_PROXY_COUNT )
         DebugPrint("SampleCount wrong {0}", sampleCount);
 }
 
-/// *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE ***
+/// Oli's old version - keeping it in as it might turn out to be faster with bigger chunks (more than 256)
 groupshared uint g_lowestLightIndexInGroup;
 groupshared uint g_numMatchingThreadsInGroup;
 groupshared uint g_tupleCount;
-
-#if 0
-[numthreads(RTXPT_LIGHTING_NARROW_PROXY_COUNT, 1, 1)]
-void ProcessFeedbackHistoryP3b( uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadId )
-{
-    uint indexInTile = dispatchThreadID.x;
-    uint2 tileCoord = dispatchThreadID.yz;
-
-#if 1
-    bool dbgPrint = dispatchThreadID.y == 0 && dispatchThreadID.z == 0;
-    
-    uint myLightIndex = UnpackMiniListLight( u_narrowSamplingBuffer[ uint3(tileCoord, indexInTile) ] );
-
-    // if (dbgPrint) DebugPrint( "light index at {0} is {1}", indexInTile, myLightIndex );
-
-    // Initialise group shared variables and make sure all warps are synchronised
-    g_lowestLightIndexInGroup = 0xffffffff;
-    g_numMatchingThreadsInGroup = 0;
-    g_tupleCount = 0;
-    // We keep all threads active, so this remains true
-    bool waveIsFirstLane = WaveIsFirstLane();
-    // This should be faster, because we know that all the threads are active, so we should
-    // be able to simply mask dispatchThreadID.x on the wave size.
-    // But it's not.  Don't know why.
-    //bool waveIsFirstLane = (dispatchThreadID.x & (WaveGetLaneCount() - 1)) == 0;
-    //bool waveIsFirstLane = (dispatchThreadID.x & (32 - 1)) == 0;
-    bool isFirstThreadInGroup = (dispatchThreadID.x == 0);
-
-    GroupMemoryBarrierWithGroupSync();
- 
-    //
-    // This loop continues while there are still unique light indices.
-    // (One iteration per unique light)
-    //
-    //int loopCounter = 0;
-    while (true)
-    {
-        //
-        // Find the lowest value of myLightIndex across all threads in the group
-        //
-        uint lowestLightIndexInWave = WaveActiveMin(myLightIndex);
-        if (waveIsFirstLane)
-        {
-            InterlockedMin(g_lowestLightIndexInGroup, lowestLightIndexInWave);
-        }
-        GroupMemoryBarrierWithGroupSync(); // Wait for all waves to contribute to g_lowestLightIndexInGroup
-
-        // if (dbgPrint /*&& myLightIndex != 0xffffffff*/ && dispatchThreadID.x == 0 ) DebugPrint( "min found at loop counter {0} is {1}", loopCounter, g_lowestLightIndexInGroup );
-
-        if (g_lowestLightIndexInGroup == 0xffffffff)
-        {
-            // if (dbgPrint) DebugPrint( "exit in the loop it {0}", loopCounter );
-
-            // If that's the lowest index, then it means that we've been through
-            // all of the unique light indices, so we've finished.
-            break;
-        }
-
-        //
-        // Count the threads across the whole thread group that share this light index
-        //
-        uint lowestLightIndexInGroup = g_lowestLightIndexInGroup; // Take a local copy
-        if (isFirstThreadInGroup)
-        {
-            g_numMatchingThreadsInGroup = 0; // Zero for upcoming interlocked add
-        }
-        bool thisThreadMatches = (myLightIndex == lowestLightIndexInGroup);
-        uint numMatchingThreadsInWave = WaveActiveCountBits(thisThreadMatches);
-        GroupMemoryBarrierWithGroupSync(); // Wait for g_numMatchingThreadsInGroup to be zero
-        //while (g_numMatchingThreadsInGroup != 0); // Spin. (This doesn't work BTW)
-        if (waveIsFirstLane && numMatchingThreadsInWave)
-        {
-            g_lowestLightIndexInGroup = 0xffffffff; // Reset for next loop iteration (as long as one thread in the group does this, we're ok)
-            // Add up the wave totals across the whole thread group
-            InterlockedAdd(g_numMatchingThreadsInGroup, numMatchingThreadsInWave); //< Count must have been zeroed previously
-        }
-        GroupMemoryBarrierWithGroupSync(); // Wait for all waves to add to g_numMatchingThreadsInGroup
-        
-        //if (dbgPrint && thisThreadMatches ) DebugPrint( "thread {0} is {1}, {2}", dispatchThreadID.x, lowestLightIndexInGroup, g_numMatchingThreadsInGroup );
-        //[branch] // numMatchingThreadsInWave is uniform across the wave
-        if(numMatchingThreadsInWave)
-        {
-            //
-            // Write out the tuples for this light index.
-            // One for each thread that matches lowestLightIndexInGroup.
-            //
-            uint tupleIdxWaveBase;
-            if (waveIsFirstLane)
-            {
-                // Allocate space in the tuple buffer for the number of threads in this
-                // wave that will write to it.
-                // NB: tupleIdxWaveBase will only be valid for the first thread in the wave
-                //uint equalCount = WaveActiveCountBits(thisThreadMatches);
-                InterlockedAdd(g_tupleCount, numMatchingThreadsInWave, tupleIdxWaveBase);
-
-                // if (dbgPrint)  DebugPrint( "thread {0}, lindex {1}, count {2}", dispatchThreadID.x, lowestLightIndexInGroup, numMatchingThreadsInWave );
-            }
-
-            // Calculate the location in the buffer that this thread should write its tuple
-            //tupleIdxWaveBase = WaveReadLaneFirst(tupleIdxWaveBase);
-            tupleIdxWaveBase = WaveReadLaneAt(tupleIdxWaveBase, 0);
-            uint idx = tupleIdxWaveBase + WavePrefixCountBits(thisThreadMatches);
-
-            if (thisThreadMatches)
-            {
-#if 0 // validate-assert
-                if (u_narrowSamplingBuffer[uint3(tileCoord.xy, idx)] != PackMiniListLightAndCount(lowestLightIndexInGroup, g_numMatchingThreadsInGroup) )
-                    DebugPrint( "Validation error, tile {0}, pos {1}", tileCoord, idx );
-#else
-                // Write the tuple
-                u_narrowSamplingBuffer[uint3(tileCoord.xy, idx)] = PackMiniListLightAndCount(lowestLightIndexInGroup, g_numMatchingThreadsInGroup);
-#endif
-                // Now we effectively kill this thread because its light index has been handled.
-                // But we do it without actually killing the thread because we need all the
-                // waves to stay in the same flow control in order to be able
-                // to use GroupMemoryBarrierWithGroupSync
-                myLightIndex = 0xffffffff;
-
-                //if (dbgPrint) DebugPrint( "thread {0} base {1} outIndex {2} tuple {3}", dispatchThreadID.x, tupleIdxWaveBase, idx, tuple );
-            }
-        }
-
-        //if (dbgPrint && WaveIsFirstLane())
-        //{
-        //    GroupMemoryBarrierWithGroupSync(); // not needed
-        //    DebugPrint( "LOOP {0} FINISHED, counter: {1}", loopCounter, g_tupleCount );
-        // }
-
-        //loopCounter++;
-    }
-#endif
-}
-
-#else
-
 #define WAVE_LANE_COUNT 32
 #define NUM_WAVES_IN_A_GROUP 4
-
 [numthreads(WAVE_LANE_COUNT, NUM_WAVES_IN_A_GROUP, 1)]
 void ProcessFeedbackHistoryP3b(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadId)
 {
@@ -1614,14 +1678,14 @@ void ProcessFeedbackHistoryP3b(uint3 dispatchThreadID : SV_DispatchThreadID, uin
 
     bool dbgPrint = dispatchThreadID.y == 0 && dispatchThreadID.z == 0;
     
-    const uint kNumSamplesPerThread = RTXPT_LIGHTING_NARROW_PROXY_COUNT / WAVE_LANE_COUNT;
+    const uint kNumSamplesPerThread = RTXPT_LIGHTING_LOCAL_PROXY_COUNT / WAVE_LANE_COUNT;
     // Load the samples that this thread will deal with
     uint threadLocalSamples[kNumSamplesPerThread];
     for (uint i = 0; i < kNumSamplesPerThread; ++i)
     {
         uint indexInTile = (WAVE_LANE_COUNT * i) + dispatchThreadID.x;
         //uint indexInTile = (dispatchThreadID.x * kNumSamplesPerThread) + i; //< This pattern is ultimately slower
-        threadLocalSamples[i] = UnpackMiniListLight(u_narrowSamplingBuffer[uint3(tileCoord, indexInTile)]);
+        threadLocalSamples[i] = UnpackMiniListLight(u_localSamplingBuffer[LSB_Address(tileCoord, indexInTile)]);
     }
 
     //
@@ -1676,7 +1740,7 @@ void ProcessFeedbackHistoryP3b(uint3 dispatchThreadID : SV_DispatchThreadID, uin
                 {
                     // Write the tuple
                     uint threadTupleIdx = tupleIdx + WavePrefixCountBits(true);
-                    u_narrowSamplingBuffer[uint3(tileCoord.xy, threadTupleIdx)] = tuple;
+                    u_localSamplingBuffer[LSB_Address(tileCoord.xy, threadTupleIdx)] = tuple;
                     // Kill this light index sample so we don't write it again
                     //threadLocalSamples[i] = 0xffffffff;
                     activeSamplesInThread &= ~(1u << i);
@@ -1690,65 +1754,7 @@ void ProcessFeedbackHistoryP3b(uint3 dispatchThreadID : SV_DispatchThreadID, uin
 
     // note: full validation is in ProcessFeedbackHistoryDebugViz
 }
-
-#endif
-
-// _bucketSize is essential, things don't work otherwise
-template <uint _bucketSize> void DescendingSortInsertOrIncCounter(inout uint elements[_bucketSize], inout uint elementCount, uint newLightTuple)
-{
-    uint insertLocation = 0;
-
-    uint newLightIndex = UnpackMiniListLight(newLightTuple);
-
-#if 0 // linear search
-    for( int i = elementCount-1; i >= 0; i-- )
-    {
-        uint iLight = UnpackMiniListLight(elements[i]);
-        if( iLight == newLightIndex)
-        {
-            elements[i] += UnpackMiniListCount(newLightTuple);   // no overflow checking, assume counter bits portion is enough
-            return;// true;
-        }
-        if( iLight > newLightIndex )
-        {
-            insertLocation = i+1;
-            break;
-        }
-    }
-#else // binary search
-    int indexLeft = 0; 
-    int indexRight = elementCount-1;
-    while( indexLeft <= indexRight )
-    {
-        int indexMiddle = (indexLeft+indexRight)/2;
-        const uint eMiddle = elements[indexMiddle];
-        uint iLightMiddle = UnpackMiniListLight(eMiddle);
-
-        if( iLightMiddle > newLightIndex )
-            indexLeft = indexMiddle+1;
-        else if( iLightMiddle < newLightIndex )
-            indexRight = indexMiddle-1;
-        else
-        {
-            elements[indexMiddle] = eMiddle + UnpackMiniListCount(newLightTuple);   // no overflow checking, implicit packing
-            return; // true;
-        }
-    }
-    insertLocation = indexLeft;
-#endif
-
-    // // do we have more space in the list? if not - we have to indicate we couldn't store this one
-    // if( elementCount == _MaxSize )
-    //     return false; // overflow!
-
-    // make space (shift everything by 1 to the right)
-    for( uint i = elementCount; i > insertLocation; i-- )
-        elements[i] = elements[i-1];
-            
-    // and finally, insert 
-    elements[insertLocation] = newLightTuple;
-    elementCount = elementCount+1;
-}
+#endif  // OLD CODE
 
 // ************************************************************************************************************************************************************
 // Parts of below bitonic sort code is originally from https://github.com/microsoft/DirectX-Graphics-Samples/blob/master/MiniEngine/Core/Shaders/Bitonic32PreSortCS.hlsl 
@@ -1772,9 +1778,9 @@ uint InsertOneBit( uint Value, uint OneBitMask )
 }
 //
 // For simplest variant of bitonic sort, list must be power of two - so enforce it
-STATIC_ASSERT( ( RTXPT_LIGHTING_NARROW_PROXY_COUNT & ( RTXPT_LIGHTING_NARROW_PROXY_COUNT - 1 ) ) == 0 );
-groupshared uint g_localData[RTXPT_LIGHTING_NARROW_PROXY_COUNT];
-groupshared uint g_localDataRangeLR[RTXPT_LIGHTING_NARROW_PROXY_COUNT];
+STATIC_ASSERT( ( RTXPT_LIGHTING_LOCAL_PROXY_COUNT & ( RTXPT_LIGHTING_LOCAL_PROXY_COUNT - 1 ) ) == 0 );
+groupshared uint g_localData[RTXPT_LIGHTING_LOCAL_PROXY_COUNT];
+groupshared uint g_localDataRangeLR[RTXPT_LIGHTING_LOCAL_PROXY_COUNT];
 //
 void LastScanAndWriteOut( uint2 tileCoord, uint loc )
 {
@@ -1791,24 +1797,24 @@ void LastScanAndWriteOut( uint2 tileCoord, uint loc )
         indexR = nextIndexR;
     }
     uint count = indexR-indexL+1;
-    u_narrowSamplingBuffer[ uint3(tileCoord, loc) ] = PackMiniListLightAndCount(lightIndex, count);
+    u_localSamplingBuffer[ LSB_Address(tileCoord, loc) ] = PackMiniListLightAndCount(lightIndex, count);
 }
 //
-[numthreads(RTXPT_LIGHTING_NARROW_PROXY_COUNT/2, 1, 1)] // <- we need number of threads that is half of the list size - so we could support up to 2048
-void ProcessFeedbackHistoryP3c(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadId)
+[numthreads(RTXPT_LIGHTING_LOCAL_PROXY_COUNT/2, 1, 1)] // <- we need number of threads that is half of the list size - so we could support up to 2048
+void ProcessFeedbackHistoryP3(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadId)
 {
     const uint threadID = groupThreadID.x;
     uint2 tileCoord = groupID.xy;
 
     // Stage 1: Load to local storage
-    g_localData[threadID] = UnpackMiniListLight(u_narrowSamplingBuffer[uint3(tileCoord, threadID)]);
-    g_localData[threadID + RTXPT_LIGHTING_NARROW_PROXY_COUNT/2] = UnpackMiniListLight(u_narrowSamplingBuffer[uint3(tileCoord, threadID + RTXPT_LIGHTING_NARROW_PROXY_COUNT/2)]);
+    g_localData[threadID] = UnpackMiniListLight(u_localSamplingBuffer[LSB_Address(tileCoord, threadID)]);
+    g_localData[threadID + RTXPT_LIGHTING_LOCAL_PROXY_COUNT/2] = UnpackMiniListLight(u_localSamplingBuffer[LSB_Address(tileCoord, threadID + RTXPT_LIGHTING_LOCAL_PROXY_COUNT/2)]);
 
     GroupMemoryBarrierWithGroupSync();
 
     // Stage 2: bitonic sort
     // This is better unrolled because it reduces ALU and because some architectures can load/store two LDS items in a single instruction as long as their separation is a compile-time constant.
-    [unroll] for (uint k = 2; k <= RTXPT_LIGHTING_NARROW_PROXY_COUNT; k <<= 1)
+    [unroll] for (uint k = 2; k <= RTXPT_LIGHTING_LOCAL_PROXY_COUNT; k <<= 1)
     {
         //[unroll]
         for (uint j = k / 2; j > 0; j /= 2)
@@ -1845,7 +1851,7 @@ void ProcessFeedbackHistoryP3c(uint3 groupID : SV_GroupID, uint3 groupThreadID :
             indexR = indexR+1;
             if (indexL == -1 || g_localData[indexL] != valA)    
                 indexL++;   // if beyond the left end or not same, go back one step
-            if (indexR == RTXPT_LIGHTING_NARROW_PROXY_COUNT || g_localData[indexR] != valB)    
+            if (indexR == RTXPT_LIGHTING_LOCAL_PROXY_COUNT || g_localData[indexR] != valB)    
                 indexR--;   // if beyond the right end or not the same, go step one back
         }
 
@@ -1859,13 +1865,13 @@ void ProcessFeedbackHistoryP3c(uint3 groupID : SV_GroupID, uint3 groupThreadID :
     // Stage 3b: complete duplicate count and write out
     {
         LastScanAndWriteOut( tileCoord, threadID );
-        LastScanAndWriteOut( tileCoord, threadID + RTXPT_LIGHTING_NARROW_PROXY_COUNT/2 );
+        LastScanAndWriteOut( tileCoord, threadID + RTXPT_LIGHTING_LOCAL_PROXY_COUNT/2 );
     }
 
     // debug print
     // if (threadID == 0)
     // {
-    //     for( int i = 0; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
+    //     for( int i = 0; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
     //     {
     //         uint indexL = g_localDataRangeLR[i] >> 16;
     //         uint indexR = g_localDataRangeLR[i] & 0xFFFF;
@@ -1874,139 +1880,7 @@ void ProcessFeedbackHistoryP3c(uint3 groupID : SV_GroupID, uint3 groupThreadID :
     //         DebugPrint("", i, UnpackMiniListLight(g_localData[i]), UnpackMiniListCount(g_localData[i]), indexL, indexR, count);
     //     }
     // }
-
-
-    #if 0
-//    if (threadID == 0)
-//        g_validationCounter = 0;
-//    g_validationCounters[threadID] = 0;
-//    GroupMemoryBarrierWithGroupSync();
-
-
-    const uint kTotalSamples = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
-    const uint kBucketCount = 32;
-    const uint kBucketSize = 32;
-
-    uint threadLocalSamples[kBucketSize];
-    uint threadLocalSampleCount = 0;
-
-    bool overfilled = false;
-
-    uint firstPassCounter = 0;
-    while (firstPassCounter < kTotalSamples)
-    {
-        // first find 1 that matches our hash; overflow also goes here
-        uint acceptedTuple = RTXPT_INVALID_LIGHT_INDEX;
-        while (firstPassCounter < kTotalSamples)
-        {
-            uint candidateTuple = u_narrowSamplingBuffer[uint3(tileCoord, firstPassCounter)];
-            firstPassCounter++;
-            uint lightIndex = UnpackMiniListLight(candidateTuple);
-
-            uint bucketIndex = Hash32(lightIndex+0x9e3779b9) % 32;
-            // DebugPrint("", threadID, bucketIndex);
-
-            if (bucketIndex == threadID)
-            {
-                acceptedTuple = candidateTuple;
-                // InterlockedAdd(g_validationCounters[threadID], 1);
-                // InterlockedAdd(g_validationCounter, 1);
-                break;
-            }
-        }
-
-        // no more, we can get out
-        if (acceptedTuple != RTXPT_INVALID_LIGHT_INDEX)
-        {
-            // error with inputs - missing barrier?
-            // if (UnpackMiniListCount(acceptedTuple)!=1)
-            //     DebugPrint("", threadID, 0.42, 0.42, 0.42, 0.42, 0.42, UnpackMiniListCount(acceptedTuple));
-            DescendingSortInsertOrIncCounter<kBucketSize>(threadLocalSamples, threadLocalSampleCount, acceptedTuple);
-
-            uint overfillElement = RTXPT_INVALID_LIGHT_INDEX;
-            if (threadLocalSampleCount == kBucketSize) // if overfileld (last empty space filled), pop it off the list and put it on the queue
-            {
-                overfillElement = threadLocalSamples[threadLocalSampleCount-1];
-                threadLocalSampleCount--;
-                overfilled = true;
-                DebugPrint("", threadID, 0.42, 0.42, 0.42, 0.42, 0.42, 0.42);
-                break;
-            }
-        }
-        // add loop here 
-        // DebugPrint("", threadID, accepted);
-    }
-
-    //DebugPrint("", threadID, threadLocalSampleCount, (uint)overfilled);
-
-    GroupMemoryBarrierWithGroupSync();  // we'll be re-writing data in u_narrowSamplingBuffer[uint3(tileCoord, ...)] now
-
-    // if (threadID == 0)
-    //     DebugPrint();
-
-    // for (int printThreadID = 0; printThreadID < 32; printThreadID++)
-    // {
-    //     GroupMemoryBarrierWithGroupSync();
-    // 
-    //     if (printThreadID == threadID)
-    //     {
-    //         DebugPrint();
-    //         for ( int i = 0; i < threadLocalSampleCount; i++ )
-    //             DebugPrint("", threadID, i, (uint)UnpackMiniListLight(threadLocalSamples[i]), (uint)UnpackMiniListCount(threadLocalSamples[i]));
-    //         DebugPrint();
-    //     }
-    // }
-    // 
-    // if (threadID == 0)
-    //     DebugPrint();
-
-    uint collectedSoFarTotal = 0;
-
-    // Stage 2 - keep popping the next smallest from all 32 threads until we're done
-    uint mySmallestToken = RTXPT_INVALID_LIGHT_INDEX;
-    while(true)
-    {
-        // if mySmallestToken is 'empty' and our list isn't empty, pop it.
-        if (mySmallestToken == RTXPT_INVALID_LIGHT_INDEX && threadLocalSampleCount > 0)
-            mySmallestToken = threadLocalSamples[--threadLocalSampleCount];
-
-        uint globalSmallestToken = WaveActiveMin(mySmallestToken);
-
-        // check if we're done
-        if (globalSmallestToken == RTXPT_INVALID_LIGHT_INDEX)
-            break;
-
-        // empty "mine"
-        if (globalSmallestToken == mySmallestToken)
-            mySmallestToken = RTXPT_INVALID_LIGHT_INDEX;
-
-        uint outIndex = UnpackMiniListLight(globalSmallestToken);
-        uint outCount = UnpackMiniListCount(globalSmallestToken);
-        //collectedSoFarTotal += outCount;
-        
-        // output (naive)
-        if (threadID == 0)
-        {
-            // DebugPrint("", outIndex, outCount);
-            for( int i = 0; i < outCount; i++ )
-                u_narrowSamplingBuffer[uint3(tileCoord, collectedSoFarTotal++)] = globalSmallestToken;
-        }
-    }
-
-    if (threadID == 0 && (collectedSoFarTotal != 128))
-    {
-        DebugPrint("", collectedSoFarTotal, kTotalSamples);
-        DebugPrint();
-        //DebugPrint("", g_validationCounter);
-        DebugPrint();      
-        DebugPrint();      
-    }
-    // GroupMemoryBarrierWithGroupSync();
-    // DebugPrint("", threadID, g_validationCounters[threadID]);
-    #endif
 }
-/// *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE *** EXPERIMENTAL CODE ***
-
 
 [numthreads(LLB_NUM_COMPUTE_THREADS, 1, 1)]
 void DebugDrawLights( uint dispatchThreadID : SV_DispatchThreadID )
@@ -2028,32 +1902,33 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
     const LightingControlData controlInfo = u_controlBuffer[0];
     uint2 tilePos = dispatchThreadID.xy;
 
-    bool indirect = false; // prevent direct and indirect parts, which are stacked one on the other, bleeding into each other
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-    if( tilePos.y >= g_const.NarrowSamplingResolution.y )
-    {
-        indirect = true;
-        tilePos.y -= g_const.NarrowSamplingResolution.y;
-    }
-#endif
-
-    if( any(tilePos >= g_const.NarrowSamplingResolution) )
+    if ( any(tilePos >= g_const.LocalSamplingResolution) )
         return;
+
+    if ( g_const.DebugDrawFrustum && all(dispatchThreadID.xy==uint2(0,0)) )
+    {
+        for ( int i = 0; i < 4; i++ )
+        { 
+            DebugLine( g_const.FrustumCorners[i].xyz, g_const.FrustumCorners[(i+1)%4].xyz, float4(1, 0, 0, 1) );
+            DebugLine( g_const.FrustumCorners[i].xyz, g_const.FrustumCorners[i+4].xyz, float4(1, 0, 0, 1) );
+            DebugLine( g_const.FrustumCorners[i+4].xyz, g_const.FrustumCorners[(i+1)%4+4].xyz, float4(1, 0, 0, 1) );
+            //DebugPrint( "Corner {0}, pos: {1}", i, g_const.FrustumCorners[i] );
+        }
+    }
+
     int margin = (RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE - RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE)/2;
     int2 cellTopLeft   = tilePos.xy * RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - (int2)controlInfo.LocalSamplingTileJitter;
     int2 windowTopLeft  = (int2)cellTopLeft - margin;
-    int2 lrWindowTopLeft = int2( float2(cellTopLeft+RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE*0.5) / RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE*0.5 + 0.5.xx );
 
     bool debugTile = all( g_const.MouseCursorPos >= cellTopLeft ) && all((g_const.MouseCursorPos-cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
-    debugTile &= g_const.DebugDrawDirect == !indirect;
-    if( debugTile && g_const.DebugDrawTileLights && g_const.DebugDrawDirect == !indirect )
+    if( debugTile && g_const.DebugDrawTileLights )
     {
-        const float maxCount = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
-        for( int i = 0; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
+        const float maxCount = RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
+        for( int i = 0; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
         {
             uint counter;
             uint lightIndex;
-            UnpackMiniListLightAndCount( u_narrowSamplingBuffer[ uint3(tilePos.xy + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), i) ], lightIndex, counter );
+            UnpackMiniListLightAndCount( u_localSamplingBuffer[ LSB_Address(tilePos.xy, i) ], lightIndex, counter );
 
             PolymorphicLightInfoFull light = LoadLight( lightIndex );
             float3 lightPos = light.Base.Center;
@@ -2070,23 +1945,23 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
 
             DebugDrawLight(light, alpha);
 
-            DebugLine( float3(windowTopLeft + RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx / 2, FLT_MAX), lightPos, float4(1.0-indirect, 1.0, indirect, 0.05) );
+            DebugLine( float3(windowTopLeft + RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx / 2, FLT_MAX), lightPos, float4(1.0, 1.0, 0, 0.05) );
         }
     }
 
-    if( g_const.DebugDrawDirect == !indirect )
+    float3 heatmapCol = float3(1,0,0);
+    if (g_const.DebugDrawType == (int)LightingDebugViewType::TileHeatmap )
     {
-        float3 heatmapCol = float3(1-indirect,indirect,0);
-        if (g_const.DebugDrawType == (int)LightingDebugViewType::TileHeatmap )
-        {
-            SortedLightList<RTXPT_LIGHTING_NARROW_PROXY_COUNT> localList = SortedLightList<RTXPT_LIGHTING_NARROW_PROXY_COUNT>::empty();
-            for( uint i = 0; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
-                localList.InsertOrIncCounter( UnpackMiniListLight(u_narrowSamplingBuffer[ uint3(tilePos + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), i) ]) );
+        SortedLightList<RTXPT_LIGHTING_LOCAL_PROXY_COUNT> localList = SortedLightList<RTXPT_LIGHTING_LOCAL_PROXY_COUNT>::empty();
+        for( uint i = 0; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
+            localList.InsertOrIncCounter( UnpackMiniListLight(u_localSamplingBuffer[ LSB_Address(tilePos, i) ]) );
 
-            int numberOfDifferentLights = localList.Count;
-            heatmapCol = GradientHeatMap( (float(numberOfDifferentLights) / float(RTXPT_LIGHTING_NARROW_PROXY_COUNT))*1.2f );
-        }
+        int numberOfDifferentLights = localList.Count;
+        heatmapCol = GradientHeatMap( (float(numberOfDifferentLights) / float(RTXPT_LIGHTING_LOCAL_PROXY_COUNT))*1.2f );
+    }
 
+    if (g_const.DebugDrawTileLights || g_const.DebugDrawType == (int)LightingDebugViewType::TileHeatmap)
+    {
         for( int x = 0; x < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
             for( int y = 0; y < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; y++ )
             {
@@ -2095,7 +1970,7 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
                     continue;
                 bool insideCell = all( pixelPos >= cellTopLeft ) && all( (pixelPos - cellTopLeft) < RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx );
                 if( debugTile )
-                    DebugPixel( pixelPos, float4( insideCell, 1-indirect, indirect, 1 ) );
+                    DebugPixel( pixelPos, float4( insideCell, 1, 0, 1 ) );
                 if( !debugTile && (x == margin || y == margin) )
                     DebugPixel( pixelPos, float4( 0, 0, 1, 0.15 ) );
 
@@ -2103,6 +1978,7 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
                     DebugPixel( pixelPos, float4(heatmapCol, 0.95) );
             }
 
+        #if 0
         for( int x = 0; x < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
             for( int y = 0; y < RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE; y++ )
             {
@@ -2114,20 +1990,21 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
                 if( debugTile && ( ((x == (RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE-1)) || (y == (RTXPT_LIGHTING_LR_SAMPLING_BUFFER_WINDOW_SIZE-1) ) ) ) )
                     DebugPixel( (lrSrcCoord+1)*RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE.xx - 1.xx, float4( 0, 1, 1, 1.0 ) );
             }
+        #endif
     }
 
 
     if (g_const.DebugDrawType == (int)LightingDebugViewType::ValidateCorrectness)
     {
-        uint dataToValidate[RTXPT_LIGHTING_NARROW_PROXY_COUNT];
-        for( int i = 0 ; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
-            dataToValidate[i] = u_narrowSamplingBuffer[ uint3(tilePos + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), i) ];
+        uint dataToValidate[RTXPT_LIGHTING_LOCAL_PROXY_COUNT];
+        for( int i = 0 ; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
+            dataToValidate[i] = u_localSamplingBuffer[ LSB_Address(tilePos, i) ];
 
-        FillTile(tilePos, indirect);  // this fills u_narrowSamplingBuffer from scratch
+        FillTile(tilePos);  // this fills u_localSamplingBuffer from scratch
 
-        SortedLightList<RTXPT_LIGHTING_NARROW_PROXY_COUNT> localList = SortedLightList<RTXPT_LIGHTING_NARROW_PROXY_COUNT>::empty();
-        for( uint i = 0; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
-            localList.InsertOrIncCounter( UnpackMiniListLight(u_narrowSamplingBuffer[ uint3(tilePos + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), i) ]) );
+        SortedLightList<RTXPT_LIGHTING_LOCAL_PROXY_COUNT> localList = SortedLightList<RTXPT_LIGHTING_LOCAL_PROXY_COUNT>::empty();
+        for( uint i = 0; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
+            localList.InsertOrIncCounter( UnpackMiniListLight(u_localSamplingBuffer[ LSB_Address(tilePos, i) ]) );
         bool allGood = localList.Validate(dataToValidate, debugTile);
 
         for( int x = 0; x < RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE; x++ )
@@ -2141,8 +2018,8 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
             }
 
         // put back original data in
-        for( int i = 0 ; i < RTXPT_LIGHTING_NARROW_PROXY_COUNT; i++ )
-            u_narrowSamplingBuffer[ uint3(tilePos + uint2(0, indirect?g_const.NarrowSamplingResolution.y:0), i) ] = dataToValidate[i];
+        for( int i = 0 ; i < RTXPT_LIGHTING_LOCAL_PROXY_COUNT; i++ )
+            u_localSamplingBuffer[ LSB_Address(tilePos, i) ] = dataToValidate[i];
     }
 
 #if 0 // validate remapping - note, this validation doesn't work correctly if history<->current mapping isn't 1:1 which can happen with env quad trees if they get rebuilt differently due to different content
@@ -2173,7 +2050,7 @@ void ProcessFeedbackHistoryDebugViz( uint3 dispatchThreadID : SV_DispatchThreadI
 #endif
 }
 
-void DebugDrawLight(const PolymorphicLightInfoFull lightInfo, float alpha)
+void DebugDrawLight(const PolymorphicLightInfoFull lightInfo, float alpha, float3 colMul, float3 colAdd)
 {
     float3 radiance = PolymorphicLight::UnpackColor(lightInfo.Base);
 
@@ -2187,26 +2064,27 @@ void DebugDrawLight(const PolymorphicLightInfoFull lightInfo, float alpha)
         color = float4(0.03, 0, 0.03, alpha);
         lineBrightness = 0.06;
     }
+    color.rgb = color.rgb * colMul + colAdd;
 
     switch (PolymorphicLight::DecodeType(lightInfo))
     {
 #if POLYLIGHT_SPHERE_ENABLE
-    case PolymorphicLightType::kSphere:         DebugDrawLightSphere(lightInfo,         color, float4(0, lineBrightness*0.2, lineBrightness, alpha) ); break;
+    case PolymorphicLightType::kSphere:         DebugDrawLightSphere(lightInfo,         color, float4( colAdd + colMul * float3(0, lineBrightness*0.2, lineBrightness), alpha) ); break;
 #endif
 #if POLYLIGHT_POINT_ENABLE
-    case PolymorphicLightType::kPoint:          DebugDrawLightPoint(lightInfo,          color, float4(0, lineBrightness*0.2, lineBrightness, alpha) ); break;
+    case PolymorphicLightType::kPoint:          DebugDrawLightPoint(lightInfo,          color, float4( colAdd + colMul * float3(0, lineBrightness*0.2, lineBrightness), alpha) ); break;
 #endif
 #if POLYLIGHT_TRIANGLE_ENABLE
-    case PolymorphicLightType::kTriangle:       DebugDrawLightTriangle(lightInfo,       color, float4(0, lineBrightness, 0, alpha) ); break;
+    case PolymorphicLightType::kTriangle:       DebugDrawLightTriangle(lightInfo,       color, float4( colAdd + colMul * float3(0, lineBrightness, 0), alpha) ); break;
 #endif
 #if POLYLIGHT_DIRECTIONAL_ENABLE
-    case PolymorphicLightType::kDirectional:    DebugDrawLightDirectional(lightInfo,    color, float4(0, lineBrightness*0.2, lineBrightness, alpha) ); break;
+    case PolymorphicLightType::kDirectional:    DebugDrawLightDirectional(lightInfo,    color, float4( colAdd + colMul * float3(0, lineBrightness*0.2, lineBrightness), alpha) ); break;
 #endif
 #if POLYLIGHT_ENV_ENABLE
-    case PolymorphicLightType::kEnvironment:    DebugDrawLightEnvironment(lightInfo,    color, float4(lineBrightness, 0, 0, alpha) ); break;
+    case PolymorphicLightType::kEnvironment:    DebugDrawLightEnvironment(lightInfo,    color, float4( colAdd + colMul * float3(lineBrightness, 0, 0), alpha) ); break;
 #endif
 #if POLYLIGHT_QT_ENV_ENABLE
-    case PolymorphicLightType::kEnvironmentQuad:DebugDrawLightEnvironmentQuad(lightInfo,color, float4(lineBrightness, 0, 0, alpha) ); break;
+    case PolymorphicLightType::kEnvironmentQuad:DebugDrawLightEnvironmentQuad(lightInfo,color, float4( colAdd + colMul * float3(lineBrightness, 0, 0), alpha) ); break;
 #endif
     default: break;
     }

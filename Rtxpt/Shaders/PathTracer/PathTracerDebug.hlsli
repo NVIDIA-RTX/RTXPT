@@ -31,9 +31,9 @@ enum class DebugViewType : int
     StablePlaneMotionVectors,
     StablePlaneNormals,
     StablePlaneRoughness,
+    StablePlaneSpecAvg,
     StablePlaneDiffBSDFEstimate,
     StablePlaneDiffRadiance,
-    StablePlaneDiffHitDist,
     StablePlaneSpecBSDFEstimate,
     StablePlaneSpecRadiance,
     StablePlaneSpecHitDist,
@@ -188,15 +188,10 @@ struct DebugContext
 #endif
 
     DebugConstants                          constants;
-    uint2                                   pixelPos;
-    bool                                    isDebugPixel;
 
-    void Init(const uint2 _pixelPos, const DebugConstants _constants, uniform RWStructuredBuffer<DebugFeedbackStruct> _feedbackBufferUAV, uniform RWStructuredBuffer<DebugLineStruct> _debugLinesBufferUAV, RWStructuredBuffer<DeltaTreeVizPathVertex> _deltaPathTreeUAV, RWStructuredBuffer<PathPayload> _deltaPathSearchStackUAV, RWTexture2D<float4> _debugVizOutput)
+    void Init(const DebugConstants _constants, uniform RWStructuredBuffer<DebugFeedbackStruct> _feedbackBufferUAV, uniform RWStructuredBuffer<DebugLineStruct> _debugLinesBufferUAV, RWStructuredBuffer<DeltaTreeVizPathVertex> _deltaPathTreeUAV, RWStructuredBuffer<PathPayload> _deltaPathSearchStackUAV, RWTexture2D<float4> _debugVizOutput)
     {
         constants           = _constants;
-        pixelPos            = _pixelPos;
-        isDebugPixel        = all( pixelPos == uint2(constants.pickX, constants.pickY) );
-        //isDebugPixel        = all( pixelPos >= uint2(constants.pickX-1, constants.pickY-1) & pixelPos <= uint2(constants.pickX+1, constants.pickY+1) );
 #if ENABLE_DEBUG_VIZUALISATIONS
         feedbackBufferUAV   = _feedbackBufferUAV;
 #if ENABLE_DEBUG_LINES_VIZ
@@ -208,24 +203,27 @@ struct DebugContext
 #endif
     }
 
+    bool IsDebugPixel( uint2 pixelPos )
+    {
+        return all( pixelPos == uint2(constants.pickX, constants.pickY) );
+        //isDebugPixel        = all( pixelPos >= uint2(constants.pickX-1, constants.pickY-1) & pixelPos <= uint2(constants.pickX+1, constants.pickY+1) );
+    }
+
     void DrawDebugViz( uint2 pixelPos, float4 colorWithAlpha )   
     { 
 #if ENABLE_DEBUG_VIZUALISATIONS
         debugVizOutput[pixelPos] = colorWithAlpha; 
 #endif
     }
-    void DrawDebugViz( float4 colorWithAlpha )   { DrawDebugViz(pixelPos, colorWithAlpha);  }
-
-    bool IsDebugPixel() { return isDebugPixel; }
 
     // Returns 0 when debug lines are disabled
     float LineScale()   { return constants.debugLineScale; }
 
     // should call this before fist used in frame
-    void Reset(uint sampleIndex)
+    void Reset(uint2 pixelPos, uint sampleIndex)
     {
 #if ENABLE_DEBUG_VIZUALISATIONS
-        if (isDebugPixel)
+        if (IsDebugPixel(pixelPos))
         {
             feedbackBufferUAV[0].lineVertexCount = 0;
             feedbackBufferUAV[0].deltaPathTree = DeltaTreeVizHeader::make(); 
@@ -347,7 +345,7 @@ struct DebugContext
 #endif // #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
 
 #if ENABLE_DEBUG_VIZUALISATIONS
-    void StablePlanesDebugViz(StablePlanesContext stablePlanes)
+    void StablePlanesDebugViz(uint2 pixelPos, StablePlanesContext stablePlanes)
     {
         if( (constants.debugViewType < (int)DebugViewType::ImagePlaneRayLength || constants.debugViewType > (int)DebugViewType::StablePlaneSpecHitDist) && constants.debugViewType != (int)DebugViewType::StableRadiance )
             return;
@@ -387,9 +385,13 @@ struct DebugContext
                 float3 firstHitRayLengthCol = (firstHitRayLength>=kMaxRayTravel*0.99)?float3(0,0.5,1):(frac(rangeVizScale*firstHitRayLength).xxx);
                 float3 sceneLengthCol = (sceneLength>=kMaxRayTravel*0.99)?float3(0,0.5,1):(frac(rangeVizScale*sceneLength).xxx);
 
-                float4 diffht, specht; UnpackTwoFp32ToFp16(sp.DenoiserPackedRadianceHitDist, diffht, specht);
+                float3 diff = sp.GetNoisyDiffRadiance();
+                float3 spec = sp.GetNoisySpecRadiance();
+                float3 rad  = sp.GetNoisyRadiance();
+                float specHitDist = sp.NoisyRadianceSpecHitDist;
+                float specAvg = sp.GetNoisyRadianceAndSpecRA().a;
 
-                uint dominantSP = stablePlanes.LoadDominantIndexCenter();
+                uint dominantSP = stablePlanes.LoadDominantIndex(pixelPos);
 
                 float3 stableRadiance = stablePlanes.LoadStableRadiance(pixelPos);
 
@@ -399,14 +401,14 @@ struct DebugContext
                 case ((int)DebugViewType::DominantStablePlaneIndex):            outColor = float4( StablePlaneDebugVizColor(dominantSP), 1); break;
                 case ((int)DebugViewType::StablePlaneVirtualRayLength):         outColor = float4( sceneLengthCol, 1 ); break;
                 case ((int)DebugViewType::StablePlaneMotionVectors):            outColor = float4( 0.5 + motionVectors.xyz * float3(0.2, 0.2, 10), 1 ); break;
-                case ((int)DebugViewType::StablePlaneNormals):                  outColor = float4( DbgShowNormalSRGB(sp.DenoiserNormalRoughness.xyz), 1 ); break;
-                case ((int)DebugViewType::StablePlaneRoughness):                outColor = float4( sp.DenoiserNormalRoughness.www, 1 ); break;
+                case ((int)DebugViewType::StablePlaneNormals):                  outColor = float4( DbgShowNormalSRGB(sp.GetNormal()), 1 ); break;
+                case ((int)DebugViewType::StablePlaneRoughness):                outColor = float4( sp.GetRoughness().xxx, 1 ); break;
+                case ((int)DebugViewType::StablePlaneSpecAvg):                  outColor = float4( specAvg.xxx, 1 ); break;
                 case ((int)DebugViewType::StablePlaneDiffBSDFEstimate):         outColor = float4( diffBSDFEstimate, 1 ); break;
-                case ((int)DebugViewType::StablePlaneDiffRadiance):             outColor = float4( diffht.rgb / diffBSDFEstimate, 1 ); break;
-                case ((int)DebugViewType::StablePlaneDiffHitDist):              outColor = float4( rangeVizScale*diffht.www, 1 ); break;
+                case ((int)DebugViewType::StablePlaneDiffRadiance):             outColor = float4( diff.rgb, 1 ); break;
                 case ((int)DebugViewType::StablePlaneSpecBSDFEstimate):         outColor = float4( specBSDFEstimate, 1 ); break;
-                case ((int)DebugViewType::StablePlaneSpecRadiance):             outColor = float4( specht.rgb / specBSDFEstimate, 1 ); break;
-                case ((int)DebugViewType::StablePlaneSpecHitDist):              outColor = float4( rangeVizScale*specht.www, 1 ); break;
+                case ((int)DebugViewType::StablePlaneSpecRadiance):             outColor = float4( spec.rgb, 1 ); break;
+                case ((int)DebugViewType::StablePlaneSpecHitDist):              outColor = float4( rangeVizScale*specHitDist.xxx, 1 ); break;
                 case ((int)DebugViewType::StableRadiance):                      outColor = float4( sqrt(stablePlanes.LoadStableRadiance(pixelPos)), 1 ); break; // note: sqrt there is a cheap debug tonemapper :D
                 }
             }
@@ -428,12 +430,16 @@ struct DebugContext
                 int detailInfoDigits = 0;
                 float4 detailInfoValue = 0;
                 StablePlane sp = stablePlanes.LoadStablePlane(mouseSrcPos.xy, mouseSrcPos.z);
-                float4 diffht, specht; UnpackTwoFp32ToFp16(sp.DenoiserPackedRadianceHitDist, diffht, specht);
 
-                if ((constants.debugViewType == (int)DebugViewType::StablePlaneDiffHitDist) || (constants.debugViewType == (int)DebugViewType::StablePlaneSpecHitDist))
+                float3 diff = sp.GetNoisyDiffRadiance();
+                float3 spec = sp.GetNoisySpecRadiance();
+                float3 rad  = sp.GetNoisyRadiance();
+                float specHitDist = sp.NoisyRadianceSpecHitDist;
+
+                if (constants.debugViewType == (int)DebugViewType::StablePlaneSpecHitDist)
                 {
                     detailInfoDigits = 4;
-                    detailInfoValue = (constants.debugViewType == (int)DebugViewType::StablePlaneDiffHitDist)?(diffht):(specht);
+                    detailInfoValue = specHitDist;
                 }
                 const float3 cols[4] = {float3(1,0.2,0.2), float3(0.2,1.0,0.2), float3(0.2,0.2,1.0), float3(1,1,0.2) };
                 for( int d = 0; d < detailInfoDigits; d++)
@@ -449,7 +455,7 @@ struct DebugContext
         }
 
         if (outColor.w>0)
-            DrawDebugViz( outColor );
+            DrawDebugViz( pixelPos, outColor );
 
     }
 #endif // #if ENABLE_DEBUG_VIZUALISATIONS

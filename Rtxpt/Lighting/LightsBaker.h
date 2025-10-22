@@ -48,21 +48,27 @@ class LightsBaker
 public:
     struct BakeSettings
     {
-        uint    ImportanceSamplingType  = 0;                // 0 - uniform; 1 - pure power based; 2 - NEE-AT
-        float3  CameraPosition          = float3(0,0,0);
-        uint2   MouseCursorPos          = uint2(0,0);       // only used for debug viz
+        uint        ImportanceSamplingType      = 0;                    // 0 - uniform; 1 - pure power based; 2 - NEE-AT
+        float3      CameraPosition              = float3(0,0,0);
+        float3      CameraDirection             = float3(0,0,0);
+        float       AverageContentsDistance     = 10.0f;                // rough average distance from camera that most viewed objects will be at - 1-100m is good for FPS, could be 1000 for a flight sim
+        uint2       MouseCursorPos              = uint2(0,0);           // only used for debug viz
+        float4x4    ViewProjMatrix              = float4x4::identity(); // needed for figuring out frustum planes for optimizations
         
         // NEE-AT settings
-        bool    GlobalTemporalFeedbackEnabled       = false;    // <- remove, just use
-        float   GlobalTemporalFeedbackRatio         = 0.65f;    // 0.0 - use no feedback, 0.95 use almost feedback only (some power-based input always needed to bring in new lights)
-        bool    NarrowTemporalFeedbackEnabled       = false;    // <- remove, just use
-        float   NarrowTemporalFeedbackRatio         = 0.65f;     // 0.0 - use no feedback, 1.0 use feedback only
-        float   LightSampling_MIS_Boost             = 1.0f;     // boost light sampling when doing MIS vs BSDF
+        bool        GlobalTemporalFeedbackEnabled       = false;    // <- remove, just use
+        float       GlobalTemporalFeedbackRatio         = 0.75f;    // 0.0 - use no feedback, 0.95 use almost feedback only (some power-based input always needed to bring in new lights)
+        bool        LocalTemporalFeedbackEnabled       = false;    // <- remove, just use
+        float       LocalTemporalFeedbackRatio         = 0.65f;     // 0.0 - use no feedback, 1.0 use feedback only
+        float       LightSampling_MIS_Boost             = 1.0f;     // boost light sampling when doing MIS vs BSDF
 
         // frame/global settings
-        bool    ResetFeedback = false;
-        float2  ViewportSize                        = {0,0};
-        float2  PrevViewportSize                    = {0,0};
+        bool        ResetFeedback = false;
+        float2      ViewportSize                        = {0,0};
+        float2      PrevViewportSize                    = {0,0};
+
+        // if GetFeedbackTotalWeightAntiLagPass/GetFeedbackCandidatesAntiLagPass was filled in a pre-pass, use it in the first UpdatePreRender of the frame to feed potential light pool with up to date lights
+        bool        EnableAntiLag                   = false;
 
         // environment map parameters
         EnvMapSceneParams EnvMapParams              = {};
@@ -76,26 +82,35 @@ public:
     // Reset scene related stuff
     void                            SceneReloaded();
 
-    void                            CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::shared_ptr<ShaderDebug> shaderDebug, const uint2 screenResolution);
+    void                            CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::shared_ptr<ShaderDebug> shaderDebug, const uint2 renderResolution);
 
     // this update can happen in parallel with any other ray preparatory tracing work - anything from BVH building to laying down denoising layers
-    void                            Update(nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, std::vector<SubInstanceData> & subInstanceData);
+    void                            UpdateFrame(nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, std::vector<SubInstanceData> & subInstanceData);
     // this update must happen before main path tracing (that uses NEE) but ideally after motion vectors are available for reprojection
-    void                            UpdateLate(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
+    void                            UpdatePreRender(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
 
-    nvrhi::BufferHandle             GetControlBuffer() const                { return m_controlBuffer; }
-    nvrhi::BufferHandle             GetLightBuffer() const                  { return m_lightsBuffer; }              // this is the list of lights
-    nvrhi::BufferHandle             GetLightExBuffer() const                { return m_lightsExBuffer; }            // this is the list of light (extended data)
-    nvrhi::BufferHandle             GetLightProxyCounters() const           { return m_perLightProxyCounters; }     // these are counters of how many proxies each light has
-    nvrhi::BufferHandle             GetLightSamplingProxies() const         { return m_lightSamplingProxies; }      // these are indices into the GetLightBuffer()
-    nvrhi::TextureHandle            GetLightNarrowSamplingBuffer() const    { return m_NEE_AT_SamplingBuffer; }     // these are in parallel to m_lightProxyIndicesUnsorted
-    // nvrhi::BufferHandle             GetLightingConstants() const            { return m_lightingConstants; }
+    // only valid after UpdateFrame()!
+    bool                            IsAntiLagActive() const                     { return m_currentSettings.EnableAntiLag; }
 
-    nvrhi::TextureHandle            GetEnvLightLookupMap() const            { return m_envLightLookupMap; }
+    nvrhi::BufferHandle             GetControlBuffer() const                    { return m_controlBuffer; }
+    nvrhi::BufferHandle             GetLightBuffer() const                      { return m_lightsBuffer; }              // this is the list of lights
+    nvrhi::BufferHandle             GetLightExBuffer() const                    { return m_lightsExBuffer; }            // this is the list of light (extended data)
+    nvrhi::BufferHandle             GetLightProxyCounters() const               { return m_perLightProxyCounters; }     // these are counters of how many proxies each light has
+    nvrhi::BufferHandle             GetLightSamplingProxies() const             { return m_lightSamplingProxies; }      // these are indices into the GetLightBuffer()
 
-    // rename to GetNEE_AT_FeedbackBuffer
-    nvrhi::TextureHandle            GetFeedbackReservoirBuffer() const  { return m_NEE_AT_FeedbackBuffer; }
-    nvrhi::TextureHandle            GetNarrowSamplingBuffer() const     { return m_NEE_AT_SamplingBuffer; }
+    nvrhi::TextureHandle            GetEnvLightLookupMap() const                { return m_envLightLookupMap; }
+
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+    nvrhi::TextureHandle            GetLocalSamplingBuffer() const              { return m_NEE_AT_LocalSamplingBuffer; }
+#else
+    nvrhi::BufferHandle             GetLocalSamplingBuffer() const              { return m_NEE_AT_LocalSamplingBuffer; }
+#endif
+
+    nvrhi::TextureHandle            GetFeedbackTotalWeight() const              { return m_NEE_AT_FeedbackTotalWeight; }
+    nvrhi::TextureHandle            GetFeedbackCandidates() const               { return m_NEE_AT_FeedbackCandidates; }
+    nvrhi::TextureHandle            GetFeedbackTotalWeightAntiLagPass() const   { return m_NEE_AT_FeedbackTotalWeightScratch; }
+    nvrhi::TextureHandle            GetFeedbackCandidatesAntiLagPass() const    { return m_NEE_AT_FeedbackCandidatesScratch; }
+
 
     bool                            InfoGUI(float indent);
     bool                            DebugGUI(float indent);
@@ -113,6 +128,9 @@ private:
 
     void                            FillBindings(nvrhi::BindingSetDesc& outBindingSetDesc, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors);
 
+    void                            UpdateFrustumConsts(LightsBakerConstants & outConsts, const LightsBaker::BakeSettings & settings);
+
+    void                            UpdateLocalJitter();
 
 private:
     nvrhi::DeviceHandle             m_device;
@@ -135,14 +153,14 @@ private:
     ComputePass                     m_bakeEmissiveTriangles;
 
     ComputePass                     m_clearFeedbackHistory;
-    ComputePass                     m_updateFeedbackIndices;
+    ComputePass                     m_clearAntiLagFeedback;
     ComputePass                     m_processFeedbackHistoryP0;
-    ComputePass                     m_processFeedbackHistoryP1;
+    ComputePass                     m_processFeedbackHistoryP1a;
+    ComputePass                     m_processFeedbackHistoryP1b;
     ComputePass                     m_processFeedbackHistoryP2;
-    ComputePass                     m_processFeedbackHistoryP3a;
-    ComputePass                     m_processFeedbackHistoryP3b;
-    ComputePass                     m_processFeedbackHistoryP3c;
+    ComputePass                     m_processFeedbackHistoryP3;
     ComputePass                     m_processFeedbackHistoryDebugViz;
+    ComputePass                     m_updateControlBufferMultipass;
 
     ComputePass                     m_resetLightProxyCounters;
     ComputePass                     m_computeWeights;
@@ -162,13 +180,13 @@ private:
     LightsBakerConstants            m_currentConsts;
 
     nvrhi::BufferHandle             m_constantBuffer;
+    nvrhi::BufferHandle             m_controlBuffer;
 
     nvrhi::SamplerHandle            m_pointSampler;
     nvrhi::SamplerHandle            m_linearSampler;
 
     // nvrhi::BufferHandle             m_lightingConstants;                // same content as in control buffer
 
-    nvrhi::BufferHandle             m_controlBuffer;
     nvrhi::BufferHandle             m_lightsBuffer;                     // element count: RTXPT_LIGHTING_MAX_LIGHTS
     nvrhi::BufferHandle             m_lightsExBuffer;                   // element count: RTXPT_LIGHTING_MAX_LIGHTS
     nvrhi::BufferHandle             m_scratchBuffer;                    // byte size: LLB_SCRATCH_BUFFER_SIZE
@@ -180,22 +198,31 @@ private:
     int                             m_framesFromLastReadbackCopy;   // the number of frames that passed since 
     LightingControlData             m_lastReadback;
 
-    nvrhi::BufferHandle             m_lightWeights;                 // element count: RTXPT_LIGHTING_MAX_LIGHTS
+    nvrhi::BufferHandle             m_lightWeightsPing;             // element count: RTXPT_LIGHTING_MAX_LIGHTS
+    nvrhi::BufferHandle             m_lightWeightsPong;             // element count: RTXPT_LIGHTING_MAX_LIGHTS
     nvrhi::BufferHandle             m_perLightProxyCounters;        // element count: RTXPT_LIGHTING_MAX_LIGHTS
     nvrhi::BufferHandle             m_lightSamplingProxies;         // element count: RTXPT_LIGHTING_MAX_SAMPLING_PROXIES  <- this is the output of the GPUSort and is only used to sort the above 2 arrays
 
-    nvrhi::TextureHandle            m_NEE_AT_FeedbackBuffer;
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-    nvrhi::TextureHandle            m_NEE_AT_FeedbackBufferScratch;
-#endif
-    nvrhi::TextureHandle            m_NEE_AT_ProcessedFeedbackBuffer;
-    nvrhi::TextureHandle            m_NEE_AT_ReprojectedFeedbackBuffer;
-    nvrhi::TextureHandle            m_NEE_AT_ReprojectedLRFeedbackBuffer;
+    nvrhi::TextureHandle            m_NEE_AT_FeedbackTotalWeight;
+    nvrhi::TextureHandle            m_NEE_AT_FeedbackCandidates;
+    nvrhi::TextureHandle            m_NEE_AT_FeedbackTotalWeightScratch;
+    nvrhi::TextureHandle            m_NEE_AT_FeedbackCandidatesScratch;
+    //nvrhi::TextureHandle            m_NEE_AT_ProcessedFeedbackBuffer;
+    //nvrhi::TextureHandle            m_NEE_AT_ReprojectedFeedbackBuffer;
     bool                            m_NEE_AT_FeedbackBufferFilled;
-    
-    nvrhi::TextureHandle            m_NEE_AT_SamplingBuffer;
+
+    nvrhi::TextureHandle            m_NEE_AT_FeedbackTotalWeightBlended;
+    nvrhi::TextureHandle            m_NEE_AT_FeedbackCandidatesBlended;
+
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+    nvrhi::TextureHandle            m_NEE_AT_LocalSamplingBuffer;
+#else
+    nvrhi::BufferHandle             m_NEE_AT_LocalSamplingBuffer;
+#endif
 
     nvrhi::TextureHandle            m_envLightLookupMap;            // looking up environment lights by direction
+
+    nvrhi::TextureHandle            m_NEE_AT_HistoryDepth;
 
     std::vector<PolymorphicLightInfo>   m_scratchLightBuffer;                           // these are for scene lights filled in on CPU side
     std::vector<PolymorphicLightInfoEx> m_scratchLightExBuffer;                         // these are for scene lights filled in on CPU side
@@ -208,21 +235,43 @@ private:
     std::unordered_map<size_t, uint32_t> m_historyRemapEmissiveLightBlockOffsets;
     std::unordered_map<size_t, uint32_t> m_historyRemapAnalyticLightIndices;
 
-    float2                          m_localJitterF          = {0, 0};
-    uint2                           m_localJitter           = {0, 0};
-    uint                            m_updateCounter         = 0;
+    float2                          m_localJitterF                      = {0, 0};
+    uint2                           m_localJitter                       = {0, 0};
+    uint2                           m_prevLocalJitter                   = {0, 0};
+    uint                            m_updateCounter                     = 0;
+    bool                            m_updateFrameCalledBeforePreRender  = false;
 
+    int                             m_localSamplingBufferWidth          = 0;
+    int                             m_localSamplingBufferHeight         = 0;
+    const int                       m_localSamplingBufferDepth          = RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
 
-    bool                            m_dbgDebugDrawLights    = false;
-    bool                            m_dbgDebugDrawTileLightConnections = false;
-    bool                            m_dbgFreezeUpdates      = false;
+    // various buffers are ping-ponged where current and history swap places; this bool is inverted at every Update()
+    bool                            m_ping                              = false;
+
+    bool                            m_dbgDebugDrawLights                = false;
+    bool                            m_dbgDebugDrawTileLightConnections  = false;
+    bool                            m_dbgFreezeUpdates                  = false;
     
-    LightingDebugViewType           m_dbgDebugDrawType      = LightingDebugViewType::Disabled;
-    bool                            m_dbgDebugDrawDirect    = true;
-    bool                            m_dbgDebugDisableJitter = false;
+    LightingDebugViewType           m_dbgDebugDrawType                  = LightingDebugViewType::Disabled;
+    //bool                            m_dbgDebugDrawDirect                = true;
+    bool                            m_dbgDebugDisableJitter             = false;
 
     float                           m_advSetting_DirectVsIndirectThreshold = 0.3f;
     bool                            m_advSetting_SampleBakedEnvironment = true;
 
-    bool                            m_deviceHas32ThreadWaves = false;
+    bool                            m_deviceHas32ThreadWaves            = false;
+
+    bool                            m_importanceBoost_IntensityDelta        = true;
+    float                           m_importanceBoost_IntensityDeltaMul     = 30.0f;
+    bool                            m_importanceBoost_Frustum               = true;
+    float                           m_importanceBoost_FrustumMul            = 8.0f;
+    float                           m_importanceBoost_FrustumFadeRangeInt   = 20.0f;
+    float                           m_importanceBoost_FrustumFadeRangeExt   = 5.0f;
+
+    float                           m_advSetting_reservoirHistoryDropoff    = 0.04f;
+
+    float                           m_depthDisocclusionThreshold            = 1.5f;
+    
+    bool                            m_dbgFreezeFrustumUpdates           = false;
+    float4                          m_dbgFrozenFrustum[6];
 };

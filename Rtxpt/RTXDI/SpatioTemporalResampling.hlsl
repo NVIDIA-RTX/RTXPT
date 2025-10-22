@@ -40,8 +40,8 @@ void RayGen()
 
     RAB_Surface surface = RAB_GetGBufferSurface(pixelPosition, false);
 
-    //Do we need this
-     //bool usePermutationSampling = false;
+    //Q: "Do we need this" A: "Yes, it actually makes things worse in some cases so perhaps adjust custom, per-material?"
+    bool usePermutationSampling = g_ResamplingConst.enablePermutationSampling;
      //if (g_ResamplingConst.enablePermutationSampling)
      //{
      //    // Permutation sampling makes more noise on thin, high-detail objects.
@@ -71,7 +71,7 @@ void RayGen()
         stparams.numDisocclusionBoostSamples = g_ResamplingConst.numDisocclusionBoostSamples;
         stparams.samplingRadius = g_ResamplingConst.spatialSamplingRadius;
         stparams.enableVisibilityShortcut = g_ResamplingConst.discardInvisibleSamples;
-        stparams.enablePermutationSampling = g_ResamplingConst.enablePermutationSampling;
+        stparams.enablePermutationSampling = usePermutationSampling;
 
         RAB_LightSample selectedLightSample = (RAB_LightSample)0;
 
