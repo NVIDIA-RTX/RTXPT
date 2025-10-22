@@ -41,19 +41,10 @@ RWStructuredBuffer<DebugLineStruct>     u_DebugLinesBuffer              : regist
 RWStructuredBuffer<DeltaTreeVizPathVertex> u_DebugDeltaPathTree         : register(u53);
 RWStructuredBuffer<PathPayload>         u_DeltaPathSearchStack          : register(u54);
 
-// ReSTIR GI resources
-RWTexture2D<float4>                     u_SecondarySurfacePositionNormal: register(u60);
-RWTexture2D<float4>                     u_SecondarySurfaceRadiance      : register(u61);
-
 // DLSS-RR inputs - leaving them globally accessible so we can move the writes where most optimal
 RWTexture2D<float4>                     u_RRDiffuseAlbedo               : register(u70);
 RWTexture2D<float4>                     u_RRSpecAlbedo                  : register(u71);
 RWTexture2D<float4>                     u_RRNormalsAndRoughness         : register(u72);
 RWTexture2D<float2>                     u_RRSpecMotionVectors           : register(u73);
-
-#if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
-// Stochastic Texture Filtering blue noise texture
-Texture2D<float4>                       t_STBN2DTexture                 : register(t63);
-#endif
 
 #endif // #ifndef __SHADER_RESOURCE_BINDINGS_HLSLI__

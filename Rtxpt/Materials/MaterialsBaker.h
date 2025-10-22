@@ -75,12 +75,16 @@ struct PTTexture
 // All materials share these base properties and some of them have tight integration with the rest of the renderer
 struct PTMaterialBase
 {
+    donut::engine::Material * DonutCounterpart = nullptr;
+
+    // ModelName + Name is unique identifier for the material; there cannot be two materials with the same ModelName and Name
     std::string             Name;
+    std::string             ModelName;                                  // material can be saved
 
     // base texture? & alpha test - opacity?
     // emissive texture?
 
-    bool                    SharedWithAllScenes                 = true;    // if 'true', will be saved to MaterialsBaker::m_materialsPath; otherwise in MaterialsBaker::m_materialsSceneSpecializedPath
+    bool                    SharedWithAllScenes                 = true;     // if 'true', will be saved to MaterialsBaker::m_materialsPath; otherwise in MaterialsBaker::m_materialsSceneSpecializedPath
 
     virtual void            Write(Json::Value & output) = 0;
     virtual bool            Read(Json::Value & output, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache) = 0;
@@ -133,7 +137,7 @@ struct PTMaterial : public PTMaterialBase
     bool                    ExcludeFromNEE                      = false;
 
     // will not propagate dominant stable plane when doing path space decomposition
-    bool                    PSDExclude                          = false;
+    bool                    PSDExclude                          = true;
     // for path space decomposition: -1 means no dominant; 0 usually means transmission, 1 usually means reflection, 2 usually means clearcoat reflection - must match corresponding BSDFSample::getDeltaLobeIndex()!
     int                     PSDDominantDeltaLobe                = -1;
 
@@ -155,12 +159,18 @@ struct PTMaterial : public PTMaterialBase
 
     bool                    EnableAsAnalyticLightProxy          = false;
 
+    bool                    IgnoreMeshTangentSpace              = false;
+
+    bool                    UseDonutEmissiveIntensity           = false;        // for being able to use Donut animations
+    
+    bool                    SkipRender                          = false;    // if 'true', we just skip drawing all geometries with this material; sometimes we can't edit a specific mesh but we can remove it this way; note: it can also be used for hidden emissives
+
     void                    FillData(PTMaterialData & data);
     bool                    EditorGUI(class MaterialsBaker & baker);
     bool                    IsEmissive() const;
 
     static std::shared_ptr<PTMaterial> FromDonut(const std::shared_ptr<donut::engine::Material>& donutMaterial);
-    static std::shared_ptr<PTMaterial> FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache);
+    static std::shared_ptr<PTMaterial> FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache, const std::string & modelName, const std::string & name);
 
     virtual void            Write(Json::Value & output) override;
     virtual bool            Read(Json::Value & output, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache) override;
@@ -200,7 +210,7 @@ public:
 private:
     void                            Clear();
 
-    std::shared_ptr<PTMaterial>     Load(const std::string& name);
+    std::shared_ptr<PTMaterial>     Load(const std::string & modelFileName, const std::string& name);
     std::shared_ptr<PTMaterial>     ImportFromDonut(donut::engine::Material & material);
     void                            SaveAll();
 

@@ -11,9 +11,21 @@
 #ifndef __CONFIG_H__ // using instead of "#pragma once" due to https://github.com/microsoft/DirectXShaderCompiler/issues/3943
 #define __CONFIG_H__
 
-#if !defined(__cplusplus) // not needed in the port so far
+#if !defined(__cplusplus)
 #pragma pack_matrix(row_major)
 #endif
+
+#if !defined(__cplusplus)
+#if defined(TARGET_D3D12)
+#define STATIC_ASSERT(X) _Static_assert(X, "failed static assert")
+#else
+#define STATIC_ASSERT(X)
+#endif
+#else
+#define STATIC_ASSERT(X) static_assert(X)
+#endif
+
+
 
 // ********************************************************************************************************************************************
 // ********************************************************************************************************************************************
@@ -68,12 +80,6 @@
 #define NV_SHADER_EXTN_SLOT_NUM             127     // must match NV_SHADER_EXTN_SLOT_NUM
 #define NV_SHADER_EXTN_REGISTER_SPACE       space0  // pick an arbitrary unused space
 #define NV_SHADER_EXTN_REGISTER_SPACE_NUM   0       // must match NV_SHADER_EXTN_REGISTER_SPACE
-
-#if !defined(__cplusplus) // not needed in the port so far
-// user-specific conversion between 32bit uint path ID and pixel location (other things can get packed in if needed)
-uint2   PathIDToPixel( uint id )        { return uint2( id >> 16, id & 0xFFFF ); }
-uint    PathIDFromPixel( uint2 pixel )  { return pixel.x << 16 | pixel.y; }
-#endif
 
 #define  kMaxSceneDistance                  50000.0         // used as a general max distance between any two surface points in the scene, excluding environment map - should be less than kMaxRayTravel; 50k is within fp16 floats; note: actual sceneLength can be longer due to bounces.
 #define  kMaxRayTravel                      (1e15f)         // one AU is ~1.5e11; 1e15 is high enough to use as environment map distance to avoid parallax but low enough to avoid precision issues with various packing and etc.

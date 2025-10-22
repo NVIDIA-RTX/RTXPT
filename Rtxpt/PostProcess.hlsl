@@ -11,6 +11,8 @@
 #ifndef __POST_PROCESS_HLSL__
 #define __POST_PROCESS_HLSL__
 
+#pragma pack_matrix(row_major)
+
 #define VIEWZ_SKY_MARKER        FLT_MAX             // for 16bit use HLF_MAX but make sure it's bigger than commonSettings.denoisingRange in NRD!
 
 #if defined(STABLE_PLANES_DEBUG_VIZ)
@@ -31,12 +33,12 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     // u_DebugVizOutput[pixelPos] = float4(1,0,1,1);
     // return;
 
-    DebugContext debug; debug.Init( pixelPos, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
-    const Ray cameraRay = Bridge::computeCameraRay( pixelPos, 0 );
-    StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
+    DebugContext debug; debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+    const Ray cameraRay = Bridge::computeCameraRay( pixelPos );
+    StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
 
 #if ENABLE_DEBUG_VIZUALISATIONS
-    debug.StablePlanesDebugViz(stablePlanes);
+    debug.StablePlanesDebugViz(pixelPos, stablePlanes);
 #endif
 }
 
@@ -62,7 +64,7 @@ float ComputeNeighbourDisocclusionRelaxation(const StablePlanesContext stablePla
     if( bidN == cStablePlaneInvalidBranchID )
         return kEdge;
     uint spAddressN = stablePlanes.PixelToAddress( pixelPosN, stablePlaneIndex ); 
-    float3 rayDirN = normalize( stablePlanes.StablePlanesUAV[spAddressN].RayDirSceneLength.xyz );
+    float3 rayDirN = stablePlanes.StablePlanesUAV[spAddressN].GetNormal();
     return 1-dot(rayDirC, rayDirN);
 }
 
@@ -71,7 +73,7 @@ float ComputeDisocclusionRelaxation(const StablePlanesContext stablePlanes, cons
     float disocclusionRelax = 0;
 
     const int2 imageSize = int2(g_Const.ptConsts.imageWidth, g_Const.ptConsts.imageHeight);
-    const float3 rayDirC = normalize(sp.RayDirSceneLength.xyz);
+    const float3 rayDirC = sp.GetNormal();
 
     disocclusionRelax += ComputeNeighbourDisocclusionRelaxation(stablePlanes, pixelPos, imageSize, stablePlaneIndex, rayDirC, int2(-1, 0));
     disocclusionRelax += ComputeNeighbourDisocclusionRelaxation(stablePlanes, pixelPos, imageSize, stablePlaneIndex, rayDirC, int2( 1, 0));
@@ -92,7 +94,7 @@ void NRDRadianceClamp( inout float4 radianceHitT, const float rangeK )
     const float kClampMin = g_Const.ptConsts.preExposedGrayLuminance/rangeK;
     const float kClampMax = min( 255.0, g_Const.ptConsts.preExposedGrayLuminance*rangeK );  // using absolute max of 255 due to NRD internal overflow when using FP16 to store luminance squared
 
-    const float lum = luminance( radianceHitT.xyz );
+    const float lum = Luminance( radianceHitT.xyz );
     //if (lum < kClampMin)
     //    radianceHitT.xyzw = 0.0.xxxx;
     //else
@@ -116,7 +118,12 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     if( any(pixelPos >= uint2(g_Const.ptConsts.imageWidth, g_Const.ptConsts.imageHeight) ) )
         return;
 
-    float3 combinedRadiance = u_OutputColor[pixelPos].rgb; // we already have direct (non-noisy, stable) radiance in here
+    DebugContext debug; debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+    const Ray cameraRay = Bridge::computeCameraRay( pixelPos );
+    StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+    uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndex(pixelPos);
+
+    float3 combinedRadiance = stablePlanes.LoadStableRadiance(pixelPos);
 
 #define MIX_STABLE_RADIANCE 1 // stable radiance comes from emitters including sky; it is good to have it as guidance
 #define MIX_BY_THROUGHPUT   1 // mix guide buffers from layers based on layer throughputs
@@ -125,14 +132,8 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
 #if MIX_STABLE_RADIANCE
     float3 stableAlbedo = sqrt(ReinhardMax(combinedRadiance));
-    float stableAlbedoAvg = average(stableAlbedo);
+    float stableAlbedoAvg = Average(stableAlbedo);
 #endif
-
-    DebugContext debug; debug.Init( pixelPos, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
-    const Ray cameraRay = Bridge::computeCameraRay( pixelPos, 0 );
-    StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
-
-    uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
 
     float3 guideNormals = float3(0, 0, 1e-6);
     float3 diffAlbedo = float3(0.0, 0.0, 0.0);
@@ -142,14 +143,14 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     float spWeights[4] = { 1, 0, 0, 0 };
     for( uint stablePlaneIndex = 1; stablePlaneIndex < g_Const.ptConsts.activeStablePlaneCount; stablePlaneIndex++ )
     {
-        uint spBranchID = stablePlanes.GetBranchIDCenter(stablePlaneIndex);
+        uint spBranchID = stablePlanes.GetBranchID(pixelPos, stablePlaneIndex);
         if( spBranchID != cStablePlaneInvalidBranchID )
         {
             uint spAddress = GenericTSPixelToAddress(pixelPos, stablePlaneIndex, g_Const.ptConsts.genericTSLineStride, g_Const.ptConsts.genericTSPlaneStride);
             float3 throughput; float3 motionVectors;
             UnpackTwoFp32ToFp16(u_StablePlanesBuffer[spAddress].PackedThpAndMVs, throughput, motionVectors);
 
-            float weight = saturate(average(throughput));
+            float weight = saturate(Average(throughput));
             spWeights[stablePlaneIndex] = weight;
             spWeights[0] = saturate( spWeights[0] - weight );
         }
@@ -172,7 +173,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
     for( uint stablePlaneIndex = 0; stablePlaneIndex < g_Const.ptConsts.activeStablePlaneCount; stablePlaneIndex++ )
     {
-        uint spBranchID = stablePlanes.GetBranchIDCenter(stablePlaneIndex);
+        uint spBranchID = stablePlanes.GetBranchID(pixelPos, stablePlaneIndex);
         if( spBranchID != cStablePlaneInvalidBranchID )
         {
             StablePlane sp = stablePlanes.LoadStablePlane(pixelPos, stablePlaneIndex);
@@ -183,12 +184,9 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             {
                 // hasSurface = true;
 
-                float4 denoiserDiffRadianceHitDist;
-                float4 denoiserSpecRadianceHitDist;
-                UnpackTwoFp32ToFp16(sp.DenoiserPackedRadianceHitDist, denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
+                float specHitDist = sp.NoisyRadianceSpecHitDist;
 
-                combinedRadiance += denoiserDiffRadianceHitDist.rgb;
-                combinedRadiance += denoiserSpecRadianceHitDist.rgb;
+                combinedRadiance += sp.GetNoisyRadiance();
 
 #if MIX_BY_THROUGHPUT
                 float3 throughput; float3 motionVectors;
@@ -201,16 +199,16 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
                     UnpackTwoFp32ToFp16(sp.DenoiserPackedBSDFEstimate, diffBSDFEstimate, specBSDFEstimate);
 
 #if ALLOW_MIX_NORMALS
-                    guideNormals    += weight * sp.DenoiserNormalRoughness.xyz;
+                    guideNormals    += weight * sp.GetNormal();
 #endif
-                    roughness       += weight * sp.DenoiserNormalRoughness.w;
+                    roughness       += weight * sp.GetRoughness();
                     diffAlbedo      += weight * diffBSDFEstimate;
                     specAlbedo      += weight * specBSDFEstimate;
                 }
                 if( stablePlaneIndex == dominantStablePlaneIndex )
                 {
 #if !ALLOW_MIX_NORMALS
-                    guideNormals    = sp.DenoiserNormalRoughness.xyz;
+                    guideNormals    = sp.GetNormal();
 #endif
                 }
 #else
@@ -219,8 +217,8 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
                     float3 diffBSDFEstimate, specBSDFEstimate;
                     UnpackTwoFp32ToFp16(sp.DenoiserPackedBSDFEstimate, diffBSDFEstimate, specBSDFEstimate);
 
-                    guideNormals = sp.DenoiserNormalRoughness.xyz;
-                    roughness = sp.DenoiserNormalRoughness.w;
+                    guideNormals = sp.GetNormal();
+                    roughness = sp.GetRoughness();
                     diffAlbedo = diffBSDFEstimate;
                     specAlbedo = specBSDFEstimate;
                 }
@@ -231,8 +229,8 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
 #if MIX_STABLE_RADIANCE 
     float3 stableAlbedoGreyMix = lerp(stableAlbedo, 0.5.xxx, 0.2);  // make sure guidance is never 0
-    diffAlbedo = lerp( diffAlbedo, stableAlbedoGreyMix, stableAlbedoAvg / (average(diffAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
-    specAlbedo = lerp( specAlbedo, stableAlbedoGreyMix, stableAlbedoAvg / (average(specAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
+    diffAlbedo = lerp( diffAlbedo, stableAlbedoGreyMix, stableAlbedoAvg / (Average(diffAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
+    specAlbedo = lerp( specAlbedo, stableAlbedoGreyMix, stableAlbedoAvg / (Average(specAlbedo)+sqrt(stableAlbedoAvg)+1e-7) );
 #endif
 
     // must be in sane range
@@ -244,9 +242,10 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
     // avoid settings both diff and spec albedo guides to 0
     const float minAlbedo = 0.05;
-    if (average(diffAlbedo+specAlbedo) < minAlbedo )
+    if (Average(diffAlbedo+specAlbedo) < minAlbedo )
         diffAlbedo += minAlbedo;
 
+    // we feed this as the main input into denoiser
     u_OutputColor[pixelPos] = float4(combinedRadiance, 1.0);
 
 #if 0 // remove guide buffers (but not motion vectors and depth!)
@@ -271,18 +270,22 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 [numthreads(NUM_COMPUTE_THREADS_PER_DIM, NUM_COMPUTE_THREADS_PER_DIM, 1)]
 void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 {
-    const uint stablePlaneIndex = g_MiniConst.params[0];
+    const uint stablePlaneIndex         = g_MiniConst.params[0];
+    const bool initWithStableRadiance   = g_MiniConst.params[1];
 
     const uint2 pixelPos = dispatchThreadID.xy;
     if( any(pixelPos >= uint2(g_Const.ptConsts.imageWidth, g_Const.ptConsts.imageHeight) ) )
         return;
 
-    DebugContext debug; debug.Init( pixelPos, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
-    const Ray cameraRay = Bridge::computeCameraRay( pixelPos, 0 );
-    StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
+    DebugContext debug; debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+    const Ray cameraRay = Bridge::computeCameraRay( pixelPos );
+    StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+
+    if (initWithStableRadiance)
+        u_OutputColor[pixelPos] = float4( stablePlanes.LoadStableRadiance(pixelPos), 1 );
 
     bool hasSurface = false;
-    uint spBranchID = stablePlanes.GetBranchIDCenter(stablePlaneIndex);
+    uint spBranchID = stablePlanes.GetBranchID(pixelPos, stablePlaneIndex);
     if( spBranchID != cStablePlaneInvalidBranchID )
     {
         StablePlane sp = stablePlanes.LoadStablePlane(pixelPos, stablePlaneIndex);
@@ -296,7 +299,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             UnpackTwoFp32ToFp16(sp.DenoiserPackedBSDFEstimate, diffBSDFEstimate, specBSDFEstimate);
             //diffBSDFEstimate = 1.xxx; specBSDFEstimate = 1.xxx;
 
-            float3 virtualWorldPos = cameraRay.origin + cameraRay.dir * length(sp.RayDirSceneLength);
+            float3 virtualWorldPos = cameraRay.origin + cameraRay.dir * sp.SceneLength;
             float4 viewPos = mul(float4(/*bridgedData.shadingData.posW*/virtualWorldPos, 1), g_Const.view.matWorldToView);
             float virtualViewspaceZ = viewPos.z;
 
@@ -313,7 +316,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             // See if possible to get rid of these copies - or compress them better!
             u_DenoiserViewspaceZ[pixelPos]          = virtualViewspaceZ;
             u_DenoiserMotionVectors[pixelPos]       = float4(motionVectors, 0);
-            float finalRoughness = sp.DenoiserNormalRoughness.w;         
+            float finalRoughness = sp.GetRoughness();
 
             float disocclusionRelax = 0.0;
             float aliasingDampen = 0.0;
@@ -323,7 +326,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             {   // only apply suppression on sp 0, and only if more than 1 stable plane enabled, and only if other stable planes are in use (so they captured some of specular radiance)
                 bool shouldSuppress = true;
                 for (int i = 1; i < g_Const.ptConsts.activeStablePlaneCount; i++ )
-                    shouldSuppress &= stablePlanes.GetBranchIDCenter(i) != cStablePlaneInvalidBranchID;
+                    shouldSuppress &= stablePlanes.GetBranchID(pixelPos, i) != cStablePlaneInvalidBranchID;
                 // (optional, experimental, for future: also don't apply suppression if rough specular)
                 float roughnessModifiedSuppression = g_Const.ptConsts.stablePlanesSuppressPrimaryIndirectSpecularK; // * saturate(1 - (finalRoughness - g_Const.ptConsts.stablePlanesMinRoughness)*5);
                 specularSuppressionMul = shouldSuppress?saturate(1-roughnessModifiedSuppression):specularSuppressionMul;
@@ -335,14 +338,14 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             u_DenoiserDisocclusionThresholdMix[pixelPos] = disocclusionRelax;
 
             // adjust for thp and map to [0,1]
-            u_CombinedHistoryClampRelax[pixelPos] = saturate(u_CombinedHistoryClampRelax[pixelPos] + disocclusionRelax * saturate(luminance(thp)) );
+            u_CombinedHistoryClampRelax[pixelPos] = saturate(u_CombinedHistoryClampRelax[pixelPos] + disocclusionRelax * saturate(Luminance(thp)) );
             
             finalRoughness = saturate( finalRoughness + disocclusionRelax );
             
-            float4 denoiserDiffRadianceHitDist;
-            float4 denoiserSpecRadianceHitDist;
-            UnpackTwoFp32ToFp16(sp.DenoiserPackedRadianceHitDist, denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
+            float4 denoiserDiffRadianceHitDist = float4( sp.GetNoisyDiffRadiance(), 0 );
+            float4 denoiserSpecRadianceHitDist = float4( sp.GetNoisySpecRadiance(), sp.NoisyRadianceSpecHitDist );
 
+#if 0
             float fallthroughToBasePlane = saturate(disocclusionRelax-1.0+g_Const.ptConsts.stablePlanesAntiAliasingFallthrough);
             if (stablePlaneIndex > 0 && fallthroughToBasePlane > 0)
             {
@@ -369,6 +372,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
                 if( stablePlaneIndex == 2 ) u_DebugVizOutput[pixelPos].y = fallthroughToBasePlane;
 #endif
             }
+#endif
 
             // demodulate
             denoiserDiffRadianceHitDist.xyz /= diffBSDFEstimate.xyz;
@@ -377,20 +381,20 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             // apply suppression if any
             denoiserSpecRadianceHitDist.xyz *= specularSuppressionMul;
 
-            u_DenoiserNormalRoughness[pixelPos]     = NRD_FrontEnd_PackNormalAndRoughness( sp.DenoiserNormalRoughness.xyz, finalRoughness, 0 );
+            u_DenoiserNormalRoughness[pixelPos]     = NRD_FrontEnd_PackNormalAndRoughness( sp.GetNormal(), finalRoughness, 0 );
 
             // Clamp the inputs to be within sensible range.
             NRDRadianceClamp( denoiserDiffRadianceHitDist, g_Const.ptConsts.denoiserRadianceClampK*16 );
             NRDRadianceClamp( denoiserSpecRadianceHitDist, g_Const.ptConsts.denoiserRadianceClampK*16 );
 
     #if USE_RELAX
-            u_DenoiserDiffRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserDiffRadianceHitDist.xyz, denoiserDiffRadianceHitDist.w, true );
+            u_DenoiserDiffRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserDiffRadianceHitDist.xyz, /*denoiserDiffRadianceHitDist.w*/0, true );
             u_DenoiserSpecRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserSpecRadianceHitDist.xyz, denoiserSpecRadianceHitDist.w, true );
     #else
             float4 hitParams = g_Const.denoisingHitParamConsts;
             float diffNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( denoiserDiffRadianceHitDist.w, virtualViewspaceZ, hitParams, 1);
-            u_DenoiserDiffRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserDiffRadianceHitDist.xyz, diffNormHitDistance, true );
-            float specNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( denoiserSpecRadianceHitDist.w, virtualViewspaceZ, hitParams, sp.DenoiserNormalRoughness.w);
+            u_DenoiserDiffRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserDiffRadianceHitDist.xyz, /*diffNormHitDistance*/0, true );
+            float specNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( denoiserSpecRadianceHitDist.w, virtualViewspaceZ, hitParams, sp.GetRoughness());
             u_DenoiserSpecRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserSpecRadianceHitDist.xyz, specNormHitDistance, true );
     #endif
         }
@@ -422,7 +426,6 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 
 #if defined(DENOISER_FINAL_MERGE)
 
-#pragma pack_matrix(row_major)
 #include <donut/shaders/binding_helpers.hlsli>
 #include "Shaders/SampleConstantBuffer.h"
 #include "NRD/DenoiserNRD.hlsli"
@@ -531,13 +534,30 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 #endif // #if ENABLE_DEBUG_VIZUALISATIONS
 
     if (hasSurface)
-        u_InputOutput[pixelPos.xy].xyz += (diffRadiance.rgb + specRadiance.rgb);
+        u_InputOutput[pixelPos.xy].xyz += max(0, (diffRadiance.rgb + specRadiance.rgb));
     //else
     //    u_InputOutput[pixelPos.xy].xyz = float3(1,0,0);
 }
 #endif
 
-//
+#if defined(NO_DENOISER_FINAL_MERGE)
+
+#include "Shaders/Bindings/ShaderResourceBindings.hlsli"
+#include "Shaders/PathTracerBridgeDonut.hlsli"
+
+[numthreads(NUM_COMPUTE_THREADS_PER_DIM, NUM_COMPUTE_THREADS_PER_DIM, 1)]
+void main( uint3 dispatchThreadID : SV_DispatchThreadID )
+{
+    uint2 pixelPos = dispatchThreadID.xy;
+    if (any(pixelPos >= uint2(g_Const.ptConsts.imageWidth, g_Const.ptConsts.imageHeight) ))
+        return;
+
+    const Ray cameraRay = Bridge::computeCameraRay( pixelPos );
+    StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+
+    u_OutputColor[pixelPos] = float4(stablePlanes.GetAllRadiance(pixelPos), 1.0);
+}
+#endif // NO_DENOISER_FINAL_MERGE
 
 #if defined(DUMMY_PLACEHOLDER_EFFECT) || defined(__INTELLISENSE__)
 RWBuffer<float>     u_CaptureTarget         : register(u8);

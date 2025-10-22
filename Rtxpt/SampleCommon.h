@@ -8,8 +8,7 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
-#ifndef __SAMPLE_COMMON_H__ // using instead of "#pragma once" due to https://github.com/microsoft/DirectXShaderCompiler/issues/3943
-#define __SAMPLE_COMMON_H__
+#pragma once
 
 #include "Shaders/PathTracer/Config.h"
 
@@ -17,7 +16,10 @@
 #include <filesystem>
 #include <assert.h>
 #include <mutex>
+#include <map>
 
+#define UI_SCOPED_INDENT(indent) RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); )
+#define UI_SCOPED_DISABLE(cond) RAII_SCOPE(ImGui::BeginDisabled(cond); , ImGui::EndDisabled(); )
 
 #define TOKEN_COMBINE1(X,Y) X##Y  // helper macro
 #define TOKEN_COMBINE(X,Y) TOKEN_COMBINE1(X,Y)
@@ -36,6 +38,22 @@ public:
 #define RAII_SCOPE( enter, leave ) GenericScope TOKEN_COMBINE( _generic_raii_scopevar_, __COUNTER__ ) ( [&](){ enter }, [&](){ leave } );
 // Usage example: RAII_SCOPE( ImGui::PushID( keyID );, ImGui::PopID( ); )
 ////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace donut
+{
+    namespace engine
+    {
+        struct LoadedTexture;
+    }
+}
+
+// can be upgraded for special normalmap type (i.e. DXGI_FORMAT_BC5_UNORM) or single channel masks (i.e. DXGI_FORMAT_BC4_UNORM)
+enum class TextureCompressionType
+{
+    Normalmap,
+    GenericSRGB,        // maps to BC7_UNORM_SRGB
+    GenericLinear,      // maps to BC7_UNORM
+};
 
 constexpr static const char * c_EnvMapProcSky           = "==PROCEDURAL_SKY==";
 constexpr static const char * c_EnvMapProcSky_Morning   = "==PROCEDURAL_SKY_MORNING==";
@@ -58,9 +76,10 @@ std::optional<std::filesystem::file_time_type> GetLatestModifiedTimeDirectoryRec
 std::optional<std::filesystem::file_time_type> GetFileModifiedTime(const std::filesystem::path & file);
 
 namespace Json { class Value; }
-bool SaveJsonToFile( const std::filesystem::path & filePath, const Json::Value & rootNode );
-bool LoadJsonFromFile( const std::filesystem::path & filePath, Json::Value & outRootNode );
-bool LoadJsonFromString(const std::string & jsonData, Json::Value& outRootNode);
+bool        SaveJsonToFile( const std::filesystem::path & filePath, const Json::Value & rootNode );
+bool        LoadJsonFromFile( const std::filesystem::path & filePath, Json::Value & outRootNode );
+std::string SaveJsonToString( const Json::Value & rootNode );
+bool        LoadJsonFromString(const std::string & jsonData, Json::Value& outRootNode);
 //inline Json::Value LoadJsonFromFile(const std::filesystem::path& filePath)                      { Json::Value ret; LoadJsonFromFile(filePath, ret); return ret; }
 //inline Json::Value LoadJsonFromString(const std::string& jsonData)                              { Json::Value ret; LoadJsonFromString(jsonData, ret); return ret; }
 
@@ -75,7 +94,13 @@ template<typename ... Args> std::string StringFormat(const std::string& format, 
     std::snprintf(buf.get(), size, format.c_str(), args ...);
     return std::string(buf.get(), buf.get() + size - 1); // We don't want the '\0' inside
 }
+
+// returns std::string::npos if not found
+size_t FindSubStringIgnoreCase(const std::string & text, const std::string & subString);
+
 std::filesystem::path GetLocalPath(std::string subfolder);
+
+bool CompressTextures(std::map<std::shared_ptr<donut::engine::LoadedTexture>, TextureCompressionType> & uncompressedTextures);
 
 void HelpersRegisterActiveWindow(); // call this from process main thread to grab current main window; this is optional and only used for progress bar to appear centered in the main window
 int  ProgressBarStart(const char * windowText);
@@ -102,4 +127,12 @@ private:
 // result, outputText, errorText
 std::tuple<int, std::string, std::string > SystemShell(const std::string & command, bool useCmd = false, bool blockOnExecution = true);
 
-#endif // __SAMPLE_COMMON_H__
+// Temp helper used to reduce FPS to specified target (i.e.) 30 - useful to avoid overheating the office :) but not intended for precise fps control
+class FPSLimiter
+{
+private:
+    std::chrono::high_resolution_clock::time_point m_lastTimestamp = std::chrono::high_resolution_clock::now();
+    double  m_prevError = 0.0;
+public:
+    void    FramerateLimit(int fpsTarget);
+};

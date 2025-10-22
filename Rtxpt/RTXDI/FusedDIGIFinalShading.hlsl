@@ -24,47 +24,42 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
     if (!RAB_IsSurfaceValid(surface))
         return;
 
-    float3 diffuseContributionDI, specularContributionDI, diffuseContributionGI, specularContributionGI;
+    float4 radianceAndSpecAvgDI, radianceAndSpecAvgGI;
     float hitDistanceDI, hitDistanceGI;
 
-    bool hasGI = ReSTIRGIFinalContribution(pixelPos, surface, diffuseContributionGI, specularContributionGI, hitDistanceGI);
-    bool hasDI = ReSTIRDIFinalContribution(reservoirPos, pixelPos, surface, diffuseContributionDI, specularContributionDI, hitDistanceDI);
+    bool hasGI = ReSTIRGIFinalContribution(pixelPos, surface, radianceAndSpecAvgGI, hitDistanceGI);
+    bool hasDI = ReSTIRDIFinalContribution(reservoirPos, pixelPos, surface, radianceAndSpecAvgDI, hitDistanceDI);
 
     if (hasGI || hasDI)
     {
         if (g_Const.ptConsts.denoisingEnabled)
         {
-            StablePlanesContext stablePlanes = StablePlanesContext::make(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, u_SecondarySurfaceRadiance, g_Const.ptConsts);
-
-            uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndexCenter();
-            uint address = stablePlanes.PixelToAddress(pixelPos, dominantStablePlaneIndex);
-
-            float4 denoiserDiffRadianceHitDist;
-            float4 denoiserSpecRadianceHitDist;
-            UnpackTwoFp32ToFp16(u_StablePlanesBuffer[address].DenoiserPackedRadianceHitDist, denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
+            uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+            float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
+            float specHitDist   = u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist;
 
             if (hasDI)
             {
-                denoiserDiffRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserDiffRadianceHitDist, diffuseContributionDI, hitDistanceDI);
-                denoiserSpecRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserSpecRadianceHitDist, specularContributionDI, hitDistanceDI);
+                specHitDist = AccumulateHitT( radiance.a, specHitDist, radianceAndSpecAvgDI.a, hitDistanceDI );
+                radiance   += radianceAndSpecAvgDI;
             }
             if (hasGI)
             {
-                denoiserDiffRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserDiffRadianceHitDist, diffuseContributionGI, hitDistanceGI);
-                denoiserSpecRadianceHitDist = StablePlaneCombineWithHitTCompensation(denoiserSpecRadianceHitDist, specularContributionGI, hitDistanceGI);
+                specHitDist = AccumulateHitT( radiance.a, specHitDist, radianceAndSpecAvgGI.a, hitDistanceGI );
+                radiance   += radianceAndSpecAvgGI;
             }
 
-            u_StablePlanesBuffer[address].DenoiserPackedRadianceHitDist = PackTwoFp32ToFp16(denoiserDiffRadianceHitDist, denoiserSpecRadianceHitDist);
+            u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist = specHitDist;
+            u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16( radiance );
         }
         else
         {
             float3 combined = 0;
             if (hasDI)
-                combined += diffuseContributionDI + specularContributionDI;
+                combined += radianceAndSpecAvgDI.rgb;
             if (hasGI)
-                combined += diffuseContributionGI + specularContributionGI;
+                combined += radianceAndSpecAvgGI.rgb;
             u_OutputColor[pixelPos] += float4(combined, 0);
         }
     }
-
 }	

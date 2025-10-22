@@ -111,6 +111,7 @@ float3 STWNWhiteNoise3D(uint2 screenCoord, uint frameIndex)
     return float3(STSampleUniform(hash), STSampleUniform(hash), STSampleUniform(hash));
 }
 
+#if 0 // leaving in for now, but scheduled to be deleted - blue noise does not play well with DLSS-RR
 // Stochastic texture filtering blue noise sampling functions.
 float STBNBlueNoise1D(uint2 screenCoord, uint frameIndex, Texture2D spatioTemporalBlueNoiseTex)
 {
@@ -149,6 +150,7 @@ float4 SpatioTemporalBlueNoise2DWhiteNoise2D(float2 pixel, uint frameIndex, Text
     u.zw  = STWNWhiteNoise2D(uint2(pixel.xy), frameIndex);
     return u;
 }
+#endif
 
 float3 SpatioTemporalWhiteNoise3D(float2 pixel, uint frameIndex)
 {

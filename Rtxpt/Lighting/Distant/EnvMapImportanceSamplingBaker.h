@@ -56,7 +56,7 @@ public:
 
     void                            CreateRenderPasses();
 
-    void                            PreUpdate(nvrhi::TextureHandle sourceCubemap);
+    void                            PreUpdate(nvrhi::TextureHandle sourceCubemap, bool newSource);
     void                            Update(nvrhi::CommandListHandle commandList, nvrhi::TextureHandle sourceCubemap);
 
     int                             GetImportanceMapResolution();

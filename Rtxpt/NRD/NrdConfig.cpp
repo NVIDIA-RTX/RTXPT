@@ -16,7 +16,7 @@ namespace NrdConfig {
 
         nrd::RelaxSettings settings;
         
-         settings.enableAntiFirefly = true;
+        settings.enableAntiFirefly = true;
 
         settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::OFF;
         // (pixels) - pre-accumulation spatial reuse pass blur radius (0 = disabled, must be used in case of probabilistic sampling) <- we're using probabilistic sampling
@@ -25,7 +25,7 @@ namespace NrdConfig {
 
         settings.atrousIterationNum = 5; // 5 is default; 4 gives better shadows but more boiling, 6 gives less boiling but loss in contact shadows
 
-        // settings.lobeAngleFraction = 0.5f;
+        settings.lobeAngleFraction = 0.7f;
         // settings.roughnessFraction = 0.3;
 
         settings.specularLobeAngleSlack = 0.2f;         // good to hide noisy secondary bounces

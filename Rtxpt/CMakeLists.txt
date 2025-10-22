@@ -21,7 +21,8 @@ set(rtxpt_shaders ${project}_shaders)
 
 if (WIN32)
 set(SHADERMAKE_OPTIONS_DXIL "-D ENABLE_DEBUG_PRINT")
-set(SHADERMAKE_OPTIONS_SPIRV "-D ENABLE_DEBUG_PRINT")
+#set(SHADERMAKE_OPTIONS_SPIRV "-D ENABLE_DEBUG_PRINT") # Disable SPIRV debug printf since it causes DXC to crash as of dxc 1.8.2505
+set(SHADERMAKE_OPTIONS_SPIRV "")
 else()
 # DXIL is irrelevant on Linux
 set(SHADERMAKE_OPTIONS_DXIL "")
@@ -31,6 +32,8 @@ endif()
 
 if(DONUT_WITH_AFTERMATH OR DONUT_EMBED_SHADER_PDBS)
     set(shadermake_options --embedPDB)
+#else()
+#    set(shadermake_options --PDB)
 endif()
 
 #set(shadermake_options --verbose)
@@ -139,6 +142,7 @@ if (RTXPT_D3D_AGILITY_SDK_PATH AND RTXPT_D3D_AGILITY_SDK_VERSION)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/D3D12Core.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
     )
+    target_compile_definitions(${project} PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
 endif()
 
 ##########################################################################

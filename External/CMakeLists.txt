@@ -48,6 +48,26 @@ function(util_generate_shader_config_file OUT_FILE_NAME DIR DEFINES)
 endfunction()
 
 ##########################################################################
+########################### Mathlib ###########################
+##########################################################################
+# Note: Fetching mathlib manually to bypass NRD trying to fetch an invalid
+# tag. This is fixed in latest NRD, so we can remove the workaround after
+# we update NRD again.
+
+if(NOT TARGET MathLib)
+    # MathLib
+    FetchContent_Declare(
+        mathlib
+        GIT_REPOSITORY https://github.com/NVIDIA-RTX/MathLib.git
+        GIT_TAG v7
+        GIT_SHALLOW 1
+    )
+    message("Downloading Mathlib")
+
+    FetchContent_MakeAvailable(mathlib)
+endif()
+
+##########################################################################
 ########################### Nrd ###########################
 ##########################################################################
 
@@ -98,6 +118,7 @@ option(OMM_ENABLE_PRECOMPILED_SHADERS_DXIL "" OFF)
 option(OMM_ENABLE_PRECOMPILED_SHADERS_SPIRV "" OFF)
 option(OMM_ENABLE_BENCHMARK "" OFF)
 option(OMM_ENABLE_TESTS "" OFF)
+option(OMM_BUILD_VIEWER "" OFF)
 
 set(OMM_PROJECT_FOLDER "Omm")
 add_subdirectory("Omm")

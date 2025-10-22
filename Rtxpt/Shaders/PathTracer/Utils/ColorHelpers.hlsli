@@ -16,19 +16,6 @@
 /** This file contains host/device shared color utility functions.
 */
 
-/** Returns a relative luminance of an input linear RGB color in the ITU-R BT.709 color space
-    \param RGBColor linear HDR RGB color in the ITU-R BT.709 color space
-*/
-inline float luminance(float3 rgb)
-{
-    return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
-}
-
-inline float average(float3 rgb)
-{
-    return (rgb.x+rgb.y+rgb.z)/3.0f;
-}
-
 inline float max3(float a, float b, float c)
 {
     return max( max( a, b ), c );

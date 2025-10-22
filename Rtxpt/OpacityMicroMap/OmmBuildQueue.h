@@ -62,14 +62,13 @@ public:
 	};
 
 	OmmBuildQueue(
-		nvrhi::DeviceHandle device, 
+		nvrhi::DeviceHandle& device, 
 		std::shared_ptr<donut::engine::DescriptorTableManager>,
 		std::shared_ptr<donut::engine::ShaderFactory> shaderFactory
 	);
 	~OmmBuildQueue();
 
-	void Initialize(nvrhi::CommandListHandle commandList);
-	void Update(nvrhi::CommandListHandle commandList);
+	void Update(nvrhi::ICommandList& commandList);
 	void CancelPendingBuilds();
 	void QueueBuild(const BuildInput& inputs);
 	uint32_t NumPendingBuilds() const;
@@ -119,19 +118,31 @@ private:
 	{
 		BuildInput input;
 		BuildState state = BuildState::None;
-		nvrhi::EventQueryHandle query;
 
 		Buffers buffers;
 		std::vector<BufferInfo> bufferInfos;
 
 		BuildTask(const BuildInput& input) : input(input) {}
+		void Reset();
 	};
 
-	void RunSetup(nvrhi::CommandListHandle commandList, BuildTask& task);
-	void RunBakeAndBuild(nvrhi::CommandListHandle commandList, BuildTask& task);
-	void Finalize(nvrhi::CommandListHandle commandList, BuildTask& task);
+	void ConsumeOneTask(nvrhi::ICommandList& commandList, BuildState taskState);
+	bool ExecuteTask(nvrhi::ICommandList& commandList, BuildTask& taskState); // Returns whether the task is finished and can be removed from the queue
 
-	std::list< BuildTask > m_pending;
+	void RunSetup(nvrhi::ICommandList& commandList, BuildTask& task);
+	void RunBakeAndBuild(nvrhi::ICommandList& commandList, BuildTask& task);
+	void Finalize(nvrhi::ICommandList& commandList, BuildTask& task);
+	
+	void AllocateOMMArrayDataBuffer(BuildTask& task);
+	void BakeOmmArrayData(nvrhi::ICommandList& commandList, BuildTask& task);
+	std::vector<bvh::OmmAttachment> BuildOMMAttachments(nvrhi::ICommandList& commandList, BuildTask& task);
+	void BuildBLASWithOMM(nvrhi::ICommandList& commandList, BuildTask& task, const std::vector<bvh::OmmAttachment>& ommAttachment);
+
+	bool ReadyToRecordWork();
+	void SubmitAndSubscribeQuery(nvrhi::ICommandList& commandList);
+
+	std::vector<BuildTask> m_pending;
+	nvrhi::EventQueryHandle m_InFlightQuery;
 
 	nvrhi::DeviceHandle m_device;
 	std::shared_ptr<donut::engine::DescriptorTableManager> m_descriptorTable;

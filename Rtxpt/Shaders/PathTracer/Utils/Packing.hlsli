@@ -205,7 +205,7 @@ float2  UnpackTwoFp32ToFp16(uint packed)                                    { fl
 
 uint Fp32ToFp16(float2 v)
 {
-	const uint2 r = f32tof16(v);
+	const uint2 r = f32tof16(clamp(v, -HLF_MAX, HLF_MAX));
 	return (r.y << 16) | (r.x & 0xFFFF);
 }
 

@@ -363,6 +363,7 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
     float alpha;                ///< GGX width parameter.
     float eta;                  ///< Relative index of refraction (etaI / etaT).
     uint activeLobes;           ///< BSDF lobes to include for sampling and evaluation. See LobeType.hlsli.
+    bool isThinSurface;         ///< Hack refraction (but not reflection) eta to 1
 
     bool hasLobe(LobeType lobe) { return (activeLobes & (uint)lobe) != 0; }
 
@@ -380,8 +381,11 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
         const bool isReflection = wo.z > 0.f;
         if ((isReflection && !hasReflection) || (!isReflection && !hasTransmission)) return float3(0,0,0);
 
+        // hack refraction for isThinSurface as the flag means we've entered and left the really thin volume
+        float actualEta = (isThinSurface && !isReflection)?(1.0f):(eta);
+
         // Compute half-vector and make sure it's in the upper hemisphere.
-        float3 h = normalize(wo + wi * (isReflection ? 1.f : eta));
+        float3 h = normalize(wo + wi * (isReflection ? 1.f : actualEta));
         h *= float(sign(h.z));
 
         float wiDotH = dot(wi, h);
@@ -393,7 +397,7 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
 #elif SpecularMaskingFunction == SpecularMaskingFunctionSmithGGXCorrelated
         float G = evalMaskingSmithGGXCorrelated(alpha, wi.z, abs(wo.z));
 #endif
-        float F = evalFresnelDielectric(eta, wiDotH);
+        float F = evalFresnelDielectric(actualEta, wiDotH);
 
         if (isReflection)
         {
@@ -401,8 +405,8 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
         }
         else
         {
-            float sqrtDenom = woDotH + eta * wiDotH;
-            float t = eta * eta * wiDotH * woDotH / (wi.z * sqrtDenom * sqrtDenom);
+            float sqrtDenom = woDotH + actualEta * wiDotH;
+            float t = actualEta * actualEta * wiDotH * woDotH / (wi.z * sqrtDenom * sqrtDenom);
             return transmissionAlbedo * (1.f - F) * D * G * abs(t);
         }
     }
@@ -431,6 +435,7 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
 
             float cosThetaT;
             float F = evalFresnelDielectric(eta, wi.z, cosThetaT);
+            // TODO: adjust F for thin surface hack
 
             bool isReflection = hasReflection;
             if (hasReflection && hasTransmission)
@@ -443,10 +448,18 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
                 return false;
             }
 
+            // hack refraction for isThinSurface as the flag means we've entered and left the really thin volume
+            float actualEta = eta;
+            if (isThinSurface && !isReflection)
+            {
+                actualEta = 1.0;
+                F = evalFresnelDielectric(actualEta, wi.z, cosThetaT);
+            }
+
             pdf = 0.f;
             weight = isReflection ? float3(1,1,1) : transmissionAlbedo;
             if (!(hasReflection && hasTransmission)) weight *= float3( (isReflection ? F : 1.f - F).xxx );
-            wo = isReflection ? float3(-wi.x, -wi.y, wi.z) : float3(-wi.x * eta, -wi.y * eta, -cosThetaT);
+            wo = isReflection ? float3(-wi.x, -wi.y, wi.z) : float3(-wi.x * actualEta, -wi.y * actualEta, -cosThetaT);
             lobe = isReflection ? (uint)LobeType::DeltaReflection : (uint)LobeType::DeltaTransmission;
 
             if (abs(wo.z) < kMinCosTheta || (wo.z > 0.f != isReflection)) return false;
@@ -475,6 +488,7 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
 
         float cosThetaT;
         float F = evalFresnelDielectric(eta, wiDotH, cosThetaT);
+        // TODO: adjust F for thin surface hack
 
         bool isReflection = hasReflection;
         if (hasReflection && hasTransmission)
@@ -486,9 +500,17 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
             return false;
         }
 
+        // hack refraction for isThinSurface as the flag means we've entered and left the really thin volume
+        float actualEta = eta;
+        if (isThinSurface && !isReflection)
+        {
+            actualEta = 1.0;
+            F = evalFresnelDielectric(actualEta, wi.z, cosThetaT);
+        }
+
         wo = isReflection ?
             (2.f * wiDotH * h - wi) :
-            ((eta * wiDotH - cosThetaT) * h - eta * wi);
+            ((actualEta * wiDotH - cosThetaT) * h - actualEta * wi);
 
         if (abs(wo.z) < kMinCosTheta || (wo.z > 0.f != isReflection)) return false;
 
@@ -515,14 +537,17 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
         const bool hasTransmission = hasLobe(LobeType::SpecularTransmission);
         if ((isReflection && !hasReflection) || (!isReflection && !hasTransmission)) return 0.f;
 
+        // hack refraction for isThinSurface as the flag means we've entered and left the really thin volume
+        float actualEta = (isThinSurface && !isReflection)?(1.0f):(eta);
+
         // Compute half-vector and make sure it's in the upper hemisphere.
-        float3 h = normalize(wo + wi * (isReflection ? 1.f : eta));
+        float3 h = normalize(wo + wi * (isReflection ? 1.f : actualEta));
         h *= float(sign(h.z));
 
         float wiDotH = dot(wi, h);
         float woDotH = dot(wo, h);
 
-        float F = evalFresnelDielectric(eta, wiDotH);
+        float F = evalFresnelDielectric(actualEta, wiDotH);
 
 #if GGXSampling == GGXSamplingVNDF
         float pdf = evalPdfGGX_VNDF(alpha, wi, h);
@@ -542,7 +567,7 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
         {   // Jacobian of the refraction operator.
             if (woDotH > 0.f) return 0.f;
             pdf *= wiDotH * 4.0f;
-            float sqrtDenom = woDotH + eta * wiDotH;
+            float sqrtDenom = woDotH + actualEta * wiDotH;
             float denom = sqrtDenom * sqrtDenom;
             pdf *= abs(woDotH) / denom;
         }
@@ -674,9 +699,11 @@ struct FalcorBSDF // : IBxDF
         // This leads to incorrect behaviour if only the specular reflection or transmission lobe is selected.
         // Things work fine as long as both or none are selected.
 
+        bool isThinSurface = mtl.isThinSurface();
+
         // Use square root if we can assume the shaded object is intersected twice.
         float3 dataTransmission = data.Transmission();
-        float3 transmissionAlbedo = mtl.isThinSurface() ? dataTransmission : sqrt(dataTransmission);
+        float3 transmissionAlbedo = isThinSurface ? dataTransmission : sqrt(dataTransmission);
 
         float dataRoughness = data.Roughness();
 
@@ -711,6 +738,7 @@ struct FalcorBSDF // : IBxDF
         specularReflectionTransmission.alpha = dataEta == 1.f ? 0.f : alpha;
         specularReflectionTransmission.eta = dataEta;
         specularReflectionTransmission.activeLobes = activeLobes;
+        specularReflectionTransmission.isThinSurface = isThinSurface;
 
         diffTrans = data.DiffuseTransmission();
         specTrans = data.SpecularTransmission();
@@ -721,8 +749,8 @@ struct FalcorBSDF // : IBxDF
         float dielectricBSDF = (1.f - dataMetallic) * (1.f - specTrans);
         float specularBSDF = specTrans;
 
-        float diffuseWeight = luminance(data.Diffuse());
-        float specularWeight = luminance(evalFresnelSchlick(dataSpecular, 1.f, dot(V, N)));
+        float diffuseWeight = Luminance(data.Diffuse());
+        float specularWeight = Luminance(evalFresnelSchlick(dataSpecular, 1.f, dot(V, N)));
 
         pDiffuseReflection = (activeLobes & (uint)LobeType::DiffuseReflection) ? diffuseWeight * dielectricBSDF * (1.f - diffTrans) : 0.f;
         pDiffuseTransmission = (activeLobes & (uint)LobeType::DiffuseTransmission) ? diffuseWeight * dielectricBSDF * diffTrans : 0.f;
@@ -789,26 +817,16 @@ struct FalcorBSDF // : IBxDF
         return lobes;
     }
 
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-    void eval(const float3 wi, const float3 wo, out float3 diffuse, out float3 specular)
+    float4 eval(const float3 wi, const float3 wo)   // .w is average(specular)
     {
-        diffuse = 0.f; specular = 0.f;
+        float3 diffuse = 0.f; float3 specular = 0.f;
         if (pDiffuseReflection > 0.f) diffuse += (1.f - specTrans) * (1.f - diffTrans) * diffuseReflection.eval(wi, wo);    // <- this isn't correct; diffuse has a specular component that should be considered
         if (pDiffuseTransmission > 0.f) diffuse += (1.f - specTrans) * diffTrans * diffuseTransmission.eval(wi, wo);
         if (pSpecularReflection > 0.f) specular += (1.f - specTrans) * specularReflection.eval(wi, wo);
-        if (pSpecularReflectionTransmission > 0.f) specular += specTrans * (specularReflectionTransmission.eval(wi, wo));
+        if (pSpecularReflectionTransmission > 0.f) specular += specTrans * (specularReflectionTransmission.eval(wi, wo));   // <- do we want to consider transmission as specular? this depends entirely on denoiser - should ask RR folks
+
+        return float4(diffuse+specular, Average(specular)); // use average instead of sum to avoid hitting fp16 ceiling early
     }
-#else
-    float3 eval(const float3 wi, const float3 wo)
-    {
-        float3 result = 0.f;
-        if (pDiffuseReflection > 0.f) result += (1.f - specTrans) * (1.f - diffTrans) * diffuseReflection.eval(wi, wo);    // <- this isn't correct; diffuse has a specular component that should be considered
-        if (pDiffuseTransmission > 0.f) result += (1.f - specTrans) * diffTrans * diffuseTransmission.eval(wi, wo);
-        if (pSpecularReflection > 0.f) result += (1.f - specTrans) * specularReflection.eval(wi, wo);
-        if (pSpecularReflectionTransmission > 0.f) result += specTrans * (specularReflectionTransmission.eval(wi, wo));
-        return result;
-    }
-#endif
 
     bool sample(const float3 wi, out float3 wo, out float pdf, out float3 weight, out uint lobe, out float lobeP, 
 #if !RecycleSelectSamples
@@ -906,7 +924,7 @@ struct FalcorBSDF // : IBxDF
         return pdf;
     }
 
-    void evalDeltaLobes(const float3 wi, inout DeltaLobe deltaLobes[cMaxDeltaLobes], inout int deltaLobeCount, inout float nonDeltaPart)  // wi is in local space
+    void evalDeltaLobes(const float3 wi, out DeltaLobe deltaLobes[cMaxDeltaLobes], out int deltaLobeCount, out float nonDeltaPart)  // wi is in local space
     {
         deltaLobeCount = 2;             // currently - will be 1 more if we add clear coat :)
         for (int i = 0; i < deltaLobeCount; i++)
@@ -962,9 +980,18 @@ struct FalcorBSDF // : IBxDF
 
                 if (hasTransmission)
                 {
+                    // hack refraction for isThinSurface as the flag means we've entered and left the really thin volume
+                    // not sure probability is valid - I think it is
+                    float actualEta = specularReflectionTransmission.eta;
+                    if (specularReflectionTransmission.isThinSurface)
+                    {
+                        actualEta = 1.0;
+                        F = evalFresnelDielectric(actualEta, wi.z, cosThetaT);
+                    }
+
                     float localProbability = pSpecularReflectionTransmission * (1.0-F);
                     float3 weight = specularReflectionTransmission.transmissionAlbedo * localProbability;
-                    deltaTransmission.dir  = float3(-wi.x * specularReflectionTransmission.eta, -wi.y * specularReflectionTransmission.eta, -cosThetaT);
+                    deltaTransmission.dir  = float3(-wi.x * actualEta, -wi.y * actualEta, -cosThetaT);
                     deltaTransmission.thp = weight;
                     deltaTransmission.probability = localProbability;
                 }

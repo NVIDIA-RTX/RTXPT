@@ -50,32 +50,14 @@ struct StandardBSDF // : IBSDF
         return d;
     }
 
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-    void eval(const ShadingData shadingData, const float3 wo, out float3 diffuse, out float3 specular)
+    float4 eval(const ShadingData shadingData, const float3 wo)
     {
         float3 wiLocal = shadingData.toLocal(shadingData.V);
         float3 woLocal = shadingData.toLocal(wo);
 
         FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
 
-        bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/, diffuse, specular);
-    }
-#endif
-
-    float3 eval(const ShadingData shadingData, const float3 wo)
-    {
-        float3 wiLocal = shadingData.toLocal(shadingData.V);
-        float3 woLocal = shadingData.toLocal(wo);
-
-        FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
-
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-        float3 diffuse, specular;
-        bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/, diffuse, specular);
-        return diffuse+specular;
-#else
-        return bsdf.eval(wiLocal, woLocal, sampleGenerator);
-#endif
+        return bsdf.eval(wiLocal, woLocal);
     }
 
     bool sample(const ShadingData shadingData, const float4 preGeneratedSamples, out BSDFSample result, bool useImportanceSampling)
@@ -179,13 +161,7 @@ struct StandardBSDF // : IBSDF
         FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
 
         result.wo = shadingData.fromLocal(woLocal);
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-        float3 diffuse, specular;
-        bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/, diffuse, specular);
-        result.weight = (diffuse+specular) / result.pdf;
-#else
-        result.weight = bsdf.eval(wiLocal, woLocal/*, sampleGenerator*/) / result.pdf;
-#endif
+        result.weight = (bsdf.eval(wiLocal, woLocal).rgb) / result.pdf;
         result.lobe = (uint)(woLocal.z > 0.f ? (uint)LobeType::DiffuseReflection : (uint)LobeType::DiffuseTransmission);
 
         return true;
@@ -215,7 +191,7 @@ struct StandardBSDF // : IBSDF
         }
     }
 
-    void evalDeltaLobes(const ShadingData shadingData, inout DeltaLobe deltaLobes[cMaxDeltaLobes], inout int deltaLobeCount, inout float nonDeltaPart)
+    void evalDeltaLobes(const ShadingData shadingData, out DeltaLobe deltaLobes[cMaxDeltaLobes], out int deltaLobeCount, out float nonDeltaPart)
     {
         float3 wiLocal = shadingData.toLocal(shadingData.V);
         

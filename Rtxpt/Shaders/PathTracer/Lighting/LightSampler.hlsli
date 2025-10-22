@@ -18,6 +18,7 @@
 #include "LightingTypes.h"
 #include "../Utils/Utils.hlsli"
 #include "LightingConfig.h"
+#include "PolymorphicLightPTConfig.h"
 #include "PolymorphicLight.hlsli"
 #include "../Utils/Sampling/Sampling.hlsli"
 #include "LightingAlgorithms.hlsli"
@@ -29,59 +30,75 @@
 // Note: make sure to check IsEmpty() for case where there are no lights. Sampling when 'IsEmpty( ) == true' will result in undefined behaviour (NaNs and etc.)
 struct LightSampler
 {
-    //ConstantBuffer<LightingControlData>         ControlConstants;           ///< all the required constants
     StructuredBuffer<LightingControlData>       ControlBuffer;              ///< control buffer containts constants like numbers of lights and importance sampling stuff; could be converted to ConstantBuffer
     StructuredBuffer<PolymorphicLightInfo>      LightsBuffer;               ///< all scene lights, encoded; NOTE: some can be unused light slots with uninitialized/old data, do not sample directly!
     StructuredBuffer<PolymorphicLightInfoEx>    LightsExBuffer;
     Buffer<uint>                                ProxyCounters;              ///< per light sampling proxy counters
     Buffer<uint>                                ProxyIndices;               ///< indices for proxies pointing to LightsBuffer, sorted 
-    RWTexture2D<uint2>                          FeedbackReservoirBuffer;    ///< reservoir storing the 'the most useful' light for each pixel, used for temporal feedback and improving next frame importance sampling.
-    Texture3D<uint>                             NarrowSamplingBuffer;
+    LOCAL_SAMPLING_BUFFER_TYPE_SRV              LocalSamplingBuffer;
     Texture2D<uint>                             EnvLookupMap;
+    RWTexture2D<float>                          FeedbackTotalWeight;
+    RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>  FeedbackCandidates;
 
-    lpuint2                                     PixelPos;                   ///< screen pixel being lit (relevant for feedback loop and narrow sampling)
-    lpuint2                                     NarrowSamplingTilePos;      ///< tile coord, jitter included
-    bool                                        IsDebugPixel;               ///< for visual debugging
+    lpuint2                                     PixelPos;                   ///< screen pixel being lit (relevant for feedback loop and local sampling)
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+    lpuint2                                     LocalSamplingTilePos;       ///< tile coord, jitter included
+#else
+    uint                                        LocalSamplingTilePos;       ///< tile coord, jitter included, in 2D
+#endif
     bool                                        IsIndirect;
 
+    static bool IsIndirectHeuristic( StructuredBuffer<LightingControlData> controlBuffer, float rayConeWidth, float totalPathLength )
+    {
+        float rayConeWidthOverTotalPathTravel = rayConeWidth / totalPathLength;
+        return rayConeWidthOverTotalPathTravel >= controlBuffer[0].DirectVsIndirectThreshold;
+    }
+
     static LightSampler make(
-          StructuredBuffer<LightingControlData>     controlBuffer
+          StructuredBuffer<LightingControlData>         controlBuffer
           // ConstantBuffer<LightingControlData>       constants            // there seems to be a compiler error when using this approach
-        , StructuredBuffer<PolymorphicLightInfo>    lightsBuffer
-        , StructuredBuffer<PolymorphicLightInfoEx>  lightsExBuffer
-        , Buffer<uint>                              proxyCounters
-        , Buffer<uint>                              proxyIndices
-        , Texture3D<uint>                           narrowSamplingBuffer
-        , RWTexture2D<uint2>                        feedbackReservoirBuffer
-        , Texture2D<uint>                           envLookupMap
-        , uint2                                     pixelPos
-        , float                                     rayConeWidthOverTotalPathTravel
-        , bool                                      isDebugPixel
-        ) 
+        , StructuredBuffer<PolymorphicLightInfo>        lightsBuffer
+        , StructuredBuffer<PolymorphicLightInfoEx>      lightsExBuffer
+        , Buffer<uint>                                  proxyCounters
+        , Buffer<uint>                                  proxyIndices
+        , LOCAL_SAMPLING_BUFFER_TYPE_SRV                localSamplingBuffer
+        , Texture2D<uint>                               envLookupMap
+        , RWTexture2D<float>                            feedbackTotalWeight
+        , RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>    feedbackCandidates
+        , uint2                                         pixelPos
+        , bool                                          isIndirect ) 
     {
         LightSampler lightSampler;
 
-        lightSampler.IsIndirect                 = rayConeWidthOverTotalPathTravel >= controlBuffer[0].DirectVsIndirectThreshold;
+        lightSampler.IsIndirect             = isIndirect;
+#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES  // when anti-lag is enabled, we only care about direct samples
+        lightSampler.IsIndirect             = false;
+#endif
 
-        lightSampler.ControlBuffer              = controlBuffer;
-        lightSampler.LightsBuffer               = lightsBuffer;
-        lightSampler.LightsExBuffer             = lightsExBuffer;
-        lightSampler.ProxyCounters              = proxyCounters;
-        lightSampler.ProxyIndices               = proxyIndices;
-        lightSampler.FeedbackReservoirBuffer    = feedbackReservoirBuffer;
-        lightSampler.NarrowSamplingBuffer       = narrowSamplingBuffer;
-        lightSampler.EnvLookupMap               = envLookupMap;
-        lightSampler.PixelPos                   = (lpuint2)pixelPos;
-        lightSampler.IsDebugPixel               = isDebugPixel;
+        lightSampler.ControlBuffer          = controlBuffer;
+        lightSampler.LightsBuffer           = lightsBuffer;
+        lightSampler.LightsExBuffer         = lightsExBuffer;
+        lightSampler.ProxyCounters          = proxyCounters;
+        lightSampler.ProxyIndices           = proxyIndices;
+        lightSampler.LocalSamplingBuffer    = localSamplingBuffer;
+        lightSampler.EnvLookupMap           = envLookupMap;
+        lightSampler.FeedbackTotalWeight    = feedbackTotalWeight;
+        lightSampler.FeedbackCandidates     = feedbackCandidates;
+        lightSampler.PixelPos               = (lpuint2)pixelPos;
 
-        lightSampler.NarrowSamplingTilePos      = (lpuint2)((pixelPos+controlBuffer[0].LocalSamplingTileJitter) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx);
+        uint2 jitteredTilePos = (pixelPos+controlBuffer[0].LocalSamplingTileJitter) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx;
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+        lightSampler.LocalSamplingTilePos   = (lpuint2)jitteredTilePos;
+#else
+        lightSampler.LocalSamplingTilePos   = LLSB_ComputeBaseAddress(jitteredTilePos, controlBuffer[0].LocalSamplingResolution);
+#endif
 
-        // storage for indirect sits in the (expanded) lower half
-        if ( lightSampler.IsIndirect )
-        {
-            lightSampler.PixelPos.y                 += (lpuint)controlBuffer[0].FeedbackBufferHeight;
-            lightSampler.NarrowSamplingTilePos.y    += (lpuint)controlBuffer[0].TileBufferHeight;
-        }
+        // // storage for indirect sits in the (expanded) lower half
+        // if ( lightSampler.IsIndirect )
+        // {
+        //     lightSampler.PixelPos.y                += (lpuint)controlBuffer[0].FeedbackBufferHeight;
+        //     lightSampler.LocalSamplingTilePos.y    += (lpuint)controlBuffer[0].TileBufferHeight;
+        // }
 
         return lightSampler;
     }
@@ -95,6 +112,11 @@ struct LightSampler
     {
         return ControlBuffer[0].TemporalFeedbackRequired;
     }
+
+    LightFeedbackReservoir GetTemporalFeedbackReservoir()
+    {
+        return LightFeedbackReservoir::make( PixelPos, FeedbackTotalWeight, FeedbackCandidates );
+    }                                                  
     
     // returned value is in [0, ControlBuffer[0].TotalLightCount) range used to read from LightsBuffer
     uint SampleGlobal(const float rnd, out float pdf)
@@ -109,20 +131,24 @@ struct LightSampler
         return lightIndex;
     }
 
-    void ReadNarrow(uint narrowIndex, out uint lightIndex, out uint proxyCount)
+    void ReadLocal(uint localIndex, out uint lightIndex, out uint proxyCount)
     {
-        UnpackMiniListLightAndCount( NarrowSamplingBuffer[ uint3(NarrowSamplingTilePos, narrowIndex) ], lightIndex, proxyCount );
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+        UnpackMiniListLightAndCount( LocalSamplingBuffer[ uint3(LocalSamplingTilePos, localIndex) ], lightIndex, proxyCount );
+#else
+        UnpackMiniListLightAndCount( LocalSamplingBuffer[ LocalSamplingTilePos + localIndex ], lightIndex, proxyCount );
+#endif
     }
 
-    uint SampleNarrow(const float rnd, out float pdf)
+    uint SampleLocal(const float rnd, out float pdf)
     {
-        uint narrowProxyCount = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
-        uint indexInIndex = clamp( uint(rnd * narrowProxyCount), 0, narrowProxyCount-1 );    // when rnd guaranteed to be [0, 1), clamp is unnecessary
+        uint localProxyCount = RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
+        uint indexInIndex = clamp( uint(rnd * localProxyCount), 0, localProxyCount-1 );    // when rnd guaranteed to be [0, 1), clamp is unnecessary
         
         uint lightIndex; uint proxyCount;
-        ReadNarrow(indexInIndex, lightIndex, proxyCount);
+        ReadLocal(indexInIndex, lightIndex, proxyCount);
 
-        pdf = float(proxyCount) / float(narrowProxyCount);
+        pdf = float(proxyCount) / float(localProxyCount);
 
         // note: app must ensure no bad lights are in the sampling buffer - out of range indices will cause a TDR
         // lightIndex = clamp( lightIndex, 0, ControlBuffer[0].TotalLightCount-1 );
@@ -136,42 +162,44 @@ struct LightSampler
         return proxyCountPerLight / float(float(ControlBuffer[0].SamplingProxyCount));
     }
 
-    float SampleNarrowPDF(uint lightIndex)
+    float SampleLocalPDF(uint lightIndex)
     {
-        const uint narrowProxyCount = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
+        const uint localProxyCount = RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
 
-        uint packedValue = NarrowLightBinarySearch( NarrowSamplingBuffer, NarrowSamplingTilePos, narrowProxyCount, lightIndex );
+        uint packedValue = LocalLightBinarySearch( LocalSamplingBuffer, LocalSamplingTilePos, lightIndex, localProxyCount, RTXPT_LIGHTING_LOCAL_PROXY_BINARY_SEARCH_STEPS );
 
         #if 0 // validation
-        for ( int narrowIndex = 0; narrowIndex < narrowProxyCount; narrowIndex++ )
+        for ( int localIndex = 0; localIndex < localProxyCount; localIndex++ )
         {
             uint lightIndexR; uint proxyCountR;
-            ReadNarrow(narrowIndex, lightIndexR, proxyCountR);
+            ReadLocal(localIndex, lightIndexR, proxyCountR);
             if( lightIndex == lightIndexR )
             {
                 if( packedValue == RTXPT_INVALID_LIGHT_INDEX )
                     DebugPrint("Sort validation failed (not found in binary search but exists)");
                 else
-                    if( (packedValue & 0x00FFFFFF) != lightIndexR )
+                    if( UnpackMiniListLight(packedValue) != lightIndexR )
                     {
                         DebugPrint("Sort validation failed (different found)");
-                        // return float(proxyCountR) / float(narrowProxyCount);
+                        // return float(proxyCountR) / float(localProxyCount);
                         break;
                     }
             }
         }
         #endif
-
+        
         if ( packedValue == RTXPT_INVALID_LIGHT_INDEX )
             return 0.0f;
 
         uint lightIndexR; uint proxyCountR;
         UnpackMiniListLightAndCount(packedValue, lightIndexR, proxyCountR);
-        return float(proxyCountR) / float(narrowProxyCount);
+        return float(proxyCountR) / float(localProxyCount);
     }
 
-    void InsertFeedbackFromNEE(inout LightFeedbackReservoir feedbackReservoir, const uint lightIndex, const float pixelRadianceContributionAvg, const float randomNumber)
+    void InsertFeedbackFromNEE(const uint lightIndex, const float pixelRadianceContributionAvg, const float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH])
     {
+        LightFeedbackReservoir feedbackReservoir = GetTemporalFeedbackReservoir();
+
         float feedbackWeight = pixelRadianceContributionAvg;
                 
         // could be user option - weight power; add slider, 0.5-2.0?
@@ -180,12 +208,16 @@ struct LightSampler
         // should be user option - give some positive bias [0, 1] for globally improbable lights; this (slightly) helps smaller screen regions feature more prominently in Local sampler (and Global but there it evens out)
         feedbackWeight /= pow( SampleGlobalPDF(lightIndex), 0.65 );
 
-        feedbackReservoir.Add( randomNumber, lightIndex, feedbackWeight );
+        if (IsIndirect)
+            feedbackWeight *= RTXPT_LIGHTING_INDIRECT_FEEDBACK_RATIO;
+
+        feedbackReservoir.Add( randomValues, lightIndex, feedbackWeight, IsIndirect );
+        feedbackReservoir.CommitToStorage();
     }
 
     void InsertFeedbackFromBSDF(const uint lightIndex, const float pixelRadianceContributionAvgWithoutBsdfMISWeight, const float bsdfMISWeight, const float randomNumber)
     {
-#if RTXPT_LIGHTING_NEEAT_ENABLE_BSDF_FEEDBACK
+#if RTXPT_LIGHTING_ENABLE_BSDF_FEEDBACK
 #if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES  // <- reconsider this
         if( !IsTemporalFeedbackRequired() )
             return;
@@ -208,26 +240,40 @@ struct LightSampler
 #endif
     }
 
-    float ComputeInternalMIS(const float3 surfacePosW, const PathTracer::PathLightSample lightSample, bool isNarrow, const uint narrowSamples, const uint totalSamples, float bsdfPdf)
+    float ComputeInternalMIS(const float3 surfacePosW, const PathTracer::PathLightSample lightSample, bool isLocal, const uint localSamples, const uint totalSamples, float bsdfPdf)
     {
         float thisCount;
         float otherCount;
         float thisPdf       = lightSample.SelectionPdf;
         float otherPdf;
-        [branch]if ( isNarrow )
+        [branch]if ( isLocal )
         {
-            thisCount   = narrowSamples;
-            otherCount  = totalSamples - narrowSamples;
+            thisCount   = localSamples;
+            otherCount  = totalSamples - localSamples;
             otherPdf    = SampleGlobalPDF(lightSample.LightIndex);
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF)
+            otherPdf = RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF;
+#endif
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF)
+            if (thisPdf>0) thisPdf = RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF;
+#endif
         }
         else
         {
-            thisCount   = totalSamples - narrowSamples;
-            otherCount  = narrowSamples;
-            [branch]if( narrowSamples != 0 )
-                otherPdf    = SampleNarrowPDF(lightSample.LightIndex);
+            thisCount   = totalSamples - localSamples;
+            otherCount  = localSamples;
+            [branch]if( localSamples != 0 )
+            {
+                otherPdf    = SampleLocalPDF(lightSample.LightIndex);
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF)
+                if (otherPdf>0) otherPdf = RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF;
+#endif
+            }
             else
                 otherPdf    = 0;
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF)
+            thisPdf = RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF;
+#endif
         }
 
         float solidAnglePdf = lightSample.SolidAnglePdf;    //< both 'this' and 'other' are for the same light with same viewer and sample positions, so they will have same SolidAnglePdf
@@ -236,8 +282,8 @@ struct LightSampler
 #if defined(RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF)
         bsdfPdf = RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF;
 #endif
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_SOLID_ANGLE_PDF)
-        solidAnglePdf = RTXPT_NEEAT_MIS_OVERRIDE_SOLID_ANGLE_PDF;
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF)
+        solidAnglePdf = RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF;
 #endif
 
         solidAnglePdf *= LightSamplingMISBoost();           //< this could also be done by dividing bsdfPdf by LightSamplingMISBoost()
@@ -270,26 +316,33 @@ struct LightSampler
         return thisMIS / thisCount; // the "/ thisCount" isn't technically part of MIS!! TODO: figure out better naming or pull out
     }
 
-    float ComputeBSDFMIS(const uint lightIndex, lpfloat bsdfPdf, float solidAnglePdf, const uint narrowSamples, const uint totalSamples)
+    float ComputeBSDFMIS(const uint lightIndex, lpfloat bsdfPdf, float solidAnglePdf, const uint localSamples, const uint totalSamples)
     {
-        const uint globalSamples = totalSamples - narrowSamples;
+        const uint globalSamples = totalSamples - localSamples;
  
         float globPdf = SampleGlobalPDF(lightIndex);
-        float narrPdf = SampleNarrowPDF(lightIndex);
+        float narrPdf = SampleLocalPDF(lightIndex);
+
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF)
+        globPdf = RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF;
+#endif
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF)
+        if (narrPdf>0) narrPdf = RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF;
+#endif
 
 #if defined(RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF)
         bsdfPdf = RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF;
 #endif
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_SOLID_ANGLE_PDF)
-        solidAnglePdf = RTXPT_NEEAT_MIS_OVERRIDE_SOLID_ANGLE_PDF;
+#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF)
+        solidAnglePdf = RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF;
 #endif
 
         solidAnglePdf *= LightSamplingMISBoost();           //< this could also be done by dividing bsdfPdf by LightSamplingMISBoost()
 
-        return EvalMIS(RTXPT_NEE_MIS_HEURISTIC, 1, bsdfPdf, globalSamples, globPdf*solidAnglePdf, narrowSamples, narrPdf*solidAnglePdf); // balance seems a lot less noisy than power
+        return EvalMIS(RTXPT_NEE_MIS_HEURISTIC, 1, bsdfPdf, globalSamples, globPdf*solidAnglePdf, localSamples, narrPdf*solidAnglePdf); // balance seems a lot less noisy than power
     }
 
-    float ComputeBSDFMISForEmissiveTriangle(const uint emissiveTriangleLightIndex, lpfloat bsdfPdf, const float3 viewerPosition, const float3 lightSamplePosition, const uint narrowSamples, const uint totalSamples)
+    float ComputeBSDFMISForEmissiveTriangle(const uint emissiveTriangleLightIndex, lpfloat bsdfPdf, const float3 viewerPosition, const float3 lightSamplePosition, const uint localSamples, const uint totalSamples)
     {
         if( bsdfPdf == 0 )  //< 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1
             return 1;
@@ -298,10 +351,10 @@ struct LightSampler
         TriangleLight triangleLight = TriangleLight::Create(lightInfo);
 
         float solidAnglePdf = triangleLight.CalcSolidAnglePdfForMIS(viewerPosition, lightSamplePosition);
-        return ComputeBSDFMIS(emissiveTriangleLightIndex, bsdfPdf, solidAnglePdf, narrowSamples, totalSamples);
+        return ComputeBSDFMIS(emissiveTriangleLightIndex, bsdfPdf, solidAnglePdf, localSamples, totalSamples);
     }
 
-    float ComputeBSDFMISForEnvironmentQuad(const uint environmentQuadLightIndex, lpfloat bsdfPdf, const uint narrowSamples, const uint totalSamples)
+    float ComputeBSDFMISForEnvironmentQuad(const uint environmentQuadLightIndex, lpfloat bsdfPdf, const uint localSamples, const uint totalSamples)
     {
 #if POLYLIGHT_QT_ENV_ENABLE
         if( bsdfPdf == 0 )  //< 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1
@@ -310,10 +363,36 @@ struct LightSampler
         PolymorphicLightInfoFull lightInfo = LoadLight(environmentQuadLightIndex);
         EnvironmentQuadLight eqLight = EnvironmentQuadLight::Create(lightInfo);
         float solidAnglePdf = eqLight.CalcSolidAnglePdfForMIS(0, 0);
-        return ComputeBSDFMIS(environmentQuadLightIndex, bsdfPdf, solidAnglePdf, narrowSamples, totalSamples);
+        return ComputeBSDFMIS(environmentQuadLightIndex, bsdfPdf, solidAnglePdf, localSamples, totalSamples);
 #else
         return 1.0;
 #endif
+    }
+
+    void ComputeAnalyticLightProxyContributionWithMIS(inout lpfloat3 surfaceEmission, const uint analyticLightIndex, lpfloat bsdfPdf, const float3 previousVertex, const float3 rayDir, const uint localSamples, const uint totalSamples)
+    {
+        PolymorphicLightInfoFull lightInfo = LoadLight(analyticLightIndex);
+
+        // only sphere lights supported here at the moment
+        if( PolymorphicLight::DecodeType(lightInfo) != PolymorphicLightType::kSphere )
+            return;
+
+        SphereLight sphereLight = SphereLight::Create(lightInfo);
+
+        float3 radiance;
+        float3 lightSamplePosition;
+
+        if( sphereLight.Eval(previousVertex, rayDir, radiance, lightSamplePosition) )
+        {
+            float mis = 1.0;
+            if (bsdfPdf != 0) // <0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1
+            {
+                float solidAnglePdf = sphereLight.CalcSolidAnglePdfForMIS(previousVertex, lightSamplePosition);
+                float mis = ComputeBSDFMIS(analyticLightIndex, bsdfPdf, solidAnglePdf, localSamples, totalSamples);
+            }
+
+            surfaceEmission += lpfloat3(radiance * mis);
+        }
     }
 
     // We can boost the MIS weights for the lighting at the expense of BSDF samples because NEE-AT is shadow-aware and material-aware; some boost is always beneficial but the amount depends on the scene
@@ -331,23 +410,12 @@ struct LightSampler
         return PolymorphicLightInfoFull::make(infoBase, infoExtended);
     }
 
-    LightFeedbackReservoir LoadFeedback()
-    {
-        return LightFeedbackReservoir::Unpack8Byte(FeedbackReservoirBuffer[PixelPos]);
-    }
-
-    void StoreFeedback(const LightFeedbackReservoir feedback, bool skipIfEmpty)
-    {
-        // skipIfEmpty not implemented
-        FeedbackReservoirBuffer[PixelPos] = feedback.Pack8Byte();
-    }
-
-    uint ComputeNarrowSampleCount(const uint totalSamples)
+    uint ComputeLocalSampleCount(const uint totalSamples)
     {
 #if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-        return ::ComputeNarrowSampleCount(ControlBuffer[0].NarrowFeedbackUseRatio, totalSamples);
+        return ::ComputeLocalSampleCount(ControlBuffer[0].LocalFeedbackUseRatio, totalSamples);
 #else
-        return IsIndirect?(0):(::ComputeNarrowSampleCount(ControlBuffer[0].NarrowFeedbackUseRatio, totalSamples));
+        return IsIndirect?(0):(::ComputeLocalSampleCount(ControlBuffer[0].LocalFeedbackUseRatio, totalSamples));
 #endif
     }
 

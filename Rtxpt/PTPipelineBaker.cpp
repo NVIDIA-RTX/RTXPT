@@ -234,6 +234,7 @@ void PTPipelineVariant::UpdateFinalize()
         pipelineDesc.globalBindingLayouts = { baker->GetBindingLayout(), baker->GetBindlessLayout() };
         pipelineDesc.shaders.push_back({ "", m_shaderLibrary->getShader("RayGen", nvrhi::ShaderType::RayGeneration), nullptr });
         pipelineDesc.shaders.push_back({ "", m_shaderLibrary->getShader("Miss", nvrhi::ShaderType::Miss), nullptr });
+        pipelineDesc.allowOpacityMicromaps = true;
 
         for (auto& [_, hitGroupInfo] : baker->GetUniqueHitGroups())
         {

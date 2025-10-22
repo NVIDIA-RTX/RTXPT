@@ -35,15 +35,6 @@
     #error please specify texture LOD sampler
 #endif
 
-/** Types of samplable lights.
-*/
-enum class PathLightType : uint32_t // was PathTracer::LightType
-{
-    EnvMap      = 0,
-    Emissive    = 1,
-    Analytic    = 2
-};
-
 namespace PathTracer
 {
     /** Holds path tracer shader working data for state, settings, debugging, denoising and etc. Everything that is shared across (DispatchRays/Compute) draw call, between all pixels, 
@@ -51,12 +42,13 @@ namespace PathTracer
     */
     struct WorkingContext
     {
-        PathTracerConstants     ptConsts;
-        DebugContext            debug;
-        StablePlanesContext     stablePlanes;
-        uint2                   pixelPos;
-        uint                    padding0;
-        uint                    padding1;
+        RWTexture2D<float4>     OutputColor;
+        PathTracerConstants     PtConsts;
+        DebugContext            Debug;
+        StablePlanesContext     StablePlanes;
+        uint                    PixelID;
+
+        uint2                   GetPixelPos() { return PathIDToPixel(PixelID); }
     };
 
     /** All surface data returned by the Bridge::loadSurface
@@ -67,27 +59,19 @@ namespace PathTracer
         ActiveBSDF      bsdf;
         float3          prevPosW;
         lpfloat         interiorIoR;    // a.k.a. material IoR
-        uint            neeLightIndex;  // 0xFFFFFFFF if none
-        static SurfaceData make( /*VertexData vd, */ShadingData shadingData, ActiveBSDF bsdf, float3 prevPosW, lpfloat interiorIoR, uint neeLightIndex )
+        uint            neeTriangleLightIndex;  // 0xFFFFFFFF if none
+        uint            neeAnalyticLightIndex;  // 0xFFFFFFFF if none
+        static SurfaceData make( /*VertexData vd, */ShadingData shadingData, ActiveBSDF bsdf, float3 prevPosW, lpfloat interiorIoR, uint neeTriangleLightIndex, uint neeAnalyticLightIndex )
         { 
             SurfaceData ret; 
-            ret.shadingData     = shadingData; 
-            ret.bsdf            = bsdf; 
-            ret.prevPosW        = prevPosW; 
-            ret.interiorIoR     = interiorIoR; 
-            ret.neeLightIndex   = neeLightIndex;
+            ret.shadingData             = shadingData; 
+            ret.bsdf                    = bsdf; 
+            ret.prevPosW                = prevPosW; 
+            ret.interiorIoR             = interiorIoR; 
+            ret.neeTriangleLightIndex   = neeTriangleLightIndex;
+            ret.neeAnalyticLightIndex   = neeAnalyticLightIndex;
             return ret; 
         }
-    
-        // static SurfaceData make()
-        // {
-        //     SurfaceData d;
-        //     d.shadingData   = ShadingData::make();
-        //     d.bsdf          = ActiveBSDF::make();
-        //     d.prevPosW      = 0;
-        //     d.interiorIoR   = 0;
-        //     return d;
-        // }
     };
 
     /** Describes a light sample, mainly for use in NEE.
@@ -96,7 +80,7 @@ namespace PathTracer
         distance and direction, even though distance shortening is needed anyways for shadow rays due to precision issues.
         Use ComputeVisibilityRay to correctly compute surface offset.
     */
-    struct PathLightSample  // was PathTracer::LightSample in Falcor
+    struct PathLightSample
     {
         float3  Li;                     ///< Incident radiance at the shading point (unshadowed). This is already divided by the pdf.
         //float   Pdf;                    ///< Pdf with respect to solid angle at the shading point with selected light (selectionPDF*solidAnglePdf).
@@ -146,9 +130,11 @@ namespace PathTracer
     struct NEEBSDFMISInfo
     {
         bool LightSamplingEnabled;      // light sampling disabled, MIS for BSDF side is 1
+#if PT_USE_RESTIR_DI
         bool SkipEmissiveBRDF;          // Ignore next bounce reflective (but not transmissive) radiance because ReSTIR-DI or similar collected (or will collect) it
+#endif
         bool LightSamplingIsIndirect;   // using indirect part of the LightSampler domain; otherwise using direct
-        uint NarrowNEESamples;          // 
+        uint LocalNEESamples;          // 
         uint TotalSamples;              //
 
         // Initialize to empty (NEE disabled or primary bounce or etc.)
@@ -156,9 +142,11 @@ namespace PathTracer
         { 
             NEEBSDFMISInfo ret;
             ret.LightSamplingEnabled     = false;
+#if PT_USE_RESTIR_DI
             ret.SkipEmissiveBRDF         = false;
+#endif
             ret.LightSamplingIsIndirect  = false;
-            ret.NarrowNEESamples         = 0;
+            ret.LocalNEESamples         = 0;
             ret.TotalSamples             = 0;
             return ret;
         }
@@ -167,9 +155,11 @@ namespace PathTracer
         { 
             NEEBSDFMISInfo ret;
             ret.LightSamplingEnabled     = (packed & (1 << 15)) != 0;
+#if PT_USE_RESTIR_DI
             ret.SkipEmissiveBRDF         = (packed & (1 << 14)) != 0;
+#endif
             ret.LightSamplingIsIndirect  = (packed & (1 << 13)) != 0;
-            ret.NarrowNEESamples         = (packed >> 6) & 0x3F;
+            ret.LocalNEESamples         = (packed >> 6) & 0x3F;
             ret.TotalSamples             = (packed) & 0x3F;
             return ret;
         }
@@ -178,10 +168,12 @@ namespace PathTracer
         {
             uint packed = 0;
             packed |= ((LightSamplingEnabled?1:0)       << 15);
-            packed |= ((SkipEmissiveBRDF?1:0)   << 14);
+#if PT_USE_RESTIR_DI
+            packed |= ((SkipEmissiveBRDF?1:0)           << 14);
+#endif
             packed |= ((LightSamplingIsIndirect?1:0)    << 13);
-            packed |= (NarrowNEESamples & 0x3F) << 6;     // avoid overflow by limiting sample count to RTXPT_LIGHTING_NEEAT_MAX_TOTAL_SAMPLE_COUNT
-            packed |= (TotalSamples     & 0x3F);          // avoid overflow by limiting sample count to RTXPT_LIGHTING_NEEAT_MAX_TOTAL_SAMPLE_COUNT
+            packed |= (LocalNEESamples & 0x3F)          << 6;     // avoid overflow by limiting sample count to RTXPT_LIGHTING_MAX_TOTAL_SAMPLE_COUNT
+            packed |= (TotalSamples     & 0x3F);          // avoid overflow by limiting sample count to RTXPT_LIGHTING_MAX_TOTAL_SAMPLE_COUNT
             return packed;
         }
 
@@ -190,11 +182,20 @@ namespace PathTracer
         static bool equals( const NEEBSDFMISInfo a, const NEEBSDFMISInfo b )
         {
             return     (a.LightSamplingEnabled     == b.LightSamplingEnabled    )
+#if PT_USE_RESTIR_DI
                     && (a.SkipEmissiveBRDF         == b.SkipEmissiveBRDF)
+#endif
                     && (a.LightSamplingIsIndirect  == b.LightSamplingIsIndirect )
-                    && (a.NarrowNEESamples         == b.NarrowNEESamples        )
+                    && (a.LocalNEESamples         == b.LocalNEESamples        )
                     && (a.TotalSamples             == b.TotalSamples            );
         }
+
+#if PT_USE_RESTIR_DI
+        bool GetSkipEmissiveBRDF()          { return SkipEmissiveBRDF; }
+#else
+        bool GetSkipEmissiveBRDF()          { return false; }
+#endif
+
 
     };
 
@@ -204,17 +205,11 @@ namespace PathTracer
     struct NEEResult
     {
 #if RTXPT_NEE_RESULT_MANUAL_PACK
-        uint3       PackedRadiances;
+        uint2       RadianceAndSpecAvgPkg;
 #else
-#if RTXPT_DIFFUSE_SPECULAR_SPLIT
-        lpfloat3    _diffuseRadiance;
-        lpfloat3    _specularRadiance;
-#else
-    #error current denoiser requires RTXPT_DIFFUSE_SPECULAR_SPLIT
+        float4      RadianceAndSpecAvg;             // note: these are also multiplied by path.thp so far
 #endif
-#endif
-        lpfloat     RadianceSourceDistance;         // consider splitting into specular and diffuse
-        //lpfloat     ScatterMISWeight;               // MIS weight computed for scatter counterpart (packed to fp16 in path payload) - this is a hack for now
+        float       SpecRadianceSourceDistance;         // we actually only really care about specular radiance source distance
 
         NEEBSDFMISInfo BSDFMISInfo;
         
@@ -222,32 +217,30 @@ namespace PathTracer
         static NEEResult empty() 
         { 
             NEEResult ret;
-            ret.SetRadiances(0,0);
+#if RTXPT_NEE_RESULT_MANUAL_PACK
+            ret.RadianceAndSpecAvgPkg = Fp32ToFp16( float4(0,0,0,0) );
+#else
+            ret.RadianceAndSpecAvg = float4(0,0,0,0);
+#endif
+            ret.SpecRadianceSourceDistance = 0.0;
             ret.BSDFMISInfo = NEEBSDFMISInfo::empty();
             return ret; 
         }
 
-        void        GetRadiances( inout lpfloat3 diffuseRadiance, inout lpfloat3 specularRadiance )
+        void        AccumulateRadiance( const float3 radiance, const float specAvg )
         {
 #if RTXPT_NEE_RESULT_MANUAL_PACK
-            Fp16ToFp32(PackedRadiances, diffuseRadiance, specularRadiance);
+            RadianceAndSpecAvgPkg = Fp32ToFp16( Fp16ToFp32(RadianceAndSpecAvgPkg) + float4( radiance, specAvg ) );
 #else
-            diffuseRadiance = _diffuseRadiance ;
-            specularRadiance = _specularRadiance;
+            RadianceAndSpecAvg += float4( radiance, specAvg );
 #endif
         }
 
-        void        SetRadiances( const lpfloat3 diffuseRadiance, const lpfloat3 specularRadiance )
-        {
 #if RTXPT_NEE_RESULT_MANUAL_PACK
-            PackedRadiances = Fp32ToFp16(diffuseRadiance, specularRadiance);
+        float4      GetRadianceAndSpecAvg() { return Fp16ToFp32(RadianceAndSpecAvgPkg); }
 #else
-            _diffuseRadiance = diffuseRadiance;
-            _specularRadiance = specularRadiance;
+        float4      GetRadianceAndSpecAvg() { return RadianceAndSpecAvg; }
 #endif
-        }
-
-        //bool        Valid()                 { return any((DiffuseRadiance+SpecularRadiance) > 0); }
     };
     
     struct VisibilityPayload
@@ -283,26 +276,6 @@ namespace PathTracer
             ret.NoTransmission = noTransmission;
             ret.OnlyDeltaLobes = onlyDeltaLobes;
             return ret;
-        }
-    };
-
-    struct ScatterResult
-    {
-        bool    Valid;
-        bool    IsDelta;
-        bool    IsTransmission;
-        float   Pdf;
-        float3  Dir;
-        
-        static ScatterResult empty() 
-        { 
-            ScatterResult ret; 
-            ret.Valid = false; 
-            ret.IsDelta = false; 
-            ret.IsTransmission = false; 
-            ret.Pdf = 0.0; 
-            ret.Dir = float3(0,0,0); 
-            return ret; 
         }
     };
 }

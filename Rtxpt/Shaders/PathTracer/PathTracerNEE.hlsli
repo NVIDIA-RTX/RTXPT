@@ -41,10 +41,7 @@ namespace PathTracer
     inline float EvalSampleWeight( const PathLightSample lightSample, const ShadingData shadingData, const ActiveBSDF bsdf )
     {
     #if 0 // more costly version, does full BSDF - not really worth it unless special case colourful materials with colourful lights
-        float3 bsdfThpDiff, bsdfThpSpec;
-        bsdf.eval(shadingData, lightSample.Direction, bsdfThpDiff, bsdfThpSpec);
-        float3 bsdfThp = bsdfThpDiff + bsdfThpSpec;
-        
+        float3 bsdfThp = bsdf.eval(shadingData, lightSample.Direction, bsdfThpDiff, bsdfThpSpec);
         float weight = max3(bsdfThp*lightSample.Li); // used to be luminance
     #else // ignores colour but cheaper; allows us to use 8 instead of 6 candidate samples and still be a tiny bit faster
         float weight = max3(lightSample.Li) * bsdf.evalPdf(shadingData, lightSample.Direction, kUseBSDFSampling);
@@ -59,16 +56,13 @@ namespace PathTracer
         PathLightSample     PickedCandidate;        // a.k.a. reservoir; should be packable to uint4
         float               ReservoirTotalWeight;
         float               PickedCandidateWeight;
-        
-        int                 RemainingCandidates;    // can be 16bit
 
-        static WRSSingleSampleHelper make(int totalCandidates)
+        static WRSSingleSampleHelper make()
         {
             WRSSingleSampleHelper ret;
             ret.PickedCandidate.Li      = float3(0,0,0); // this makes ret.PickedCandidate.Valid()==false
             ret.ReservoirTotalWeight    = 0;
             ret.PickedCandidateWeight   = 0;
-            ret.RemainingCandidates     = totalCandidates;
             return ret;
         }
 
@@ -82,12 +76,6 @@ namespace PathTracer
                 PickedCandidate = candidateSample;  // TODO: pack here.
                 PickedCandidateWeight = candidateWeight;
             }
-            RemainingCandidates--;
-        }
-
-        bool NotFinished()       
-        { 
-            return RemainingCandidates > 0; 
         }
 
         PathLightSample GetResult(uint totalCandidates)
@@ -101,17 +89,18 @@ namespace PathTracer
     };
 
     // Generates a light sample from all the available lights.
-    inline PathLightSample GenerateLightSample(const WorkingContext workingContext, const ShadingData shadingData, const ActiveBSDF bsdf, const uint wrsCandidateSampleCount, inout UniformSampleSequenceGenerator sampleGeneratorLights, inout UniformSampleSequenceGenerator sampleGeneratorWRS, const LightSampler lightSampler, const bool sampleIsNarrow)
+    inline PathLightSample GenerateLightSample(const WorkingContext workingContext, const ShadingData shadingData, const ActiveBSDF bsdf, const uint wrsCandidateSampleCount, inout UniformSampleSequenceGenerator sampleGeneratorLights, inout UniformSampleSequenceGenerator sampleGeneratorWRS, const LightSampler lightSampler, const bool sampleIsLocal)
     {
-        WRSSingleSampleHelper wrs = WRSSingleSampleHelper::make(wrsCandidateSampleCount);
+        // NvReorderThread(0, 32);
+        WRSSingleSampleHelper wrs = WRSSingleSampleHelper::make();
         
-        do
+        for (uint i = 0; i < wrsCandidateSampleCount; i++ )
         {
             uint lightIndex = 0; float selectionPdf = 0;
 
             float rnd = sampleNext1D(sampleGeneratorLights);
-            if( sampleIsNarrow )
-                lightIndex = lightSampler.SampleNarrow( rnd, selectionPdf );
+            if( sampleIsLocal )
+                lightIndex = lightSampler.SampleLocal( rnd, selectionPdf );
             else
                 lightIndex = lightSampler.SampleGlobal( rnd, selectionPdf );
 
@@ -120,6 +109,7 @@ namespace PathTracer
             // TODO: for LD sampling try the "reuse/recycle" trick
             const float2 interiorSampleRnd = sampleNext2D(sampleGeneratorLights);
 
+            // NvReorderThread(PolymorphicLight::DecodeType(packedLightInfo), 32);
             PolymorphicLightSample lightSample = PolymorphicLight::CalcSample( packedLightInfo, interiorSampleRnd, shadingData.posW );
 
 			// an example on printf-debugging specific light type
@@ -141,105 +131,115 @@ namespace PathTracer
             candidateSample.LightIndex = lightIndex;
             candidateSample.SelectionPdf = selectionPdf;
             candidateSample.LightSampleableByBSDF = lightSample.LightSampleableByBSDF;
-            // if( workingContext.debug.IsDebugPixel() )
-            //     workingContext.debug.DrawLine(shadingData.posW, lightSample.Position, float3(1,0,0), float3(0,1,0) );
+            // if( workingContext.Debug.IsDebugPixel() )
+            //     workingContext.Debug.DrawLine(shadingData.posW, lightSample.Position, float3(1,0,0), float3(0,1,0) );
 
             // Perform Weighted Reservoir Sampling
             wrs.InsertCandidate( sampleNext1D(sampleGeneratorWRS), candidateSample, EvalSampleWeight( candidateSample, shadingData, bsdf ) );
 
             sampleGeneratorLights.AdvanceSampleIndex(); // only needed for LD sampling, resets the dimension; NO-OP for uniform random 
-
-        } while( wrs.NotFinished() );
+        }
         return wrs.GetResult(wrsCandidateSampleCount);
     }
 
     // This will ray cast and, if light visible, accumulate radiance properly, including doing weighted sum for 
-    void ProcessLightSample(inout NEEResult accum, inout float luminanceSum, PathLightSample lightSample, bool sampleIsNarrow, uint narrowNEESamples, uint totalSamples,
+    void ProcessLightSample(inout NEEResult accum, inout float specSum, PathLightSample lightSample, bool sampleIsLocal, uint localNEESamples, uint totalSamples,
                                 const ShadingData shadingData, const ActiveBSDF bsdf, const PathState preScatterPath, LightSampler lightSampler,
-                                const bool useFeedback, inout LightFeedbackReservoir feedbackReservoir, inout UniformSampleSequenceGenerator sampleGeneratorFeedback, const WorkingContext workingContext)
+                                inout UniformSampleSequenceGenerator sampleGeneratorFeedback, const WorkingContext workingContext)
     {
-        if (!lightSample.Valid())   // if sample's bad, skip; we tried casting the ray anyway but ignoring the results - didn't yield better perf
-            return;
+        RayDesc ray;
+        bool visible = false;
 
-        const RayDesc ray = lightSample.ComputeVisibilityRay(shadingData).toRayDesc();
-            
-        bool visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), workingContext.debug);
+        /*[branch]*/ if (lightSample.Valid())   // if sample's bad, skip; we tried casting the ray anyway but ignoring the results - didn't yield better perf
+        {
+            ray = lightSample.ComputeVisibilityRay(shadingData).toRayDesc();
+            visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), workingContext.Debug);
+        }
 
-        // if( workingContext.debug.IsDebugPixel() )
+        // if( workingContext.Debug.IsDebugPixel() )
         //     DebugLine( shadingData.posW, shadingData.posW+lightSample.Direction*lightSample.Distance, float4(!visible,visible,0,1.0) );
 
-        if (visible)
+#if 0 && SER_USE_SORTING
+#if USE_NVAPI_REORDER_THREADS
+        NvReorderThread(visible?(1):(0), 16);
+#elif USE_DX_MAYBE_REORDER_THREADS
+        dx::MaybeReorderThread(visible?(1):(0), 16);
+#endif
+#endif
+        /*[branch]*/ if (visible)
         {
             // add compute grazing angle fadeout
             float fadeOut = (shadingData.shadowNoLFadeout>0)?(ComputeLowGrazingAngleFalloff( ray.Direction, shadingData.vertexN, shadingData.shadowNoLFadeout, 2.0 * shadingData.shadowNoLFadeout )):(1.0);
 
-            // narrow (tile) vs global vs scatter (BSDF) multiple importance sampling
+            // local (tile) vs global vs scatter (BSDF) multiple importance sampling
             float scatterPdfForDir = bsdf.evalPdf(shadingData, lightSample.Direction, kUseBSDFSampling);
-            float misWeight = lightSampler.ComputeInternalMIS(shadingData.posW, lightSample, sampleIsNarrow, narrowNEESamples, totalSamples, scatterPdfForDir);
+            float misWeight = lightSampler.ComputeInternalMIS(shadingData.posW, lightSample, sampleIsLocal, localNEESamples, totalSamples, scatterPdfForDir);
 
-            fadeOut *= misWeight;
+            // apply MIS and other multipliers to light here - reduces register pressure and computation later
+            lightSample.Li *= fadeOut * misWeight;
 
-            // compute BSDF throughput!                
-            float3 bsdfThpDiff, bsdfThpSpec;
-            bsdf.eval(shadingData, lightSample.Direction, bsdfThpDiff, bsdfThpSpec);
+            // compute BSDF throughput!
+            float4 bsdfThp = bsdf.eval(shadingData, lightSample.Direction);
+
+            // compute radiance with MIS and other modifiers
+            float3 radiance = bsdfThp.rgb * lightSample.Li;
+            float radianceAvg = Average(radiance);
+            float specAvg = bsdfThp.w * Average(lightSample.Li);
 
 #if RTXPT_FIREFLY_FILTER   // firefly filter has cost - only enable if denoiser REALLY requires it
-            if( workingContext.ptConsts.fireflyFilterThreshold != 0 )
+            if( workingContext.PtConsts.fireflyFilterThreshold != 0 )
             {
                 const float pdf = lightSample.SelectionPdf * lightSample.SolidAnglePdf;
                 float neeFireflyFilterK = ComputeNewScatterFireflyFilterK(preScatterPath.fireflyFilterK, pdf, 1.0);
-                fadeOut *= FireflyFilterShort(average(lightSample.Li*(bsdfThpDiff+bsdfThpSpec))*fadeOut, workingContext.ptConsts.fireflyFilterThreshold, neeFireflyFilterK);
+                const float ffDampening = FireflyFilterShort(radianceAvg, workingContext.PtConsts.fireflyFilterThreshold, neeFireflyFilterK);
+                radiance *= ffDampening;
+                // radianceAvg *= ffDampening; // radianceAvg used for NEE weight later - testing suggests it's same or better if not firefly-filtered
             }
 #endif
-           
-            // apply MIS and other modifiers
-            lightSample.Li *= fadeOut;
 
-            float3 diffRadiance = bsdfThpDiff * lightSample.Li;
-            float3 specRadiance = bsdfThpSpec * lightSample.Li;
-
-            // weighted sum for sample distance and sample feedback weight
-            float3 combinedContribution = diffRadiance + specRadiance;
-            float combinedContributionAvg = average(combinedContribution);
+            // apply path throughput here
+            float preScatterPathThpAvg = Average(preScatterPath.thp);
+            radiance *= preScatterPath.thp;
+            specAvg *= preScatterPathThpAvg;
+            radianceAvg *= preScatterPathThpAvg;
 
             // accumulate radiances
-            lpfloat3 neeDiffuseRadiance, neeSpecularRadiance;
-            accum.GetRadiances(neeDiffuseRadiance, neeSpecularRadiance);
-            neeDiffuseRadiance = lpfloat3( min(neeDiffuseRadiance   + diffRadiance, HLF_MAX.xxx ) );
-            neeSpecularRadiance = lpfloat3( min(neeSpecularRadiance + specRadiance, HLF_MAX.xxx ) );
-            accum.SetRadiances(neeDiffuseRadiance, neeSpecularRadiance);
+            accum.AccumulateRadiance( radiance, specAvg );
 
-            // compute weighted sample distance
-            accum.RadianceSourceDistance = lpfloat( min( accum.RadianceSourceDistance + lightSample.Distance * combinedContributionAvg, HLF_MAX ) );
-            luminanceSum += combinedContributionAvg;
+            // for computing weighted average sample distance
+            accum.SpecRadianceSourceDistance = accum.SpecRadianceSourceDistance + lightSample.Distance * specAvg;
+            specSum += specAvg;
             
-            // sample feedback for NEE-AT!
-            if( useFeedback && lightSample.LightIndex != 0xFFFFFFFF ) // TODO: make these 0xFFFFFFFF named consts 
+            // sample feedback for NEE-AT if needed!
+            if( lightSample.LightIndex != RTXPT_INVALID_LIGHT_INDEX && lightSampler.IsTemporalFeedbackRequired() )
             {
                 // compute light weigh as in "how much we want this light" - so include path throughput, BSDF and light; 
-                float feedbackWeight = average(preScatterPath.thp) * combinedContributionAvg;
+                float feedbackWeight = radianceAvg;
 
-                lightSampler.InsertFeedbackFromNEE(feedbackReservoir, lightSample.LightIndex, feedbackWeight, sampleNext1D(sampleGeneratorFeedback) );
+                float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH];
+                for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+                    randomValues[i] = sampleNext1D(sampleGeneratorFeedback);
+
+                lightSampler.InsertFeedbackFromNEE(lightSample.LightIndex, feedbackWeight, randomValues);
             }
         }
     }
     
     void FinalizeLightSample( inout NEEResult accum, const float luminanceSum )
     {
-        accum.RadianceSourceDistance = lpfloat( min( accum.RadianceSourceDistance / (luminanceSum + 1e-30), HLF_MAX ) );
+        accum.SpecRadianceSourceDistance = accum.SpecRadianceSourceDistance / (luminanceSum + 1e-12);
     }
     
     // 'result' argument is expected to have been initialized to 'NEEResult::empty()'
     inline void HandleNEE_MultipleSamples(inout NEEResult inoutResult, const PathState preScatterPath, const ShadingData shadingData, const ActiveBSDF bsdf, 
-                                            const SampleGeneratorVertexBase sgBase, const WorkingContext workingContext, int sampleCountBoost)
+                                            const SampleGeneratorVertexBase sgBase, const WorkingContext workingContext, const int sampleCountBoost)
     {
-        LightSampler lightSampler = Bridge::CreateLightSampler( workingContext.pixelPos, preScatterPath.rayCone.getWidth() / preScatterPath.sceneLength, workingContext.debug.IsDebugPixel() );
+        // NvReorderThread(0, 32);
 
-        // more costly alternative
-        // sampleCountBoost = lightSampler.IsIndirect?0:workingContext.ptConsts.NEEBoostSamplingOnDominantPlane;
+        LightSampler lightSampler = Bridge::CreateLightSampler( preScatterPath.GetPixelPos(), preScatterPath.rayCone.getWidth(), preScatterPath.sceneLength );
 
         // There's a cost to having these as a dynamic constant so an option for production code is to hard code
-        const uint totalSamples = min(RTXPT_LIGHTING_NEEAT_MAX_TOTAL_SAMPLE_COUNT, (!lightSampler.IsEmpty()) ? (sampleCountBoost + workingContext.ptConsts.NEEFullSamples)     : (0));
+        const uint totalSamples = min(RTXPT_LIGHTING_MAX_TOTAL_SAMPLE_COUNT, (!lightSampler.IsEmpty()) ? (sampleCountBoost + workingContext.PtConsts.NEEFullSamples)     : (0));
         if (totalSamples == 0)
             return;
 
@@ -249,50 +249,41 @@ namespace PathTracer
 
         // in theory, using quasi-random sampling should help with picking light candidates; in practice it doesn't seem to help enough to justify the cost - even when we need to include picking sample on the light as well (see GenerateLightSample)
         // this code used to work for LD sampling in the past, leaving as a reference - you probably want to use the same stream for global and local samples this time, will make it easier
-        // sampleGeneratorLightSampler = SampleGenerator::make( sgBase, SampleGeneratorEffectSeed::NextEventEstimationLightSamplerG, useLowDiscrepancyGen, globalNEESamples * workingContext.ptConsts.NEECandidateSamples );
+        // sampleGeneratorLightSampler = SampleGenerator::make( sgBase, SampleGeneratorEffectSeed::NextEventEstimationLightSamplerG, useLowDiscrepancyGen, globalNEESamples * workingContext.PtConsts.NEECandidateSamples );
 
-        LightFeedbackReservoir feedbackReservoir;
-        bool useFeedback = false;
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
-        if( lightSampler.IsTemporalFeedbackRequired() )
-        {
-            feedbackReservoir = lightSampler.LoadFeedback();
-            useFeedback = true;
-        }
-#endif
-        const uint localNEESamples  = lightSampler.ComputeNarrowSampleCount(totalSamples);
+        const uint localNEESamples  = lightSampler.ComputeLocalSampleCount(totalSamples);
         const uint globalNEESamples = totalSamples - localNEESamples;
 
         inoutResult.BSDFMISInfo.LightSamplingEnabled    = true;
         inoutResult.BSDFMISInfo.LightSamplingIsIndirect = lightSampler.IsIndirect;
-        inoutResult.BSDFMISInfo.NarrowNEESamples        = localNEESamples;
+        inoutResult.BSDFMISInfo.LocalNEESamples         = localNEESamples;
         inoutResult.BSDFMISInfo.TotalSamples            = totalSamples;
 
         // we must initialize to 0 since we're accumulating multiple samples
-        inoutResult.RadianceSourceDistance = 0;
+        inoutResult.SpecRadianceSourceDistance = 0;
         
-        float luminanceSum = 0.0; // for sample distance weighted average 
+        float specSum = 0.0; // for sample distance weighted average 
         
         int globalNEESamplesRemaining = globalNEESamples;
-        bool sampleIsNarrow = false;
+        bool sampleIsLocal = false;
         for (uint sampleIndex = 0; sampleIndex < totalSamples; sampleIndex++)
         {
             if (globalNEESamplesRemaining==0)
-                sampleIsNarrow = true;
+                sampleIsLocal = true;
             globalNEESamplesRemaining--;
 
-            PathLightSample lightSample = GenerateLightSample(workingContext, shadingData, bsdf, workingContext.ptConsts.NEECandidateSamples, sampleGeneratorLightSampler, sampleGenerator, lightSampler, sampleIsNarrow);
+#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // when anti-lag is enabled, in general do few more candidates as we know that we need to search for lights more
+            const uint candidateSampleCount = PT_NEE_CANDIDATE_SAMPLES; //workingContext.PtConsts.NEECandidateSamples*2;
+#else
+            const uint candidateSampleCount = PT_NEE_CANDIDATE_SAMPLES; //workingContext.PtConsts.NEECandidateSamples;
+#endif
+            PathLightSample lightSample = GenerateLightSample(workingContext, shadingData, bsdf, candidateSampleCount, sampleGeneratorLightSampler, sampleGenerator, lightSampler, sampleIsLocal);
 
             // this computes the BSDF throughput and (if throughput>0) then casts shadow ray and handles radiance summing up & weighted averaging for 'sample distance' used by denoiser
-            ProcessLightSample(inoutResult, luminanceSum, lightSample, sampleIsNarrow, localNEESamples, totalSamples, shadingData, bsdf, preScatterPath, lightSampler, useFeedback, feedbackReservoir, sampleGeneratorFeedback, workingContext);
+            ProcessLightSample(inoutResult, specSum, lightSample, sampleIsLocal, localNEESamples, totalSamples, shadingData, bsdf, preScatterPath, lightSampler, sampleGeneratorFeedback, workingContext);
         }
 
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
-        if( useFeedback )
-            lightSampler.StoreFeedback( feedbackReservoir, true );
-#endif
-
-        FinalizeLightSample(inoutResult, luminanceSum);
+        FinalizeLightSample(inoutResult, specSum);
     }
     
     inline NEEResult HandleNEE(const uniform OptimizationHints optimizationHints, const PathState preScatterPath,
@@ -302,15 +293,11 @@ namespace PathTracer
         const uint lobes = bsdf.getLobes(shadingData);
         const bool hasNonDeltaLobes = ((lobes & (uint) LobeType::NonDelta) != 0) && (!optimizationHints.OnlyDeltaLobes);
 
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // TODO: This is for performance reasons, to exclude non-visible samples. Check whether it's actually beneficial in practice (branchiness)
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //const bool flagLightSampledUpper = (lobes & (uint) LobeType::NonDeltaReflection) != 0;
         const bool onDominantBranch = preScatterPath.hasFlag(PathFlags::stablePlaneOnDominantBranch);
         const bool onStablePlane = preScatterPath.hasFlag(PathFlags::stablePlaneOnPlane);
 
         // Check if we should apply NEE.
-        const bool applyNEE = (workingContext.ptConsts.NEEEnabled && !optimizationHints.OnlyDeltaLobes) && hasNonDeltaLobes;
+        const bool applyNEE = (PT_NEE_ENABLED && !optimizationHints.OnlyDeltaLobes) && hasNonDeltaLobes;
 
         NEEResult result = NEEResult::empty();
         
@@ -318,27 +305,18 @@ namespace PathTracer
             return result;
         
         // Check if sample from RTXDI should be applied instead of NEE.
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
-        const bool applyReSTIRDI = workingContext.ptConsts.useReSTIRDI && hasNonDeltaLobes && onDominantBranch && onStablePlane;
-#else
-        const bool applyReSTIRDI = false;
-#endif
-        
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES && PT_USE_RESTIR_DI
         // When ReSTIR DI is handling lighting, we skip NEE; at the moment RTXDI handles only reflection; in the case of first bounce transmission we still don't attemp to use
         // NEE due to complexity, and also the future where ReSTIR DI might handle transmission.
-        if (applyReSTIRDI)
+        if (hasNonDeltaLobes && onDominantBranch && onStablePlane)
         {
             result.BSDFMISInfo.SkipEmissiveBRDF = true;
             return result;
         }
+#endif
 
-        HandleNEE_MultipleSamples(result, preScatterPath, shadingData, bsdf, sgBase, workingContext, (onDominantBranch&&onStablePlane)?(workingContext.ptConsts.NEEBoostSamplingOnDominantPlane):(0));
+        HandleNEE_MultipleSamples(result, preScatterPath, shadingData, bsdf, sgBase, workingContext, (onDominantBranch&&onStablePlane)?(PT_NEE_BOOST_SAMPLING_ON_DOMINANT_PLANE):(0));
        
-        // Debugging tool to remove direct lighting from primary surfaces
-        const bool suppressNEE = preScatterPath.hasFlag(PathFlags::stablePlaneOnDominantBranch) && preScatterPath.hasFlag(PathFlags::stablePlaneOnPlane) && workingContext.ptConsts.suppressPrimaryNEE;
-        if (suppressNEE)    // keep it a valid sample so we don't add in normal path
-            result.SetRadiances(0,0);
-        
         return result;
     }
     

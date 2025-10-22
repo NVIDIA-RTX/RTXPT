@@ -18,7 +18,7 @@
 #pragma pack_matrix(row_major)
 #endif
 
-#define PATH_TRACER_MAX_PAYLOAD_SIZE     4*4*6    // PathPayload is 96 at the moment
+#define PATH_TRACER_MAX_PAYLOAD_SIZE     4*4*5    // PathPayload is 80 at the moment
 
 // Condensed version of ..\Falcor\Source\Falcor\Scene\Camera\CameraData.hlsli
 struct PathTracerCameraData
@@ -51,7 +51,7 @@ struct PathTracerConstants
 
     uint    bounceCount;
     uint    diffuseBounceCount;
-    uint    enableRussianRoulette;
+    float   EnvironmentMapDiffuseSampleMIPLevel;
     float   texLODBias;
 
     float   invSubSampleCount;              // used to attenuate noisy radiance during multi-sampling (non-noisy stuff like direct sky does not need attenuation!); always 1 for reference mode
@@ -62,7 +62,7 @@ struct PathTracerConstants
     uint    frameIndex;                     // sampleIndex != frameIndex since we can have multiple samples per frame
     uint    useReSTIRDI;
     uint    useReSTIRGI;
-    uint    suppressPrimaryNEE;
+    uint    _padding5;
 
     float   stablePlanesSplitStopThreshold;
     float   _padding3;
@@ -70,26 +70,21 @@ struct PathTracerConstants
     float   stablePlanesSuppressPrimaryIndirectSpecularK;
 
     float   denoiserRadianceClampK;
-    uint    NEEBoostSamplingOnDominantPlane;
+    uint    _padding0;
     float   stablePlanesAntiAliasingFallthrough;
     uint    activeStablePlaneCount;
 
     uint    maxStablePlaneVertexDepth;
     uint    allowPrimarySurfaceReplacement;
-    uint    genericTSLineStride;  // used for u_SurfaceData
-    uint    genericTSPlaneStride; // used for u_SurfaceData
+    uint    genericTSLineStride;  // used for u_SurfaceData - might be a candidate for macro optimization
+    uint    genericTSPlaneStride; // used for u_SurfaceData - might be a candidate for macro optimization
 
     uint    NEEEnabled;
     uint    NEEType;
     uint    NEECandidateSamples;
     uint    NEEFullSamples;
-
-    float    EnvironmentMapDiffuseSampleMIPLevel;
-    uint    _padding0;
-    uint    _padding1;
-    uint    _padding2;
   
-    uint    STFUseBlueNoise;
+    uint    _padding6;
     uint    STFMagnificationMethod;
     uint    STFFilterMode;
     float   STFGaussianSigma;
@@ -138,9 +133,5 @@ inline float3  DbgShowNormalSRGB(float3 normal)
 {
     return pow(abs(normal * 0.5f + 0.5f), 2.2f);
 }
-
-// perhaps tile or use morton sort in the future here - see https://developer.nvidia.com/blog/optimizing-compute-shaders-for-l2-locality-using-thread-group-id-swizzling/
-inline uint2    PixelCoordFromIndex(uint index, const uint imageWidth)     { return uint2(index % imageWidth, index / imageWidth); }
-inline uint     PixelCoordToIndex(uint2 pixelCoord, const uint imageWidth)  { return pixelCoord.y * imageWidth + pixelCoord.x; }
 
 #endif // __PATH_TRACER_SHARED_H__

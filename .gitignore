@@ -5,6 +5,8 @@ Nrd.cfg
 Omm.cfg
 tests/output/*
 .vscode/
+/External/dxc
+/External/AgilitySDK
 
 # local project files for shader development outside of VS
 *.sublime-*

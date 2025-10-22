@@ -33,27 +33,18 @@ using namespace donut::engine;
 
 #include "../Shaders/Misc/OmmGeometryDebugData.hlsli"
 
-OmmBaker::OmmBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::DescriptorTableManager> descriptorTableManager, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, nvrhi::CommandListHandle mainCommandList, bool enabled)
+OmmBaker::OmmBaker(nvrhi::DeviceHandle device,
+    std::shared_ptr<donut::engine::DescriptorTableManager> descriptorTableManager,
+    std::shared_ptr<donut::engine::TextureCache> textureCache,
+    std::shared_ptr<donut::engine::ShaderFactory> shaderFactory)
     : m_device(device)
-    , m_textureCache(textureCache)
+    , m_textureCache(std::move(textureCache))
     , m_bindingCache(device)
-    , m_shaderFactory(shaderFactory)
-    , m_descriptorTableManager(descriptorTableManager)
-    , m_enabled(enabled)
+    , m_shaderFactory(std::move(shaderFactory))
+    , m_descriptorTableManager(std::move(descriptorTableManager))
 {
-    if( m_enabled )
-    {
-        m_ommBuildQueue = std::make_unique<OmmBuildQueue>(device, m_descriptorTableManager, m_shaderFactory);
-    
-        // Setup OMM baker.
-        mainCommandList->open();
-        m_ommBuildQueue->Initialize(mainCommandList);
-        mainCommandList->close();
-        m_device->executeCommandList(mainCommandList);
-        m_device->waitForIdle();
-
-        m_geometryDebugDataPtr = std::make_unique<std::vector<GeometryDebugData>>();
-    }
+    // Setup OMM baker.
+    m_ommBuildQueue = std::make_unique<OmmBuildQueue>(device, m_descriptorTableManager, m_shaderFactory);
 
     // allocate dummy buffer that works even if not enabled
     nvrhi::BufferDesc bufferDesc;
@@ -71,19 +62,16 @@ OmmBaker::~OmmBaker()
 {
 }
 
-void OmmBaker::SceneLoaded(const std::shared_ptr<donut::engine::Scene>& scene)
+void OmmBaker::SceneLoaded(const donut::engine::Scene& scene)
 {
-    if (!m_enabled)
-        return;
-
     const size_t allocationGranularity = 1024;
-    const size_t geometryCount = scene->GetSceneGraph()->GetGeometryCount();
-    if (scene->GetSceneGraph()->GetGeometryCount() > (*m_geometryDebugDataPtr).size())
+    const size_t geometryCount = scene.GetSceneGraph()->GetGeometryCount();
+    if (scene.GetSceneGraph()->GetGeometryCount() > m_geometryDebugDataPtr.size())
     {
-        (*m_geometryDebugDataPtr).resize(nvrhi::align<size_t>(geometryCount, allocationGranularity));
+        m_geometryDebugDataPtr.resize(nvrhi::align<size_t>(geometryCount, allocationGranularity));
         
         nvrhi::BufferDesc bufferDesc;
-        bufferDesc.byteSize = sizeof(GeometryDebugData) * (*m_geometryDebugDataPtr).size();
+        bufferDesc.byteSize = sizeof(GeometryDebugData) * m_geometryDebugDataPtr.size();
         bufferDesc.debugName = "BindlessGeometryDebug";
         bufferDesc.structStride = sizeof(GeometryDebugData);
         bufferDesc.canHaveRawViews = true;
@@ -97,50 +85,24 @@ void OmmBaker::SceneLoaded(const std::shared_ptr<donut::engine::Scene>& scene)
 
 void OmmBaker::SceneUnloading()
 {
-    if (!m_enabled)
-        return;
     m_ommBuildQueue->CancelPendingBuilds();
 }
 
-void OmmBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, const std::shared_ptr<donut::engine::Scene>& scene)
+void OmmBaker::CreateRenderPasses(nvrhi::BindingLayoutHandle bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses)
 {
-    m_bindlessLayout = bindlessLayout;
-    m_commonPasses = commonPasses;
+    m_bindlessLayout = std::move(bindlessLayout);
+    m_commonPasses = std::move(commonPasses);
 }
 
-void OmmBaker::DestroyOpacityMicromaps(nvrhi::ICommandList* commandList, const std::shared_ptr<donut::engine::Scene>& scene)
+void OmmBaker::CreateOpacityMicromaps(const donut::engine::Scene& scene)
 {
-    if (!m_enabled)
-        return;
-
-    commandList->close();
-    m_device->executeCommandList(commandList);
-    m_device->waitForIdle();
-    commandList->open();
-
-    for (const std::shared_ptr<MeshInfo>& _mesh : scene->GetSceneGraph()->GetMeshes())
-    {
-        assert( std::dynamic_pointer_cast<MeshInfoEx>(_mesh) != nullptr );
-        const std::shared_ptr<MeshInfoEx> & mesh = std::static_pointer_cast<MeshInfoEx>(_mesh);
-        mesh->AccelStructOMM = nullptr;
-        mesh->OpacityMicroMaps.clear();
-        mesh->DebugData = nullptr;
-        mesh->DebugDataDirty = true;
-    }
-}
-
-void OmmBaker::CreateOpacityMicromaps(const std::shared_ptr<donut::engine::Scene>& scene)
-{
-    if (!m_enabled)
-        return;
-
     m_ommBuildQueue->CancelPendingBuilds();
 
     m_uiData.ActiveState = m_uiData.DesiredState;
     m_uiData.BuildsLeftInQueue = 0;
     m_uiData.BuildsQueued = 0;
 
-    for (const std::shared_ptr<MeshInfo>& mesh : scene->GetSceneGraph()->GetMeshes())
+    for (auto& mesh : scene.GetSceneGraph()->GetMeshes())
     {
         if (mesh->isSkinPrototype) //buffers->hasAttribute(engine::VertexAttribute::JointWeights))
             continue; // skip the skinning prototypes
@@ -150,10 +112,10 @@ void OmmBaker::CreateOpacityMicromaps(const std::shared_ptr<donut::engine::Scene
         OmmBuildQueue::BuildInput input;
         input.mesh = mesh;
 
-        for (uint32_t i = 0; i < mesh->geometries.size(); ++i)
+        for (size_t i = 0; i < mesh->geometries.size(); ++i)
         {
-            const std::shared_ptr<donut::engine::MeshGeometry>& geometry = mesh->geometries[i];
-            std::shared_ptr<PTMaterial> material = PTMaterial::FromDonut(geometry->material);
+            const donut::engine::MeshGeometry& geometry = *mesh->geometries[i];
+            const auto material = static_cast<const MaterialEx*>(geometry.material.get())->PTMaterial;
             if (material == nullptr)
                 continue;
             if (!(material->EnableBaseTexture && material->BaseTexture.Loaded != nullptr && material->BaseTexture.Loaded->texture != nullptr))
@@ -161,7 +123,7 @@ void OmmBaker::CreateOpacityMicromaps(const std::shared_ptr<donut::engine::Scene
             if (!material->EnableAlphaTesting)
                 continue;
 
-            std::shared_ptr<TextureData> alphaTexture = m_textureCache->GetLoadedTexture(geometry->material->baseOrDiffuseTexture->path);
+            std::shared_ptr<TextureData> alphaTexture = m_textureCache->GetLoadedTexture(geometry.material->baseOrDiffuseTexture->path);
 
             OmmBuildQueue::BuildInput::Geometry geom;
             geom.geometryIndexInMesh = i;
@@ -191,22 +153,35 @@ void OmmBaker::CreateOpacityMicromaps(const std::shared_ptr<donut::engine::Scene
     }
 }
 
-void OmmBaker::BuildOpacityMicromaps(nvrhi::ICommandList* commandList, const std::shared_ptr<donut::engine::Scene>& scene)
+void OmmBaker::DestroyOpacityMicromaps(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
 {
-    if (!m_enabled)
-        return;
+    commandList.close();
+    m_device->executeCommandList(&commandList);
+    m_device->waitForIdle();
+    commandList.open();
 
-    commandList->beginMarker("OMM Updates");
+    for (const std::shared_ptr<MeshInfo>& _mesh : scene.GetSceneGraph()->GetMeshes())
+    {
+        assert(std::dynamic_pointer_cast<MeshInfoEx>(_mesh) != nullptr);
+        const std::shared_ptr<MeshInfoEx>& mesh = std::static_pointer_cast<MeshInfoEx>(_mesh);
+        mesh->AccelStructOMM = nullptr;
+        mesh->OpacityMicroMaps.clear();
+        mesh->DebugData = nullptr;
+        mesh->DebugDataDirty = true;
+    }
+}
+
+void OmmBaker::BuildOpacityMicromaps(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
+{
+    commandList.beginMarker("OMM Updates");
 
     if (m_uiData.TriggerRebuild)
     {
-        {
-            DestroyOpacityMicromaps(commandList, scene);
+        DestroyOpacityMicromaps(commandList, scene);
 
-            m_ommBuildQueue->CancelPendingBuilds();
+        m_ommBuildQueue->CancelPendingBuilds();
 
-            CreateOpacityMicromaps(scene);
-        }
+        CreateOpacityMicromaps(scene);
 
         m_uiData.TriggerRebuild = false;
     }
@@ -215,29 +190,27 @@ void OmmBaker::BuildOpacityMicromaps(nvrhi::ICommandList* commandList, const std
 
     m_uiData.BuildsLeftInQueue = m_ommBuildQueue->NumPendingBuilds();
 
-    commandList->endMarker();
+    commandList.endMarker();
 }
 
-void OmmBaker::WriteGeometryDebugBuffer(nvrhi::ICommandList* commandList)
+void OmmBaker::WriteGeometryDebugBuffer(nvrhi::ICommandList& commandList)
 {
-    assert( m_enabled );
-    commandList->writeBuffer(m_geometryDebugBuffer, (*m_geometryDebugDataPtr).data(), (*m_geometryDebugDataPtr).size() * sizeof(GeometryDebugData));
+    commandList.writeBuffer(m_geometryDebugBuffer, m_geometryDebugDataPtr.data(), m_geometryDebugDataPtr.size() * sizeof(GeometryDebugData));
 }
 
-void OmmBaker::UpdateDebugGeometry(const std::shared_ptr<MeshInfo>& _mesh)
+void OmmBaker::UpdateDebugGeometry(const MeshInfo& _mesh)
 {
-    assert(std::dynamic_pointer_cast<MeshInfoEx>(_mesh) != nullptr);
-    const std::shared_ptr<MeshInfoEx>& mesh = std::static_pointer_cast<MeshInfoEx>(_mesh);
+    const MeshInfoEx& mesh = static_cast<const MeshInfoEx&>(_mesh);
+    assert(&mesh != nullptr);
 
-    assert( m_enabled );
-    for (const auto& _geometry : mesh->geometries)
+    for (const auto& _geometry : mesh.geometries)
     {
         assert(std::dynamic_pointer_cast<MeshGeometryEx>(_geometry) != nullptr);
         const std::shared_ptr<MeshGeometryEx>& geometry = std::static_pointer_cast<MeshGeometryEx>(_geometry);
 
-        if (MeshDebugData* debugData = mesh->DebugData.get())
+        if (MeshDebugData* debugData = mesh.DebugData.get())
         {
-            GeometryDebugData& dgdata = (*m_geometryDebugDataPtr)[geometry->globalGeometryIndex];
+            GeometryDebugData& dgdata = m_geometryDebugDataPtr[geometry->globalGeometryIndex];
             dgdata.ommArrayDataBufferIndex = debugData->ommArrayDataBufferDescriptor ? debugData->ommArrayDataBufferDescriptor->Get() : -1;
             dgdata.ommArrayDataBufferOffset = geometry->DebugData.ommArrayDataOffset;
 
@@ -250,7 +223,7 @@ void OmmBaker::UpdateDebugGeometry(const std::shared_ptr<MeshInfo>& _mesh)
         }
         else
         {
-            GeometryDebugData& dgdata = (*m_geometryDebugDataPtr)[geometry->globalGeometryIndex];
+            GeometryDebugData& dgdata = m_geometryDebugDataPtr[geometry->globalGeometryIndex];
             dgdata.ommArrayDataBufferIndex = -1;
             dgdata.ommArrayDataBufferOffset = 0xFFFFFFFF;
             dgdata.ommDescArrayBufferIndex = -1;
@@ -262,21 +235,19 @@ void OmmBaker::UpdateDebugGeometry(const std::shared_ptr<MeshInfo>& _mesh)
     }
 }
 
-void OmmBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<donut::engine::Scene>& scene)
+void OmmBaker::Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
 {
-    if (!m_enabled)
-        return;
-
-    RAII_SCOPE( commandList->beginMarker("OmmBaker");, commandList->endMarker(); );
+    RAII_SCOPE( commandList.beginMarker("OmmBaker");, commandList.endMarker(); );
 
     bool anyDirty = false;
-    for (const auto& _mesh : scene->GetSceneGraph()->GetMeshes())
+    for (auto& _mesh : scene.GetSceneGraph()->GetMeshes())
     {
-        assert(std::dynamic_pointer_cast<MeshInfoEx>(_mesh) != nullptr);
-        const std::shared_ptr<MeshInfoEx>& mesh = std::static_pointer_cast<MeshInfoEx>(_mesh);
-        if (mesh->DebugDataDirty)
+        MeshInfoEx& mesh = static_cast<MeshInfoEx&>(*_mesh);
+        assert(&mesh != nullptr);
+
+        if (mesh.DebugDataDirty)
         {
-            mesh->DebugDataDirty = false;
+            mesh.DebugDataDirty = false;
             anyDirty = true;
             UpdateDebugGeometry(mesh);
         }
@@ -293,7 +264,7 @@ void OmmBaker::SetGlobalShaderMacros(std::vector<donut::engine::ShaderMacro>& ma
         macros.push_back( { "OMM_DEBUG_VIEW_OVERLAY", "1" } );
 }
 
-bool OmmBaker::DebugGUI(float indent, const std::shared_ptr<donut::engine::Scene>& scene)
+bool OmmBaker::DebugGUI(float indent, const donut::engine::Scene& scene)
 {
     RAII_SCOPE(ImGui::PushID("OmmBakerDebugGUI"); , ImGui::PopID(); );
     
@@ -476,7 +447,7 @@ bool OmmBaker::DebugGUI(float indent, const std::shared_ptr<donut::engine::Scene
             {
                 UI_SCOPED_INDENT(indent);
 
-                for (const std::shared_ptr<donut::engine::MeshInfo>& mesh : scene->GetSceneGraph()->GetMeshes())
+                for (const std::shared_ptr<donut::engine::MeshInfo>& mesh : scene.GetSceneGraph()->GetMeshes())
                 {
                     bool meshHasOmms = false;
                     for (uint32_t i = 0; i < mesh->geometries.size(); ++i)

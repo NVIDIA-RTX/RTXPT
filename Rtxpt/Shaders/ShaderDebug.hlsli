@@ -464,7 +464,7 @@ namespace ShaderDebug
 #define DEBUG_PRINT_DEFINED         1
 
 // strings disabled for now, see https://github.com/microsoft/hlsl-specs/issues/279 and https://github.com/microsoft/hlsl-specs/issues/245
-#if 1 // defined(SPIRV)
+#if 0 // defined(SPIRV)
 #define DebugPrint(str, ...) do {                            \
     ShaderDebug::DebugPrinter printer;                       \
     printer.Init();                                          \
@@ -472,7 +472,19 @@ namespace ShaderDebug
     printer.AppendArgs(__VA_ARGS__);                         \
     printer.Commit();                                        \
 } while(false)
-#else
+#elif 1 // dynamic loop
+#define DebugPrint(str, ...) do {                            \
+    ShaderDebug::DebugPrinter printer;                       \
+    printer.Init();                                          \
+    uint strLen;                                             \
+    for(strLen = 0; strLen < 256 && str[strLen]!="\0"[0]; ++strLen) \
+        printer.AppendChar(ShaderDebug::CharToUint(str[strLen])); \
+    printer.AppendChar(0);                                   \
+    printer.StringSize = printer.ByteCount;                  \
+    printer.AppendArgs(__VA_ARGS__);                         \
+    printer.Commit();                                        \
+} while(false)
+#else // this no longer works
 #define DebugPrint(str, ...) do {                            \
     ShaderDebug::DebugPrinter printer;                       \
     printer.Init();                                          \
@@ -781,10 +793,13 @@ float4 main( in float4 pos : SV_Position, in float2 uv : UV ) : SV_Target0
     float2 jitter = sampleNext2D(sampleGenerator);
     uint depthWidth, depthHeight;
     t_DebugVizOutput.GetDimensions(depthWidth, depthHeight);
-    float4 col0 = t_DebugVizOutput[ uint2(uv * float2(depthWidth, depthHeight) + (jitter-0.5) * 0.49 + float2(0.25, 0.25) ) ];
-    float4 col1 = t_DebugVizOutput[ uint2(uv * float2(depthWidth, depthHeight) + (jitter-0.5) * 0.49 + float2(0.25, 0.75) ) ];
-    float4 col2 = t_DebugVizOutput[ uint2(uv * float2(depthWidth, depthHeight) + (jitter-0.5) * 0.49 + float2(0.75, 0.25) ) ];
-    float4 col3 = t_DebugVizOutput[ uint2(uv * float2(depthWidth, depthHeight) + (jitter-0.5) * 0.49 + float2(0.75, 0.75) ) ];
+    float corner = 0.25;
+    float jitterSize = 0.35;
+    float2 scaledUV = uv * float2(depthWidth, depthHeight);
+    float4 col0 = t_DebugVizOutput[ uint2(scaledUV - 0.5 + (jitter-0.5) * jitterSize + float2(corner,       corner) ) ];
+    float4 col1 = t_DebugVizOutput[ uint2(scaledUV - 0.5 + (jitter-0.5) * jitterSize + float2(corner,       1.0-corner) ) ];
+    float4 col2 = t_DebugVizOutput[ uint2(scaledUV - 0.5 + (jitter-0.5) * jitterSize + float2(1.0-corner,   corner) ) ];
+    float4 col3 = t_DebugVizOutput[ uint2(scaledUV - 0.5 + (jitter-0.5) * jitterSize + float2(1.0-corner,   1.0-corner) ) ];
     float4 col = (col0 + col1 + col2 + col3) * 0.25;
     return col;
 #endif

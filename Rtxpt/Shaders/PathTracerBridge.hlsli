@@ -18,6 +18,12 @@
 #include "PathTracer/Lighting/EnvMap.hlsli"
 #include "PathTracer/Lighting/LightSampler.hlsli"
 
+#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
+#define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS 0 //RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS
+#else
+#define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS 0
+#endif
+
 namespace Bridge
 {
     static uint getSampleIndex();
@@ -30,7 +36,7 @@ namespace Bridge
     static uint getMaxDiffuseBounceLimit();
 
     // Gets primary camera ray for given pixel position; Note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
-    static Ray computeCameraRay(const uint2 pixelPos, const uint subSampleIndex);
+    static Ray computeCameraRay(const uint2 pixelPos);
 
     /** Helper to create a texture sampler instance.
     The method for computing texture level-of-detail depends on the configuration.
@@ -94,9 +100,13 @@ namespace Bridge
     // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
     static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, DebugContext debug);
 
-    static void traceScatterRay(const PathState path, inout RayDesc ray, inout RayQuery<RAY_FLAG_NONE> rayQuery, inout PackedHitInfo packedHitInfo, DebugContext debug);
+    static void traceScatterRay(const PathState path, inout RayDesc ray, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, inout PackedHitInfo packedHitInfo, DebugContext debug);
 
+#if PT_USE_RESTIR_GI
     static void StoreSecondarySurfacePositionAndNormal(uint2 pixelCoordinate, float3 worldPos, float3 normal);
+    static void ClearSecondarySurfaceRadiance(uint2 pixelCoordinate);
+    static void AddSecondarySurfaceRadiance(uint2 pixelCoordinate, float3 secondaryRadiance);
+#endif
     
     // If HasEnvMap returns false, Eval, EvalPdf and Sample will not be called.
     static bool HasEnvMap();
@@ -107,8 +117,8 @@ namespace Bridge
     // Used for environment map (distant lights) importance sampling; available if HasEnvMap() returns true
     static EnvMapSampler CreateEnvMapImportanceSampler();
 
-    static LightSampler CreateLightSampler( const uint2 pixelPos, float rayConeWidthOverTotalPathTravel, bool isDebugPixel );
-    static LightSampler CreateLightSampler( const uint2 pixelPos, bool isIndirect, bool isDebugPixel );
+    static LightSampler CreateLightSampler( const uint2 pixelPos, float rayConeWidth, float totalPathLength );
+    static LightSampler CreateLightSampler( const uint2 pixelPos, bool isIndirect );
 
     static float DiffuseEnvironmentMapMIPOffset( );    ///< Use lower MIP level when sampling environment map. Only 0 produces unbiased results
 

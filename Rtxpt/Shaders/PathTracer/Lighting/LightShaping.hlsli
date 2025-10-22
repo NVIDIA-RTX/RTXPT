@@ -20,6 +20,7 @@ struct LightShaping
     float cosConeSoftness;
     uint isSpot;
     int iesProfileIndex;
+    float minFalloff;
 };
 
 LightShaping unpackLightShaping(const PolymorphicLightInfoFull lightInfoFull)
@@ -34,6 +35,7 @@ LightShaping unpackLightShaping(const PolymorphicLightInfoFull lightInfoFull)
         shaping.cosConeAngle = f16tof32(lightInfoFull.Extended.CosConeAngleAndSoftness);
         shaping.cosConeSoftness = f16tof32(lightInfoFull.Extended.CosConeAngleAndSoftness >> 16);
         shaping.iesProfileIndex = 0; // shaping.iesProfileIndex = (lightInfoFull.Base.ColorTypeAndFlags & kPolymorphicLightIesProfileEnableBit) ? lightInfoFull.Extended.IesProfileIndex : -1;
+        shaping.minFalloff = (lightInfoFull.Base.ColorTypeAndFlags & kPolymorphicLightShapingUseMinFalloff) ? kMinSpotlightFalloff : 0.0f;
     }
     
     return shaping;
@@ -80,8 +82,8 @@ float3 evaluateLightShaping(LightShaping shaping, float3 surfacePosition, float3
 
     const float cosTheta = dot(shaping.primaryAxis, lightToSurface);
 
-    const float softSpotlight = smoothstep(shaping.cosConeAngle, 
-        shaping.cosConeAngle + shaping.cosConeSoftness, cosTheta);
+    const float smoothFalloff = smoothstep(shaping.cosConeAngle, shaping.cosConeAngle + shaping.cosConeSoftness, cosTheta);
+    const float softSpotlight = max(shaping.minFalloff, smoothFalloff);
 
     if (softSpotlight <= 0)
         return 0.0;

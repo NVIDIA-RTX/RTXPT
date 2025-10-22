@@ -12,6 +12,7 @@
 #define __ENVMAP_BAKER_HLSL__
 
 #include "SampleProceduralSky.hlsli"
+#include "../../Shaders/ShaderDebug.hlsli"
 
 #define EMB_NUM_COMPUTE_THREADS_PER_DIM     8
 #define EMB_MAXDIRLIGHTS                    16
@@ -128,6 +129,36 @@ float CubemapTexelSolidAngle(float cubeDim, uint2 coord)
                         SphereQuadrantArea( x1, y0 ) +
                         SphereQuadrantArea( x1, y1 );
     return max( 1e-6, abs(solidAngle) );
+}
+
+// results are in 00 01 10 11 order
+float4 CubemapTexelSolidAngle4(float cubeDim, uint2 coordTL)
+{
+    const float iDim = 1.0f / cubeDim;
+    float s = ((coordTL.x + 0.5f) * 2 * iDim) - 1;
+    float t = ((coordTL.y + 0.5f) * 2 * iDim) - 1;
+    const float x0 = s - iDim;
+    const float y0 = t - iDim;
+    const float x1 = s + iDim;
+    const float y1 = t + iDim;
+    const float x2 = s + iDim*3;
+    const float y2 = t + iDim*3;
+
+    float sqa00 = SphereQuadrantArea( x0, y0 );
+    float sqa01 = SphereQuadrantArea( x0, y1 );
+    float sqa10 = SphereQuadrantArea( x1, y0 );
+    float sqa11 = SphereQuadrantArea( x1, y1 );
+    float sqa20 = SphereQuadrantArea( x2, y0 );
+    float sqa21 = SphereQuadrantArea( x2, y1 );
+    float sqa02 = SphereQuadrantArea( x0, y2 );
+    float sqa12 = SphereQuadrantArea( x1, y2 );
+    float sqa22 = SphereQuadrantArea( x2, y2 );
+
+    float solidAngle00 =  max( 1e-6, abs( sqa00 - sqa01 - sqa10 + sqa11 ) );
+    float solidAngle10 =  max( 1e-6, abs( sqa10 - sqa11 - sqa20 + sqa21 ) );
+    float solidAngle01 =  max( 1e-6, abs( sqa01 - sqa02 - sqa11 + sqa12 ) );
+    float solidAngle11 =  max( 1e-6, abs( sqa11 - sqa12 - sqa21 + sqa22 ) );
+    return float4( solidAngle00, solidAngle01, solidAngle10, solidAngle11 );
 }
 
 // Note: a lot of this can be optimized if need be; currently the cost is tiny, but could grow in case of many directional lights
@@ -253,11 +284,19 @@ void BaseLayerCS( uint3 dispatchThreadID : SV_DispatchThreadID )
     uint3 src01 = uint3(cubePixelPos.x*2 + 0, cubePixelPos.y*2 + 1, cubeFace);
     uint3 src10 = uint3(cubePixelPos.x*2 + 1, cubePixelPos.y*2 + 0, cubeFace);
     uint3 src11 = uint3(cubePixelPos.x*2 + 1, cubePixelPos.y*2 + 1, cubeFace);
-    
+
+#if 0    
     float w00 = CubemapTexelSolidAngle(cubeRes, src00.xy);
     float w01 = CubemapTexelSolidAngle(cubeRes, src01.xy);
     float w10 = CubemapTexelSolidAngle(cubeRes, src10.xy);
     float w11 = CubemapTexelSolidAngle(cubeRes, src11.xy);
+#else
+    float4 wsa = CubemapTexelSolidAngle4(cubeRes, src00.xy);
+    float w00 = wsa.x;
+    float w01 = wsa.y;
+    float w10 = wsa.z;
+    float w11 = wsa.w;
+#endif
     
     float wsum = w00+w01+w10+w11;
     
@@ -304,10 +343,22 @@ void MIPReduceCS( uint3 dispatchThreadID : SV_DispatchThreadID )
     uint3 src10 = uint3(cubePixelPos.x*2 + 1, cubePixelPos.y*2 + 0, cubeFace);
     uint3 src11 = uint3(cubePixelPos.x*2 + 1, cubePixelPos.y*2 + 1, cubeFace);
     
+#if 0
     float w00 = CubemapTexelSolidAngle(destinationRes*2, src00.xy);
     float w01 = CubemapTexelSolidAngle(destinationRes*2, src01.xy);
     float w10 = CubemapTexelSolidAngle(destinationRes*2, src10.xy);
     float w11 = CubemapTexelSolidAngle(destinationRes*2, src11.xy);
+#else
+    float4 wsa = CubemapTexelSolidAngle4(destinationRes*2, src00.xy);
+    float w00 = wsa.x;
+    float w01 = wsa.y;
+    float w10 = wsa.z;
+    float w11 = wsa.w;
+#endif
+
+    //float4 wsa = CubemapTexelSolidAngle4(destinationRes*2, src00.xy);
+    //if (any(abs(float4(w00, w01, w10, w11)-wsa)>1e-7) )
+    //    DebugPrint( "", w00*10000, w01*10000, w10*10000, w11*10000, wsa*10000 );
     
     float wsum = w00+w01+w10+w11;
     

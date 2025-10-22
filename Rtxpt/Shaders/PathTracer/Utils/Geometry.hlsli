@@ -81,4 +81,37 @@ float pdfAtoW(float pdfA, float distance_, float cosTheta)
     return pdfA * sq(distance_) / max(cosTheta, 2e-9f); //< TODO: take this epsilon out as a global const
 }
 
+// Todo: perhaps also do a variant that returns t1 (closer) and t2 (farther) 
+bool IntersectRaySphere( float3 rayOrigin, float3 rayDir, float3 sphereCenter, float sphereRadius, out float3 outHitPoint)  // rayDir must be normalized
+{   // analytic approach
+    float3 oc = rayOrigin - sphereCenter;
+    float a = 1; // dot(rayDir, rayDir);    <- assume rayDir is normalized
+    float b = 2.0 * dot(oc, rayDir);
+    float c = dot(oc, oc) - sphereRadius * sphereRadius;
+    float discriminant = b * b - 4.0 * a * c;
+
+    if (discriminant < 0.0)
+    {
+        outHitPoint = float3(0, 0, 0);
+        return false; // No intersection
+    }
+
+    float sqrtDisc = sqrt(discriminant);
+
+    // Two roots, take the smallest positive t
+    float t1 = (-b - sqrtDisc) / (2.0 * a);
+    float t2 = (-b + sqrtDisc) / (2.0 * a);
+
+    float t = (t1 >= 0.0) ? t1 : ((t2 >= 0.0) ? t2 : -1.0);
+
+    if (t < 0.0)
+    {
+        outHitPoint = float3(0, 0, 0);
+        return false; // Intersection behind the ray
+    }
+
+    outHitPoint = rayOrigin + rayDir * t;
+    return true;
+}
+
 #endif // __GEOMETRY_HLSLI__

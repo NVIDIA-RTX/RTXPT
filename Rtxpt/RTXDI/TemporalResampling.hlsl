@@ -42,12 +42,12 @@ void RayGen()
 
     //Adds a small random offet to the motion vector
     // We current do not have a method to check for complex surfaces 
-   bool usePermutationSampling = false;
-   //if (g_ResamplingConst.enablePermutationSampling)
-   //{
-   //    // Permutation sampling makes more noise on thin, high-detail objects.
-   //    usePermutationSampling = !IsComplexSurface(pixelPosition, surface);
-   //}
+    bool usePermutationSampling = g_RtxdiBridgeConst.restirDI.temporalResamplingParams.enablePermutationSampling;
+    //if (g_ResamplingConst.enablePermutationSampling)
+    //{
+    //   // Permutation sampling makes more noise on thin, high-detail objects.
+    //    usePermutationSampling = !IsComplexSurface(pixelPosition, surface);
+    //}
 
     RTXDI_DIReservoir temporalReservoir = RTXDI_EmptyDIReservoir();
     int2 temporalSamplePixelPos = -1;
@@ -97,7 +97,7 @@ void RayGen()
 
     // useful for debugging!
     DebugContext debug;
-    debug.Init(pixelPosition, g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
+    debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
 
     switch (g_Const.debug.debugViewType)
     {

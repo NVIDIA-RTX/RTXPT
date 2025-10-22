@@ -89,7 +89,7 @@ LightsBaker::~LightsBaker()
 {
 }
 
-void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, std::shared_ptr<ShaderDebug> shaderDebug, const uint2 screenResolution)
+void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, std::shared_ptr<ShaderDebug> shaderDebug, const uint2 renderResolution)
 {
     m_bindlessLayout = bindlessLayout;
     m_commonPasses = commonPasses;
@@ -104,7 +104,7 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
         nvrhi::BindingLayoutDesc layoutDesc;
         layoutDesc.visibility = nvrhi::ShaderType::Compute;
         layoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
+            nvrhi::BindingLayoutItem::StructuredBuffer_SRV(20),     // m_constantBuffer
             nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0),      // u_controlBuffer
             nvrhi::BindingLayoutItem::StructuredBuffer_UAV(1),      // u_lightsBuffer
             nvrhi::BindingLayoutItem::StructuredBuffer_UAV(2),      // u_lightsExBuffer
@@ -117,24 +117,29 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
             nvrhi::BindingLayoutItem::TypedBuffer_UAV(9),           // u_lightSamplingProxies
             nvrhi::BindingLayoutItem::Texture_UAV(10),              // u_envLightLookupMap
             //nvrhi::BindingLayoutItem::TypedBuffer_UAV(11),
-            nvrhi::BindingLayoutItem::Texture_UAV(12),              // u_feedbackReservoirBuffer
-            nvrhi::BindingLayoutItem::Texture_UAV(13),              // u_processedFeedbackBuffer
-            nvrhi::BindingLayoutItem::Texture_UAV(14),              // u_reprojectedFeedbackBuffer
-            nvrhi::BindingLayoutItem::Texture_UAV(15),              // u_reprojectedLRFeedbackBuffer
-            nvrhi::BindingLayoutItem::Texture_UAV(16),              // u_narrowSamplingBuffer
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-            nvrhi::BindingLayoutItem::Texture_UAV(17),              // u_feedbackReservoirBufferScratch
+            nvrhi::BindingLayoutItem::Texture_UAV(11),              // u_feedbackTotalWeight
+            nvrhi::BindingLayoutItem::Texture_UAV(12),              // u_feedbackCandidates
+            nvrhi::BindingLayoutItem::Texture_UAV(13),              // u_feedbackTotalWeightScratch
+            nvrhi::BindingLayoutItem::Texture_UAV(14),              // u_feedbackCandidatesScratch
+            nvrhi::BindingLayoutItem::Texture_UAV(15),              // u_feedbackTotalWeightBlended
+            nvrhi::BindingLayoutItem::Texture_UAV(16),              // u_feedbackCandidatesBlended
+            nvrhi::BindingLayoutItem::Texture_UAV(17),              // u_historyDepth
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+            nvrhi::BindingLayoutItem::Texture_UAV(18),              // u_localSamplingBuffer
+#else
+            nvrhi::BindingLayoutItem::TypedBuffer_UAV(18),          // u_localSamplingBuffer
 #endif
             nvrhi::BindingLayoutItem::Texture_SRV(10),              // t_depthBuffer
             nvrhi::BindingLayoutItem::Texture_SRV(11),              // t_motionVectors
             nvrhi::BindingLayoutItem::Texture_SRV(12),              // t_envmapImportanceMap
+            nvrhi::BindingLayoutItem::TypedBuffer_SRV(13),          // t_lightWeightsHistoric
             nvrhi::BindingLayoutItem::Sampler(0),                   // point sampler
             nvrhi::BindingLayoutItem::Sampler(1),                   // linear sampler
             nvrhi::BindingLayoutItem::Sampler(2),                   // s_MaterialSampler
             nvrhi::BindingLayoutItem::StructuredBuffer_SRV(1),      // StructuredBuffer<SubInstanceData> t_SubInstanceData
             nvrhi::BindingLayoutItem::StructuredBuffer_SRV(2),      // StructuredBuffer<InstanceData> t_InstanceData          
             nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),      // StructuredBuffer<GeometryData> t_GeometryData          
-            nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),      // geometry debug buffer not needed here?
+            //nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),      // geometry debug buffer not needed here?
             nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),      // StructuredBuffer<PTMaterialData> t_PTMaterialData
             nvrhi::BindingLayoutItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX),
             nvrhi::BindingLayoutItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX),
@@ -153,22 +158,22 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
 
     m_resetPastToCurrentHistory.Init(m_device, *m_shaderFactory, shaderFile, "ResetPastToCurrentHistory",   shaderMacros, pipelineDesc.bindingLayouts);
 
-    m_envLightsBackupPast      .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsBackupPast"      ,   shaderMacros, pipelineDesc.bindingLayouts);
-    m_envLightsSubdivideBase   .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsSubdivideBase"   ,   shaderMacros, pipelineDesc.bindingLayouts);
-    m_envLightsSubdivideBoost  .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsSubdivideBoost"  ,   shaderMacros, pipelineDesc.bindingLayouts);
-    m_envLightsFillLookupMap   .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsFillLookupMap"   ,   shaderMacros, pipelineDesc.bindingLayouts);
-    m_envLightsMapPastToCurrent.Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsMapPastToCurrent",   shaderMacros, pipelineDesc.bindingLayouts);
+    m_envLightsBackupPast       .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsBackupPast"      ,   shaderMacros, pipelineDesc.bindingLayouts);
+    m_envLightsSubdivideBase    .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsSubdivideBase"   ,   shaderMacros, pipelineDesc.bindingLayouts);
+    m_envLightsSubdivideBoost   .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsSubdivideBoost"  ,   shaderMacros, pipelineDesc.bindingLayouts);
+    m_envLightsFillLookupMap    .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsFillLookupMap"   ,   shaderMacros, pipelineDesc.bindingLayouts);
+    m_envLightsMapPastToCurrent .Init(m_device, *m_shaderFactory, shaderFile, "EnvLightsMapPastToCurrent",   shaderMacros, pipelineDesc.bindingLayouts);
 
-    m_clearFeedbackHistory     .Init(m_device, *m_shaderFactory, shaderFile, "ClearFeedbackHistory",        shaderMacros, pipelineDesc.bindingLayouts);
+    m_clearFeedbackHistory      .Init(m_device, *m_shaderFactory, shaderFile, "ClearFeedbackHistory",        shaderMacros, pipelineDesc.bindingLayouts);
+    m_clearAntiLagFeedback      .Init(m_device, *m_shaderFactory, shaderFile, "ClearAntiLagFeedback",        shaderMacros, pipelineDesc.bindingLayouts);
 
-    m_updateFeedbackIndices         .Init(m_device, *m_shaderFactory, shaderFile, "UpdateFeedbackIndices"           , shaderMacros, pipelineDesc.bindingLayouts);
     m_processFeedbackHistoryP0      .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP0"        , shaderMacros, pipelineDesc.bindingLayouts);
-    m_processFeedbackHistoryP1      .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP1"        , shaderMacros, pipelineDesc.bindingLayouts);
+    m_processFeedbackHistoryP1a     .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP1a"       , shaderMacros, pipelineDesc.bindingLayouts);
+    m_processFeedbackHistoryP1b     .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP1b"       , shaderMacros, pipelineDesc.bindingLayouts);
     m_processFeedbackHistoryP2      .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP2"        , shaderMacros, pipelineDesc.bindingLayouts);
-    m_processFeedbackHistoryP3a     .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP3a"       , shaderMacros, pipelineDesc.bindingLayouts);
-    m_processFeedbackHistoryP3b     .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP3b"       , shaderMacros, pipelineDesc.bindingLayouts);
-    m_processFeedbackHistoryP3c     .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP3c"       , shaderMacros, pipelineDesc.bindingLayouts);
+    m_processFeedbackHistoryP3      .Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryP3"        , shaderMacros, pipelineDesc.bindingLayouts);
     m_processFeedbackHistoryDebugViz.Init(m_device, *m_shaderFactory, shaderFile, "ProcessFeedbackHistoryDebugViz"  , shaderMacros, pipelineDesc.bindingLayouts);
+    m_updateControlBufferMultipass  .Init(m_device, *m_shaderFactory, shaderFile, "UpdateControlBufferMultipass"    , shaderMacros, pipelineDesc.bindingLayouts);
 
     m_resetLightProxyCounters       .Init(m_device, *m_shaderFactory, shaderFile, "ResetLightProxyCounters"         , shaderMacros, pipelineDesc.bindingLayouts);
     m_computeWeights                .Init(m_device, *m_shaderFactory, shaderFile, "ComputeWeights"                  , shaderMacros, pipelineDesc.bindingLayouts);
@@ -189,21 +194,31 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
     m_pointSampler = m_device->createSampler(samplerDesc);
 
     // destroy resources before creating to avoid lifetimes of old and new overlapping (even with itself, due to assignment operator) - avoids fragmentation and peaks
-    m_constantBuffer = m_controlBuffer = m_lightsBuffer = m_lightsExBuffer = m_historyRemapCurrentToPastBuffer = m_historyRemapPastToCurrentBuffer = m_scratchBuffer = m_lightWeights = m_perLightProxyCounters = m_scratchList = m_lightSamplingProxies = nullptr;
+    m_constantBuffer = m_controlBuffer = m_lightsBuffer = m_lightsExBuffer = m_historyRemapCurrentToPastBuffer = m_historyRemapPastToCurrentBuffer = m_scratchBuffer = m_lightWeightsPing = m_lightWeightsPong = m_perLightProxyCounters = m_scratchList = m_lightSamplingProxies = nullptr;
     //m_lightingConstants = nullptr;
     m_device->waitForIdle();    // make sure readback buffer is no longer used by the GPU
     m_controlBufferReadback = nullptr;
 
-    // Main constant buffer
-    m_constantBuffer = m_device->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(
-        sizeof(LightsBakerConstants), "LightsBakerConstants", engine::c_MaxRenderPassConstantBufferVersions * 32));	// *32 we could be updating few times per frame
+    // // Main constant buffer
+    // m_constantBuffer = m_device->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(
+    //     sizeof(LightsBakerConstants), "LightsBakerConstants", engine::c_MaxRenderPassConstantBufferVersions * 32));	// *32 we could be updating few times per frame
 
     {
         nvrhi::BufferDesc bufferDesc;
+        bufferDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+        bufferDesc.keepInitialState = true;
+        bufferDesc.canHaveUAVs = false;
+
+        // Main constant buffer
+        bufferDesc.byteSize = sizeof(LightsBakerConstants) * 1;
+        bufferDesc.structStride = sizeof(LightsBakerConstants);
+        bufferDesc.debugName = "LightsBakerConstants";
+        m_constantBuffer = m_device->createBuffer(bufferDesc);
+
         bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
         bufferDesc.keepInitialState = true;
         bufferDesc.canHaveUAVs = true;
-        
+
         bufferDesc.byteSize = sizeof(LightingControlData) * 1;
         bufferDesc.structStride = sizeof(LightingControlData);
         bufferDesc.debugName = "LightingControlData";
@@ -246,8 +261,10 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
         
         bufferDesc.byteSize = sizeof(float) * (RTXPT_LIGHTING_MAX_LIGHTS+1);    // +1 is purely because perLightProxyCounters needs one more to store invalid feedback
         bufferDesc.format = nvrhi::Format::R32_FLOAT;
-        bufferDesc.debugName = "LightsWeights";
-        m_lightWeights = m_device->createBuffer(bufferDesc);
+        bufferDesc.debugName = "LightsWeightsPing";
+        m_lightWeightsPing = m_device->createBuffer(bufferDesc);
+        bufferDesc.debugName = "LightsWeightsPong";
+        m_lightWeightsPong = m_device->createBuffer(bufferDesc);
 
         bufferDesc.format = nvrhi::Format::R32_UINT;
         bufferDesc.debugName = "HistoryRemapCurrentToPast";
@@ -257,7 +274,7 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
         bufferDesc.debugName = "PerLightProxyCounters";
         m_perLightProxyCounters = m_device->createBuffer(bufferDesc);
         bufferDesc.debugName = "ScratchList";
-        assert( bufferDesc.byteSize / sizeof(uint) >= (RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT*2) );    // we need at least 2 times RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT for temporary envmap quads stuff
+        assert( bufferDesc.byteSize / sizeof(uint) >= (RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT*2) );    // we need at least 2 times RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT for temporary envmap quads stuff
         m_scratchList = m_device->createBuffer(bufferDesc);
         bufferDesc.byteSize = sizeof(uint) * RTXPT_LIGHTING_MAX_SAMPLING_PROXIES;
         bufferDesc.debugName = "LightSamplingProxies";
@@ -275,26 +292,27 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
         m_framesFromLastReadbackCopy = -1;
     }
 
-    assert(screenResolution.x > 0 && screenResolution.y > 0);
-    if (m_NEE_AT_FeedbackBuffer == nullptr || m_NEE_AT_FeedbackBuffer->getDesc().width != screenResolution.x || m_NEE_AT_FeedbackBuffer->getDesc().height != screenResolution.y*2)
+    assert(renderResolution.x > 0 && renderResolution.y > 0);
+    if (m_NEE_AT_FeedbackTotalWeight == nullptr || m_NEE_AT_FeedbackTotalWeight->getDesc().width != renderResolution.x || m_NEE_AT_FeedbackTotalWeight->getDesc().height != renderResolution.y)
     {
-        // destroy before creating to avoid lifetimes of old and new overlapping (even with itself, due to assignment operator) - avoids fragmentation and peaks
-        m_NEE_AT_ProcessedFeedbackBuffer = nullptr;
-        m_NEE_AT_ReprojectedFeedbackBuffer = nullptr;
-        m_NEE_AT_ReprojectedLRFeedbackBuffer = nullptr;
-        m_NEE_AT_SamplingBuffer = nullptr;
-        if (m_NEE_AT_FeedbackBuffer != nullptr)
-        {
-            m_device->waitForIdle();    // make sure buffer is no longer used by the GPU
-            m_NEE_AT_FeedbackBuffer = nullptr;
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-            m_NEE_AT_FeedbackBufferScratch = nullptr;
-#endif
-        }
+        if (m_NEE_AT_FeedbackTotalWeight )
+            m_device->waitForIdle();    // make sure none of the buffers are used by the GPU
 
+        // destroy before creating to avoid lifetimes of old and new overlapping (even with itself, due to assignment operator) - avoids fragmentation and peaks
+        m_NEE_AT_FeedbackTotalWeight = nullptr;
+        m_NEE_AT_FeedbackCandidates  = nullptr;
+        m_NEE_AT_FeedbackTotalWeightScratch = nullptr;
+        m_NEE_AT_FeedbackCandidatesScratch  = nullptr;
+        m_NEE_AT_FeedbackTotalWeightBlended = nullptr;
+        m_NEE_AT_FeedbackCandidatesBlended  = nullptr;
+        
+        m_NEE_AT_LocalSamplingBuffer = nullptr;
+        m_NEE_AT_HistoryDepth = nullptr;
+
+        // feedback reservoirs
         nvrhi::TextureDesc desc;
-        desc.width = screenResolution.x;
-        desc.height = screenResolution.y*2;
+        desc.width = renderResolution.x;
+        desc.height = renderResolution.y;
         desc.isVirtual = false;
         desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
         desc.isRenderTarget = false;
@@ -306,47 +324,61 @@ void LightsBaker::CreateRenderPasses(nvrhi::IBindingLayout* bindlessLayout, std:
         desc.isTypeless = false;
         desc.isUAV = true;
         desc.mipLevels = 1;
-        desc.format = nvrhi::Format::RG32_UINT;
-        desc.debugName = "NEE_AT_FeedbackReservoirBuffer";
-        m_NEE_AT_FeedbackBuffer = m_device->createTexture(desc);
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-        desc.debugName = "NEE_AT_FeedbackReservoirBufferScratch";
-        m_NEE_AT_FeedbackBufferScratch = m_device->createTexture(desc);
-#endif
+        desc.format = nvrhi::Format::R32_FLOAT;
+        desc.debugName = "NEE_AT_HistoryDepth";
+        m_NEE_AT_HistoryDepth = m_device->createTexture(desc);
+        desc.debugName = "NEE_AT_FeedbackTotalWeight";
+        m_NEE_AT_FeedbackTotalWeight = m_device->createTexture(desc);
+        desc.debugName = "NEE_AT_FeedbackTotalWeightScratch";
+        m_NEE_AT_FeedbackTotalWeightScratch = m_device->createTexture(desc);
+        nvrhi::TextureDesc miniDesc = desc; miniDesc.width = div_ceil(desc.width, RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE); miniDesc.height = div_ceil(desc.height, RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE);
+        desc.debugName = "NEE_AT_EarlyFeedbackTotalWeightScratch";
+        m_NEE_AT_FeedbackTotalWeightBlended = m_device->createTexture(miniDesc);
         m_NEE_AT_FeedbackBufferFilled = false;
+        static_assert(RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 1 || RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 2 || RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 4); // TODO: upgrade to allow 1
+        if (RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 1)
+            desc.format = nvrhi::Format::R32_UINT;
+        else if (RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 2)
+            desc.format = nvrhi::Format::RG32_UINT; 
+        else if (RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH == 4)
+            desc.format = nvrhi::Format::RGBA32_UINT; 
+        else assert(false);
+        desc.debugName = "NEE_AT_FeedbackCandidates";
+        m_NEE_AT_FeedbackCandidates = m_device->createTexture(desc);
+        desc.debugName = "NEE_AT_FeedbackCandidatesScratch";
+        m_NEE_AT_FeedbackCandidatesScratch = m_device->createTexture(desc);
+        miniDesc = desc; miniDesc.width = div_ceil(desc.width, RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE); miniDesc.height = div_ceil(desc.height, RTXPT_NEEAT_EARLY_FEEDBACK_TILE_SIZE);
+        desc.debugName = "NEE_AT_EarlyFeedbackCandidatesScratch";
+        m_NEE_AT_FeedbackCandidatesBlended = m_device->createTexture(miniDesc);
 
-        desc.format = nvrhi::Format::RG32_UINT;
-        desc.debugName = "NEE_AT_ReprojectedFeedbackBuffer";
-        m_NEE_AT_ReprojectedFeedbackBuffer = m_device->createTexture(desc);
-        desc.format = nvrhi::Format::R32_UINT;
-        desc.debugName = "NEE_AT_ProcessedFeedbackBuffer";
-        m_NEE_AT_ProcessedFeedbackBuffer = m_device->createTexture(desc);
-        desc.debugName = "NEE_AT_ReprojectedLRFeedbackBuffer";
-        desc.width = dm::div_ceil(screenResolution.x, RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE);
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-        desc.height = dm::div_ceil(screenResolution.y, RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE)*2;
+        {
+            m_localSamplingBufferWidth  = dm::div_ceil(renderResolution.x, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE);
+            m_localSamplingBufferHeight = dm::div_ceil(renderResolution.y, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE);
+            m_localSamplingBufferWidth  += 1;   // add border to accommodate for jitter offset for the local sampling buffers
+            m_localSamplingBufferHeight += 1;   // add border to accommodate for jitter offset for the local sampling buffers
+            // m_localSamplingBufferDepth          = RTXPT_LIGHTING_LOCAL_PROXY_COUNT
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+            desc.dimension = nvrhi::TextureDimension::Texture3D;
+            desc.width = m_localSamplingBufferWidth;
+            desc.height = m_localSamplingBufferHeight;
+            desc.depth = m_localSamplingBufferDepth;
+            desc.format = nvrhi::Format::R32_UINT;
+            desc.debugName = "NEE_AT_LocalSamplingBuffer";
+            m_NEE_AT_LocalSamplingBuffer = m_device->createTexture(desc);
 #else
-        desc.height = dm::div_ceil(screenResolution.y, RTXPT_LIGHTING_LR_SAMPLING_BUFFER_SCALE);
+            nvrhi::BufferDesc bufferDesc;
+            bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+            bufferDesc.keepInitialState = true;
+            bufferDesc.byteSize = sizeof(uint) * m_localSamplingBufferWidth * m_localSamplingBufferHeight * m_localSamplingBufferDepth;
+            bufferDesc.canHaveUAVs = true;
+            bufferDesc.canHaveTypedViews = true;
+            bufferDesc.canHaveRawViews = false;
+            bufferDesc.format = nvrhi::Format::R32_UINT;
+            bufferDesc.debugName = "NEE_AT_LocalSamplingBuffer";
+            m_NEE_AT_LocalSamplingBuffer = m_device->createBuffer(bufferDesc);
 #endif
-        m_NEE_AT_ReprojectedLRFeedbackBuffer = m_device->createTexture(desc);
+        }
 
-        desc.dimension = nvrhi::TextureDimension::Texture3D;
-        desc.format = nvrhi::Format::R32_UINT;
-        desc.debugName = "NEE_AT_SamplingBuffer";
-        desc.width  = dm::div_ceil(screenResolution.x, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE);
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-        desc.height = dm::div_ceil(screenResolution.y, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE)*2;
-#else
-        desc.height = dm::div_ceil(screenResolution.y, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE);
-#endif
-        // add border to accommodate for jitter offset
-        desc.width += 1;
-        desc.height += 1;
-
-        desc.depth = RTXPT_LIGHTING_NARROW_PROXY_COUNT;
-        assert(desc.depth == RTXPT_LIGHTING_NARROW_PROXY_COUNT);
-        static_assert(RTXPT_LIGHTING_NARROW_PROXY_COUNT <= 256);
-        m_NEE_AT_SamplingBuffer = m_device->createTexture(desc);
 
         assert(RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE>=RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE && ((RTXPT_LIGHTING_SAMPLING_BUFFER_WINDOW_SIZE-RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE)%2==0));
     }
@@ -459,27 +491,33 @@ static PolymorphicLightInfoFull ConvertLight( donut::engine::Light & light )
                 assert(false); // not tested with radius == 0
 			    float3 flux = spot.color * spot.intensity;
 
-			    polymorphic.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kPoint << kPolymorphicLightTypeShift;
+			    polymorphic.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kPoint << kPolymorphicLightTypeShift | ((spot.outerAngle < 0)?(kPolymorphicLightShapingUseMinFalloff):(0));
+                
 			    packLightColor(flux, polymorphic);
 			    polymorphic.Center = float3(spot.GetPosition());
                 polymorphic.Direction1 = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
-                polymorphic.Direction2 = fp32ToFp16(dm::radians(spot.outerAngle));
+                polymorphic.Direction2 = fp32ToFp16(dm::radians(abs(spot.outerAngle)));
 			    polymorphic.Direction2 |= fp32ToFp16(dm::radians(spot.innerAngle)) << 16;
             }
             else
             {
                 float projectedArea = dm::PI_f * (spot.radius*spot.radius);
                 float3 radiance = spot.color * spot.intensity / projectedArea;
-                float softness = saturate(1.f - spot.innerAngle / spot.outerAngle);
+                float softness = saturate(1.f - spot.innerAngle / abs(spot.outerAngle));
 
-                polymorphic.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift;
+                polymorphic.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift | ((spot.outerAngle < 0)?(kPolymorphicLightShapingUseMinFalloff):(0));
                 polymorphic.ColorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
                 packLightColor(radiance, polymorphic);
                 polymorphic.Center = float3(spot.GetPosition());
                 polymorphic.Scalars = fp32ToFp16(spot.radius);
-                polymorphicEx.PrimaryAxis = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
-                polymorphicEx.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(spot.outerAngle)));
-                polymorphicEx.CosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
+                if (abs(spot.outerAngle) > 0)
+                {
+                    polymorphic.ColorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
+                    polymorphicEx.PrimaryAxis = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
+                    polymorphicEx.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(abs(spot.outerAngle))));
+                    polymorphicEx.CosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
+                }
+                packLightColor(radiance, polymorphic);
             }
 
             // example for the IES profile - few things need connecting
@@ -488,7 +526,7 @@ static PolymorphicLightInfoFull ConvertLight( donut::engine::Light & light )
                  auto& spot = static_cast<const SpotLightWithProfile&>(light);
                  float projectedArea = dm::PI_f * square(spot.radius);
                  float3 radiance = spot.color * spot.intensity / projectedArea;
-                 float softness = saturate(1.f - spot.innerAngle / spot.outerAngle);
+                 float softness = saturate(1.f - spot.innerAngle / abs(spot.outerAngle));
 
                  polymorphic.colorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift;
                  polymorphic.colorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
@@ -496,7 +534,7 @@ static PolymorphicLightInfoFull ConvertLight( donut::engine::Light & light )
                  polymorphic.center = float3(spot.GetPosition());
                  polymorphic.scalars = fp32ToFp16(spot.radius);
                  polymorphic.primaryAxis = packNormalizedVector(float3(normalize(spot.GetDirection())));
-                 polymorphic.cosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(spot.outerAngle)));
+                 polymorphic.cosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(abs(spot.outerAngle))));
                  polymorphic.cosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
 
                  if (spot.profileTextureIndex >= 0)
@@ -547,17 +585,17 @@ static PolymorphicLightInfoFull ConvertLight( donut::engine::Light & light )
 
 void LightsBaker::CollectEnvmapLightPlaceholders(const BakeSettings & settings, LightingControlData & ctrlBuff, std::vector<PolymorphicLightInfo> & outLightBuffer, std::vector<PolymorphicLightInfoEx> & outLightExBuffer, std::vector<uint> & outLightHistoryRemapCurrentToPastBuffer, std::vector<uint> & outLightHistoryRemapPastToCurrent)
 {
-    ctrlBuff.EnvmapQuadNodeCount += RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT;
-    ctrlBuff.TotalLightCount += RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT;
+    ctrlBuff.EnvmapQuadNodeCount += RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT;
+    ctrlBuff.TotalLightCount += RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT;
 
     // insert placeholder light info
     PolymorphicLightInfo dummy; memset(&dummy, 0, sizeof(dummy));
     PolymorphicLightInfoEx dummyEx; memset(&dummyEx, 0, sizeof(dummyEx));
     dummy.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kEnvironmentQuad << kPolymorphicLightTypeShift;   // no need to fill this, it will be completely overwritten
-    outLightBuffer.insert( outLightBuffer.end(), RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT, dummy );
-    outLightExBuffer.insert( outLightExBuffer.end(), RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT, dummyEx );
+    outLightBuffer.insert( outLightBuffer.end(), RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT, dummy );
+    outLightExBuffer.insert( outLightExBuffer.end(), RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT, dummyEx );
 
-    outLightHistoryRemapCurrentToPastBuffer.insert(outLightHistoryRemapCurrentToPastBuffer.end(), RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT, RTXPT_INVALID_LIGHT_INDEX);
+    outLightHistoryRemapCurrentToPastBuffer.insert(outLightHistoryRemapCurrentToPastBuffer.end(), RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT, RTXPT_INVALID_LIGHT_INDEX);
     outLightHistoryRemapPastToCurrent.insert(outLightHistoryRemapPastToCurrent.end(), ctrlBuff.EnvmapQuadNodeCount, RTXPT_INVALID_LIGHT_INDEX);
 }
 
@@ -605,7 +643,7 @@ void LightsBaker::CollectAnalyticLightsCPU(const BakeSettings & settings, const 
     }
 
     // use current-to-past to create past-to-current: 1st init past-to-current values to invalid; then fill them up for those we can find historic match
-    uint startingLight = (uint)outLightHistoryRemapPastToCurrent.size(); assert( startingLight == RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT ); // we know we should have envmap placeholders set up before so do sanity check
+    uint startingLight = (uint)outLightHistoryRemapPastToCurrent.size(); assert( startingLight == RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT ); // we know we should have envmap placeholders set up before so do sanity check
     outLightHistoryRemapPastToCurrent.insert(outLightHistoryRemapPastToCurrent.end(), ctrlBuff.AnalyticLightCount, RTXPT_INVALID_LIGHT_INDEX);
     for( uint lightIndex = startingLight; lightIndex < outLightHistoryRemapCurrentToPastBuffer.size(); lightIndex++ )
     {
@@ -674,7 +712,7 @@ uint LightsBaker::ProcessGeometry( const BakeSettings & settings, const std::sha
             else
                 subInstanceData[subInstanceIndex].AnalyticProxyLightIndex = RTXPT_INVALID_LIGHT_INDEX;
 
-            if (!materialPT.IsEmissive())
+            if (!materialPT.IsEmissive() || materialPT.SkipRender)
             {
                 // remove the info about this instance, just in case it was emissive and now it's not
                 m_historyRemapEmissiveLightBlockOffsets.erase(instanceHash);
@@ -753,65 +791,126 @@ nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors)
         envMapRadianceAndImportanceMap = ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture.Get());
 
     outBindingSetDesc.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
+            //nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
             //nvrhi::BindingSetItem::PushConstants(1, sizeof(SampleMiniConstants)),
+            nvrhi::BindingSetItem::StructuredBuffer_SRV(20, m_constantBuffer),
             nvrhi::BindingSetItem::StructuredBuffer_UAV(0, m_controlBuffer),
             nvrhi::BindingSetItem::StructuredBuffer_UAV(1, m_lightsBuffer),
             nvrhi::BindingSetItem::StructuredBuffer_UAV(2, m_lightsExBuffer),
             nvrhi::BindingSetItem::RawBuffer_UAV(3, m_scratchBuffer),
             nvrhi::BindingSetItem::TypedBuffer_UAV(4, m_scratchList),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(5, m_lightWeights),
+            nvrhi::BindingSetItem::TypedBuffer_UAV(5, (m_ping)?(m_lightWeightsPing):(m_lightWeightsPong)),
             nvrhi::BindingSetItem::TypedBuffer_UAV(6, m_historyRemapCurrentToPastBuffer),
             nvrhi::BindingSetItem::TypedBuffer_UAV(7, m_historyRemapPastToCurrentBuffer),
             nvrhi::BindingSetItem::TypedBuffer_UAV(8, m_perLightProxyCounters),
             nvrhi::BindingSetItem::TypedBuffer_UAV(9, m_lightSamplingProxies),
             nvrhi::BindingSetItem::Texture_UAV(10, m_envLightLookupMap),
             //nvrhi::BindingSetItem::TypedBuffer_UAV(11, ),
-            nvrhi::BindingSetItem::Texture_UAV(12, m_NEE_AT_FeedbackBuffer),
-            nvrhi::BindingSetItem::Texture_UAV(13, m_NEE_AT_ProcessedFeedbackBuffer),
-            nvrhi::BindingSetItem::Texture_UAV(14, m_NEE_AT_ReprojectedFeedbackBuffer),
-            nvrhi::BindingSetItem::Texture_UAV(15, m_NEE_AT_ReprojectedLRFeedbackBuffer),
-            nvrhi::BindingSetItem::Texture_UAV(16, m_NEE_AT_SamplingBuffer),
-#if RTXPT_LIGHTING_NEEAT_ENABLE_RESERVOIR_HISTORY
-            nvrhi::BindingSetItem::Texture_UAV(17, m_NEE_AT_FeedbackBufferScratch),
+            nvrhi::BindingSetItem::Texture_UAV(11, m_NEE_AT_FeedbackTotalWeight ),
+            nvrhi::BindingSetItem::Texture_UAV(12, m_NEE_AT_FeedbackCandidates ),
+            nvrhi::BindingSetItem::Texture_UAV(13, m_NEE_AT_FeedbackTotalWeightScratch ),
+            nvrhi::BindingSetItem::Texture_UAV(14, m_NEE_AT_FeedbackCandidatesScratch ),
+            nvrhi::BindingSetItem::Texture_UAV(15, m_NEE_AT_FeedbackTotalWeightBlended ),
+            nvrhi::BindingSetItem::Texture_UAV(16, m_NEE_AT_FeedbackCandidatesBlended ),
+            nvrhi::BindingSetItem::Texture_UAV(17, m_NEE_AT_HistoryDepth ),
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+            nvrhi::BindingSetItem::Texture_UAV(18, m_NEE_AT_LocalSamplingBuffer ),
+#else
+            nvrhi::BindingSetItem::TypedBuffer_UAV(18, m_NEE_AT_LocalSamplingBuffer),
 #endif
             nvrhi::BindingSetItem::Texture_SRV(10, depthBuffer), //((nvrhi::TextureHandle)m_NEE_AT_FeedbackBuffer.Get())),
             nvrhi::BindingSetItem::Texture_SRV(11, motionVectors),
             nvrhi::BindingSetItem::Texture_SRV(12, envMapRadianceAndImportanceMap),
+            nvrhi::BindingSetItem::TypedBuffer_SRV(13, (!m_ping)?(m_lightWeightsPing):(m_lightWeightsPong)),
             nvrhi::BindingSetItem::Sampler(0, m_pointSampler),
             nvrhi::BindingSetItem::Sampler(1, m_linearSampler),
             nvrhi::BindingSetItem::Sampler(2, m_commonPasses->m_AnisotropicWrapSampler),    // s_MaterialSampler
             nvrhi::BindingSetItem::StructuredBuffer_SRV(1, subInstanceDataBuffer),
             nvrhi::BindingSetItem::StructuredBuffer_SRV(2, scene->GetInstanceBuffer()),
             nvrhi::BindingSetItem::StructuredBuffer_SRV(3, scene->GetGeometryBuffer()),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(4, ommBaker->GetGeometryDebugBuffer()),
+            //nvrhi::BindingSetItem::StructuredBuffer_SRV(4, ommBaker->GetGeometryDebugBuffer()),
             nvrhi::BindingSetItem::StructuredBuffer_SRV(5, materialsBaker->GetMaterialDataBuffer()),
             nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
             nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),
     };
 }
 
-void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _settings, double sceneTime, const std::shared_ptr<ExtendedScene>& scene, std::shared_ptr<class MaterialsBaker> materialsBaker, 
-    std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, std::vector<SubInstanceData>& subInstanceData)
+void LightsBaker::UpdateFrustumConsts(LightsBakerConstants & outConsts, const LightsBaker::BakeSettings & settings)
 {
-    RAII_SCOPE( commandList->beginMarker("LightBaker");, commandList->endMarker(); );
-    // RAII_SCOPE( commandList->setEnableAutomaticBarriers(false);, commandList->setEnableAutomaticBarriers(true); );
+    float4 frustPlanes[6];
 
-    uint2 prevLocalJitter = m_localJitter;
-    if (_settings.ResetFeedback)
+    auto vp = [&settings](int row, int col) { return settings.ViewProjMatrix.col(col)[row]; };
+    // Left clipping plane
+    frustPlanes[0] = float4( vp(0, 3) + vp(0, 0), vp(1, 3) + vp(1, 0), vp(2, 3) + vp(2, 0), -(vp(3, 3) + vp(3, 0)));
+    // Right clipping plane
+    frustPlanes[1] = float4( vp(0, 3) - vp(0, 0), vp(1, 3) - vp(1, 0), vp(2, 3) - vp(2, 0), -(vp(3, 3) - vp(3, 0)));
+    // Top clipping plane
+    frustPlanes[2] = float4( vp(0, 3) - vp(0, 1), vp(1, 3) - vp(1, 1), vp(2, 3) - vp(2, 1), -(vp(3, 3) - vp(3, 1)));
+    // Bottom clipping plane
+    frustPlanes[3] = float4( vp(0, 3) + vp(0, 1), vp(1, 3) + vp(1, 1), vp(2, 3) + vp(2, 1), -(vp(3, 3) + vp(3, 1)));
+    // Near clipping plane
+    frustPlanes[4] = float4( vp(0, 3) - vp(0, 2), vp(1, 3) - vp(1, 2), vp(2, 3) - vp(2, 2), -(vp(3, 3) - vp(3, 2)));
+
+    //planes[LEFT_PLANE]  = float4(-m[0].w - m[0].x, -m[1].w - m[1].x, -m[2].w - m[2].x, m[3].w + m[3].x);
+    //planes[RIGHT_PLANE] = float4(-m[0].w + m[0].x, -m[1].w + m[1].x, -m[2].w + m[2].x, m[3].w - m[3].x);
+    //planes[TOP_PLANE]   = float4(-m[0].w + m[0].y, -m[1].w + m[1].y, -m[2].w + m[2].y, m[3].w - m[3].y);
+    //planes[BOTTOM_PLANE]= float4(-m[0].w - m[0].y, -m[1].w - m[1].y, -m[2].w - m[2].y, m[3].w + m[3].y);
+    //planes[NEAR_PLANE]  = float4(-m[0].z, -m[1].z, -m[2].z, m[3].z);
+    //planes[FAR_PLANE]   = float4(-m[0].w + m[0].z, -m[1].w + m[1].z, -m[2].w + m[2].z, m[3].w - m[3].z);
+
+    auto normalizePlane = [ ](const float4& plane)
     {
-        m_updateCounter = 0;
-        m_localJitter = prevLocalJitter = {0,0};
-    }
-    m_updateCounter++;
+        float lengthSq = dot(plane.xyz(), plane.xyz());
+        float scale = (lengthSq > 0.f ? (1.0f / sqrtf(lengthSq)) : 0);
+        return plane * scale;
+    };
 
+    // Normalize the plane equations
+    for (int i = 0; i < 5; i++)
+        frustPlanes[i] = normalizePlane(frustPlanes[i]);
+
+    // compute far plane with inverted near plane pushed away by DISTANT_LIGHT_DISTANCE
+    frustPlanes[5] = dm::float4(-frustPlanes[4].xyz(), -frustPlanes[4].w - DISTANT_LIGHT_DISTANCE);
+
+    // backup for debugging and sanity check and write to const buffer
+    for (int i = 0; i < 6; i++)
+    {
+        float dist = dm::dot(frustPlanes[i].xyz(), settings.CameraPosition + settings.CameraDirection * float(DISTANT_LIGHT_DISTANCE * 0.001f) ) - frustPlanes[i].w;
+        assert( dist > 0 );
+        if (m_dbgFreezeFrustumUpdates)
+            frustPlanes[i] = m_dbgFrozenFrustum[i];
+        else
+            m_dbgFrozenFrustum[i] = frustPlanes[i];
+        outConsts.FrustumPlanes[i] = frustPlanes[i];
+    }
+    outConsts.DebugDrawFrustum  = m_dbgFreezeFrustumUpdates;
+
+    auto getCorner = [&](int index) 
+    {
+        bool bone = (index & 1) != 0;
+        bool btwo = (index & 2) != 0;
+        const float4 & a = (bone == btwo) ? frustPlanes[1] : frustPlanes[0];
+        const float4 & b = (index & 2) ? frustPlanes[3] : frustPlanes[2];
+        const float4 & c = (index & 4) ? frustPlanes[5] : frustPlanes[4];
+
+        float3x3 m = float3x3(a.xyz(), b.xyz(), c.xyz());
+        float3 d = float3(a.w, b.w, c.w);
+        return inverse(m) * d;
+    };
+    for (int i = 0; i < 8; i++ )
+        outConsts.FrustumCorners[i] = float4(getCorner(i), 0);
+}
+
+void LightsBaker::UpdateLocalJitter()
+{
+    m_prevLocalJitter = m_localJitter;
     if (!m_dbgDebugDisableJitter)
     {
         // Advance R2 jitter sequence
         // http://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
 
-        if (m_updateCounter == (1<<16) )
-            m_localJitterF = {0, 0}; // not sure how long can the sequence remain high quality, so perhaps best to reset after a period
+        if ( (m_updateCounter % 1024) == 0 )
+            m_localJitterF = { 0, 0 }; // not sure how long can the sequence remain high quality, so perhaps best to reset after a period
 
         static const float g = 1.32471795724474602596f;
         static const float a1 = 1.0f / g;
@@ -819,33 +918,69 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         m_localJitterF[0] = fmodf(m_localJitterF[0] + a1, 1.0f);
         m_localJitterF[1] = fmodf(m_localJitterF[1] + a2, 1.0f);
 
-        m_localJitter = dm::clamp( uint2(m_localJitterF * (float)RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE), uint2(0, 0), uint2(RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE-1, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE-1) );
+        m_localJitter = dm::clamp(uint2(m_localJitterF * (float)RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE), uint2(0, 0), uint2(RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - 1, RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE - 1));
     }
+}
+
+void LightsBaker::UpdateFrame(nvrhi::ICommandList* commandList, const BakeSettings& _settings, double sceneTime, const std::shared_ptr<ExtendedScene>& scene, std::shared_ptr<class MaterialsBaker> materialsBaker, 
+    std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, std::vector<SubInstanceData>& subInstanceData)
+{
+    RAII_SCOPE( commandList->beginMarker("LightBaker");, commandList->endMarker(); );
+    // RAII_SCOPE( commandList->setEnableAutomaticBarriers(false);, commandList->setEnableAutomaticBarriers(true); );
+
+    m_ping = !m_ping;
+    m_updateFrameCalledBeforePreRender = true;
+
+    m_currentSettings = _settings;
+
+    if (m_currentSettings.ResetFeedback)
+    {
+        m_updateCounter = 0;
+        m_localJitterF = { 0,0 };
+        m_localJitter = m_prevLocalJitter = { 0,0 };
+        m_NEE_AT_FeedbackBufferFilled = false;
+    }
+
+    UpdateLocalJitter();
+
+    m_updateCounter++;
 
     bool lastFrameLocalSamplesAvailable = m_currentCtrlBuff.LastFrameTemporalFeedbackAvailable; // if last frame had temporal feedback, it will have had built local (tile) sampling
 
-    m_currentSettings = _settings;
     m_currentSettings.GlobalTemporalFeedbackRatio   = dm::clamp(m_currentSettings.GlobalTemporalFeedbackRatio, 0.0f, 0.95f);
-    m_currentSettings.NarrowTemporalFeedbackRatio    = dm::clamp(m_currentSettings.NarrowTemporalFeedbackRatio, 0.0f, 0.95f);
+    m_currentSettings.LocalTemporalFeedbackRatio    = dm::clamp(m_currentSettings.LocalTemporalFeedbackRatio, 0.0f, 0.95f);
     if (m_currentSettings.ImportanceSamplingType != 2)  // no feedback needed if not using NEE_AT
-        m_currentSettings.GlobalTemporalFeedbackEnabled = m_currentSettings.NarrowTemporalFeedbackEnabled = false;
+    {
+        m_currentSettings.EnableAntiLag = false;
+        m_currentSettings.GlobalTemporalFeedbackEnabled = m_currentSettings.LocalTemporalFeedbackEnabled = false;
+        lastFrameLocalSamplesAvailable = false;
+    }
     if (!m_currentSettings.GlobalTemporalFeedbackEnabled)
         m_currentSettings.GlobalTemporalFeedbackRatio = 0.0f;
-    if (!m_currentSettings.NarrowTemporalFeedbackEnabled)
-        m_currentSettings.NarrowTemporalFeedbackRatio = 0.0f;
+    if (!m_currentSettings.LocalTemporalFeedbackEnabled)
+    {
+        m_currentSettings.LocalTemporalFeedbackRatio = 0.0f;
+        m_currentSettings.EnableAntiLag = false;                // anti-lag only helps with local sampler, so no point doing it if disabled
+    }
 
     // Constants
     LightingControlData ctrlBuff; memset(&ctrlBuff, 0, sizeof(ctrlBuff)); 
     LightsBakerConstants consts; memset(&consts, 0, sizeof(consts));
 
+    UpdateFrustumConsts(consts, m_currentSettings);
+
     consts.UpdateCounter = m_updateCounter;
-    ctrlBuff.LocalSamplingTileJitter = m_localJitter;
-    ctrlBuff.LocalSamplingTileJitterPrev = prevLocalJitter;
+    consts.EnableMotionReprojection      = true;
+    consts.DepthDisocclusionThreshold   = m_depthDisocclusionThreshold;
+    consts.LocalSamplingTileJitter       = m_localJitter;
+    consts.LocalSamplingTileJitterPrev   = m_prevLocalJitter;
+    ctrlBuff.LocalSamplingTileJitter     = m_localJitter;
+    ctrlBuff.LocalSamplingTileJitterPrev = m_prevLocalJitter;
 
     assert( _settings.ViewportSize.x > 0 && _settings.ViewportSize.y > 0 && _settings.PrevViewportSize.x > 0 && _settings.PrevViewportSize.y > 0 );
     consts.PrevOverCurrentViewportSize = m_currentSettings.PrevViewportSize / m_currentSettings.ViewportSize;
 
-    bool lastFrameFeedbackAvailable = m_NEE_AT_FeedbackBufferFilled && !m_currentSettings.ResetFeedback && (m_currentSettings.GlobalTemporalFeedbackEnabled || m_currentSettings.NarrowTemporalFeedbackEnabled);
+    bool lastFrameFeedbackAvailable = m_NEE_AT_FeedbackBufferFilled && (m_currentSettings.GlobalTemporalFeedbackEnabled || m_currentSettings.LocalTemporalFeedbackEnabled);
     const bool temporalFeedbackRequired = m_currentSettings.ImportanceSamplingType == 2;
 
     {
@@ -865,37 +1000,41 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         consts.EnvMapImportanceMapResolution    = m_envMapBaker->GetImportanceSampling()->GetImportanceMapResolution();
     }
 
-    consts.FeedbackResolution   = uint2(m_NEE_AT_FeedbackBuffer->getDesc().width, m_NEE_AT_FeedbackBuffer->getDesc().height / 2);
-    consts.TotalFeedbackCount   = (lastFrameFeedbackAvailable)?(m_NEE_AT_FeedbackBuffer->getDesc().width * m_NEE_AT_FeedbackBuffer->getDesc().height):(0);
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-    consts.LRFeedbackResolution = uint2(m_NEE_AT_ReprojectedLRFeedbackBuffer->getDesc().width, m_NEE_AT_ReprojectedLRFeedbackBuffer->getDesc().height/2);
-    consts.NarrowSamplingResolution = uint2(m_NEE_AT_SamplingBuffer->getDesc().width, m_NEE_AT_SamplingBuffer->getDesc().height/2);
-#else
-    consts.LRFeedbackResolution = uint2(m_NEE_AT_ReprojectedLRFeedbackBuffer->getDesc().width, m_NEE_AT_ReprojectedLRFeedbackBuffer->getDesc().height);
-    consts.NarrowSamplingResolution = uint2(m_NEE_AT_SamplingBuffer->getDesc().width, m_NEE_AT_SamplingBuffer->getDesc().height);
-#endif
-    consts.GlobalFeedbackUseRatio   = (lastFrameFeedbackAvailable) ? (m_currentSettings.GlobalTemporalFeedbackRatio): (0.0f);
-    consts.NarrowFeedbackUseRatio    = (lastFrameFeedbackAvailable) ? (m_currentSettings.NarrowTemporalFeedbackRatio) : (0.0f);
-    ctrlBuff.GlobalFeedbackUseRatio = consts.GlobalFeedbackUseRatio;
-    ctrlBuff.NarrowFeedbackUseRatio  = consts.NarrowFeedbackUseRatio;
+    consts.FeedbackResolution           = uint2(m_NEE_AT_FeedbackCandidates->getDesc().width, m_NEE_AT_FeedbackCandidates->getDesc().height);
+    consts.BlendedFeedbackResolution    = uint2(m_NEE_AT_FeedbackCandidatesBlended->getDesc().width, m_NEE_AT_FeedbackCandidatesBlended->getDesc().height);
+    uint numTotalP0ThreadCount          = div_ceil(consts.FeedbackResolution.x, LLB_NUM_COMPUTE_THREADS_2D) * div_ceil(consts.FeedbackResolution.y, LLB_NUM_COMPUTE_THREADS_2D) * LLB_NUM_COMPUTE_THREADS_2D * LLB_NUM_COMPUTE_THREADS_2D;
+    if (RTXPT_LIGHTING_COUNT_ONLY_ONE_GLOBAL_FEEDBACK==0) numTotalP0ThreadCount *= RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH;
+    consts.TotalMaxFeedbackCount        = (lastFrameFeedbackAvailable)?(numTotalP0ThreadCount):(0);
+    consts.LocalSamplingResolution      = uint2(m_localSamplingBufferWidth, m_localSamplingBufferHeight);
+    consts.GlobalFeedbackUseRatio       = (lastFrameFeedbackAvailable) ? (m_currentSettings.GlobalTemporalFeedbackRatio): (0.0f);
+    consts.LocalFeedbackUseRatio        = (lastFrameFeedbackAvailable) ? (m_currentSettings.LocalTemporalFeedbackRatio) : (0.0f);
+    consts.ReservoirHistoryDropoff      = m_advSetting_reservoirHistoryDropoff;
+    ctrlBuff.LocalSamplingResolution    = consts.LocalSamplingResolution;
+    ctrlBuff.TotalMaxFeedbackCount      = consts.TotalMaxFeedbackCount;
+    ctrlBuff.GlobalFeedbackUseRatio     = consts.GlobalFeedbackUseRatio;
+    ctrlBuff.LocalFeedbackUseRatio      = consts.LocalFeedbackUseRatio;
     ctrlBuff.LightSampling_MIS_Boost    = m_currentSettings.LightSampling_MIS_Boost;
-    ctrlBuff.DirectVsIndirectThreshold = m_advSetting_DirectVsIndirectThreshold;
-
-    //ctrlBuff.SceneWorldMax = float4( -FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX ); ctrlBuff.SceneWorldMin = float4( FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX );
-    //ComputeBounds( ctrlBuff, settings.CameraPosition );
-    ctrlBuff.SceneCameraPos = float4( m_currentSettings.CameraPosition, 0 );
+    ctrlBuff.DirectVsIndirectThreshold  = m_advSetting_DirectVsIndirectThreshold;
 
     ctrlBuff.ImportanceSamplingType = m_currentSettings.ImportanceSamplingType;
 
-    ctrlBuff.FeedbackBufferHeight = consts.FeedbackResolution.y;
-    ctrlBuff.TileBufferHeight = consts.NarrowSamplingResolution.y;
+    ctrlBuff.TileBufferHeight = consts.LocalSamplingResolution.y;
 
     consts.DebugDrawType = (int)m_dbgDebugDrawType;
-    consts.DebugDrawDirect = m_dbgDebugDrawDirect?1:0;
+    //consts.DebugDrawDirect = m_dbgDebugDrawDirect?1:0;
     consts.DebugDrawTileLights = m_dbgDebugDrawTileLightConnections;
     consts.MouseCursorPos = m_currentSettings.MouseCursorPos;
+    consts.ImportanceBoostIntensityDelta = m_importanceBoost_IntensityDelta?m_importanceBoost_IntensityDeltaMul:0.0f;
+    consts.ImportanceBoostFrustumMul = m_importanceBoost_Frustum?m_importanceBoost_FrustumMul:0.0f;
+    consts.ImportanceBoostFrustumFadeRangeInt = m_importanceBoost_FrustumFadeRangeInt;
+    consts.ImportanceBoostFrustumFadeRangeExt = m_importanceBoost_FrustumFadeRangeExt;
+    consts.LastFrameTemporalFeedbackAvailable = lastFrameFeedbackAvailable;
+    consts.SceneCameraPos = m_currentSettings.CameraPosition;
+    consts.SceneAverageContentsDistance = m_currentSettings.AverageContentsDistance;
+    consts.LastFrameLocalSamplesAvailable = lastFrameLocalSamplesAvailable && lastFrameFeedbackAvailable;
+    consts.AntiLagEnabled = m_currentSettings.EnableAntiLag;
     ctrlBuff.LastFrameTemporalFeedbackAvailable = lastFrameFeedbackAvailable;
-    ctrlBuff.LastFrameLocalSamplesAvailable = lastFrameLocalSamplesAvailable && lastFrameFeedbackAvailable;
+    ctrlBuff.LastFrameLocalSamplesAvailable = consts.LastFrameLocalSamplesAvailable;
     ctrlBuff.TemporalFeedbackRequired = temporalFeedbackRequired && !m_dbgFreezeUpdates;
 
     // clear buffers
@@ -909,7 +1048,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
     // collect all emissive triangles and other geometry specific work - this builds batch jobs on the CPU that are executed on the GPU later, but at the end of this step we know the exact number of added emissive triangles (even though some might be black)
     uint emissiveTriangleLightCount = ProcessGeometry(m_currentSettings, scene, subInstanceData, ctrlBuff, *m_scratchTaskBuffer, m_historyRemapAnalyticLightIndices);
     consts.TriangleLightTaskCount = (int)(*m_scratchTaskBuffer).size();
-    assert( ctrlBuff.EnvmapQuadNodeCount == RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT );
+    assert( ctrlBuff.EnvmapQuadNodeCount == RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT );
     ctrlBuff.TriangleLightCount = emissiveTriangleLightCount;
     ctrlBuff.TotalLightCount = ctrlBuff.EnvmapQuadNodeCount + ctrlBuff.AnalyticLightCount + ctrlBuff.TriangleLightCount; assert(ctrlBuff.TotalLightCount <= RTXPT_LIGHTING_MAX_LIGHTS);
     consts.TotalLightCount = ctrlBuff.TotalLightCount;
@@ -926,7 +1065,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         commandList->writeBuffer(m_controlBuffer, &ctrlBuff, sizeof(ctrlBuff));
         m_currentCtrlBuff = ctrlBuff;
         m_currentConsts = consts;
-        commandList->setBufferState(m_constantBuffer, nvrhi::ResourceStates::ConstantBuffer);
+        commandList->setBufferState(m_constantBuffer, nvrhi::ResourceStates::ShaderResource);
         commandList->setBufferState(m_controlBuffer, nvrhi::ResourceStates::UnorderedAccess);
     }
 
@@ -958,7 +1097,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         RAII_SCOPE(commandList->beginMarker("EnvLightsBackupPast"); , commandList->endMarker(); );
 
         commandList->setBufferState(m_lightsBuffer, nvrhi::ResourceStates::UnorderedAccess); // very likely unnecessary in practice, but the old lightsBuffer is read in this pass
-        m_envLightsBackupPast.Execute(commandList, div_ceil(RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT, LLB_NUM_COMPUTE_THREADS), 1, 1, bindingSet);
+        m_envLightsBackupPast.Execute(commandList, div_ceil(RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT, LLB_NUM_COMPUTE_THREADS), 1, 1, bindingSet);
     }
 
     // empty emissive and analytic lights get copied over first - they've been fully processed on the CPU
@@ -976,10 +1115,12 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         commandList->writeBuffer(m_scratchBuffer, m_scratchTaskBuffer->data(), sizeof(EmissiveTrianglesProcTask)* consts.TriangleLightTaskCount);
     }
 
-    // needed for ProcessFeedbackHistoryP0
+    // todo: make sure only those needed are set
     commandList->setBufferState(m_perLightProxyCounters, nvrhi::ResourceStates::UnorderedAccess); // we've written into proxy counters - barrier needs to be added to the queue 
-    commandList->setTextureState(m_NEE_AT_FeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);  // note: setComputeState below will commit barriers so ordering is important
-
+    commandList->setTextureState(m_NEE_AT_FeedbackTotalWeight, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+    commandList->setTextureState(m_NEE_AT_FeedbackCandidates, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+    //commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+    //commandList->setTextureState(m_NEE_AT_FeedbackCandidatesScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
     commandList->setBufferState(m_lightsBuffer, nvrhi::ResourceStates::UnorderedAccess);
     commandList->setBufferState(m_lightsExBuffer, nvrhi::ResourceStates::UnorderedAccess);
     commandList->setBufferState(m_historyRemapCurrentToPastBuffer, nvrhi::ResourceStates::UnorderedAccess);
@@ -987,13 +1128,13 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
 
     {
         RAII_SCOPE(commandList->beginMarker("EnvLightsSubdivideBase");, commandList->endMarker(); );
-        m_envLightsSubdivideBase.Execute(commandList, 1, 1, 1, bindingSet); //the main output goes to scratchBuffer, with RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT offset and is consumed by EnvLightsBake
+        m_envLightsSubdivideBase.Execute(commandList, 1, 1, 1, bindingSet); //the main output goes to scratchBuffer, with RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT offset and is consumed by EnvLightsBake
     }
     
     {
         RAII_SCOPE(commandList->beginMarker("EnvLightsSubdivideBoost"); , commandList->endMarker(); );
         commandList->setBufferState(m_scratchList, nvrhi::ResourceStates::UnorderedAccess);
-        m_envLightsSubdivideBoost.Execute(commandList, RTXPT_LIGHTING_ENVMAP_QT_UNBOOSTED_NODE_COUNT, 1, 1, bindingSet); //the main output goes to scratchBuffer, with RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT offset and is consumed by EnvLightsBake
+        m_envLightsSubdivideBoost.Execute(commandList, RTXPT_NEEAT_ENVMAP_QT_UNBOOSTED_NODE_COUNT, 1, 1, bindingSet); //the main output goes to scratchBuffer, with RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT offset and is consumed by EnvLightsBake
     }
 
     // We can probably overlap this with EnvLightsSubdivide but I measure no perf benefit
@@ -1013,7 +1154,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         
         commandList->setBufferState(m_lightsBuffer, nvrhi::ResourceStates::UnorderedAccess);
 
-        m_envLightsFillLookupMap.Execute(commandList, RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT, 1, 1, bindings );
+        m_envLightsFillLookupMap.Execute(commandList, RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT, 1, 1, bindings );
         
         commandList->setTextureState(m_envLightLookupMap, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
     }
@@ -1023,7 +1164,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
 
         commandList->setBufferState(m_scratchList, nvrhi::ResourceStates::UnorderedAccess);
 
-        m_envLightsMapPastToCurrent.Execute(commandList, div_ceil(RTXPT_LIGHTING_ENVMAP_QT_TOTAL_NODE_COUNT, LLB_NUM_COMPUTE_THREADS), 1, 1, bindings );
+        m_envLightsMapPastToCurrent.Execute(commandList, div_ceil(RTXPT_NEEAT_ENVMAP_QT_TOTAL_NODE_COUNT, LLB_NUM_COMPUTE_THREADS), 1, 1, bindings );
 
         commandList->setBufferState(m_scratchList, nvrhi::ResourceStates::UnorderedAccess);
     }
@@ -1031,25 +1172,26 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
     // note: this has to come after all lights have been baked and remap current to past & past to current buffers are valid
     if (lastFrameFeedbackAvailable)
     {
-        const dm::uint2  itemsPerGroup = {16, 16};
-        {
-            // past -> current
-            RAII_SCOPE(commandList->beginMarker("UpdateFeedbackIndices");, commandList->endMarker(); );
-
-            m_updateFeedbackIndices.Execute(commandList, div_ceil(consts.FeedbackResolution.x, itemsPerGroup.x), div_ceil(consts.FeedbackResolution.y * 2, itemsPerGroup.y), 1, bindings);
-
-            commandList->setTextureState(m_NEE_AT_FeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
-        }
-
         {
             RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP0"); , commandList->endMarker(); );
 
-            m_processFeedbackHistoryP0.Execute(commandList, div_ceil(consts.FeedbackResolution.x, itemsPerGroup.x), div_ceil(consts.FeedbackResolution.y * 2, itemsPerGroup.y), 1, bindings );
+            m_processFeedbackHistoryP0.Execute(commandList, div_ceil(consts.FeedbackResolution.x, LLB_NUM_COMPUTE_THREADS_2D), div_ceil(consts.FeedbackResolution.y, LLB_NUM_COMPUTE_THREADS_2D), 1, bindings );
 
-            commandList->setTextureState(m_NEE_AT_ProcessedFeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeight, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidates, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
             commandList->setBufferState(m_controlBuffer, nvrhi::ResourceStates::UnorderedAccess);           // we've InterlockedAdd into u_controlBuffer (actually, we haven't, except in the validation verison, but leaving in for when enabling validation)
             commandList->setBufferState(m_perLightProxyCounters, nvrhi::ResourceStates::UnorderedAccess);   // we've InterlockedAdd into m_perLightProxyCounters
         }
+    }
+
+    if (m_currentSettings.EnableAntiLag)
+    {
+        RAII_SCOPE(commandList->beginMarker("ClearAntiLagFeedback");, commandList->endMarker(); );
+
+        m_clearAntiLagFeedback.Execute(commandList, div_ceil(m_currentConsts.FeedbackResolution.x, 8), div_ceil(m_currentConsts.FeedbackResolution.y, 8), 1, bindings);
+
+        commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        commandList->setTextureState(m_NEE_AT_FeedbackCandidatesScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
     }
 
     {
@@ -1057,9 +1199,14 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
 
         const dm::uint  items = ctrlBuff.TotalLightCount;
         const dm::uint  itemsPerGroup = LLB_LOCAL_BLOCK_SIZE * LLB_NUM_COMPUTE_THREADS;
+
+        commandList->setBufferState(m_historyRemapCurrentToPastBuffer, nvrhi::ResourceStates::UnorderedAccess);
+        commandList->setBufferState(m_historyRemapPastToCurrentBuffer, nvrhi::ResourceStates::UnorderedAccess);
+        commandList->setBufferState((m_ping) ? (m_lightWeightsPing) : (m_lightWeightsPong), nvrhi::ResourceStates::UnorderedAccess);
+
         m_computeWeights.Execute(commandList, div_ceil(items, itemsPerGroup), 1, 1, bindingSet);
 
-        commandList->setBufferState(m_lightWeights, nvrhi::ResourceStates::UnorderedAccess);
+        commandList->setBufferState((m_ping)?(m_lightWeightsPing):(m_lightWeightsPong), nvrhi::ResourceStates::UnorderedAccess);
         commandList->setBufferState(m_controlBuffer, nvrhi::ResourceStates::UnorderedAccess);
     }
 
@@ -1098,7 +1245,7 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
             commandList->setBufferState(m_scratchBuffer, nvrhi::ResourceStates::UnorderedAccess);   // because this is where jobs are stored
         }
     }
-
+    
     {
         RAII_SCOPE(commandList->beginMarker("ExecuteProxyJobs"); , commandList->endMarker(); );
 
@@ -1126,7 +1273,11 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
         commandList->copyBuffer(m_controlBufferReadback, 0, m_controlBuffer, 0, sizeof(LightingControlData) * 1); // first time copy, do nothing else
     else
     {
+#if LLB_ENABLE_VALIDATION   // instant feedback but significant perf hit
+        m_device->waitForIdle(); 
+#else
         if (m_framesFromLastReadbackCopy > 5) // 5 is always safe, we won't have that many frames overlapping
+#endif
         {
             // Copy from readback buffer to struct that's displayed in UI
             void* pData = m_device->mapBuffer(m_controlBufferReadback, nvrhi::CpuAccessMode::Read);
@@ -1150,87 +1301,115 @@ void LightsBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings& _
 }
 
 // #pragma optimize("", off)
+#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
+#define UAV_BARRIER_m_NEE_AT_LocalSamplingBuffer() { commandList->setTextureState(m_NEE_AT_LocalSamplingBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess); }
+#else
+#define UAV_BARRIER_m_NEE_AT_LocalSamplingBuffer() { commandList->setBufferState(m_NEE_AT_LocalSamplingBuffer, nvrhi::ResourceStates::UnorderedAccess); }
+#endif
 
-void LightsBaker::UpdateLate(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors)
+void LightsBaker::UpdatePreRender(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::shared_ptr<class MaterialsBaker> materialsBaker, std::shared_ptr<class OmmBaker> ommBaker, nvrhi::BufferHandle subInstanceDataBuffer, nvrhi::TextureHandle depthBuffer, nvrhi::TextureHandle motionVectors)
 {
+	bool updateControlBuffer = false;
+    if (m_updateFrameCalledBeforePreRender)
+    {
+        m_updateFrameCalledBeforePreRender = false;
+        bool lastFrameFeedbackAvailable = m_NEE_AT_FeedbackBufferFilled && (m_currentSettings.GlobalTemporalFeedbackEnabled || m_currentSettings.LocalTemporalFeedbackEnabled);
+        m_currentConsts.LocalFeedbackUseRatio = (lastFrameFeedbackAvailable || m_currentSettings.EnableAntiLag) ? (m_currentSettings.LocalTemporalFeedbackRatio) : (0.0f);
+        m_currentCtrlBuff.LocalFeedbackUseRatio = m_currentConsts.LocalFeedbackUseRatio;
+        updateControlBuffer = true; // not always necessary - TODO: clean up
+    }
+    else
+    {
+        // this is the second+ pass when multi-sampling enabled - we need to update things again
+        UpdateLocalJitter();
+        
+        m_updateCounter++;
+        
+        bool lastFrameLocalSamplesAvailable = m_currentCtrlBuff.LastFrameTemporalFeedbackAvailable; // if last frame had temporal feedback, it will have had built local (tile) sampling
+        m_currentConsts.AntiLagEnabled = false; // there already was a full pass before so there's no point looking at anti-lag early data
+        m_currentConsts.UpdateCounter = m_updateCounter;
+        m_currentConsts.EnableMotionReprojection = false;
+        m_currentCtrlBuff.LocalSamplingTileJitter = m_localJitter;
+        m_currentCtrlBuff.LocalSamplingTileJitterPrev = m_prevLocalJitter;
+        bool lastFrameFeedbackAvailable = m_NEE_AT_FeedbackBufferFilled && (m_currentSettings.GlobalTemporalFeedbackEnabled || m_currentSettings.LocalTemporalFeedbackEnabled);
+        m_currentConsts.LocalFeedbackUseRatio = (lastFrameFeedbackAvailable) ? (m_currentSettings.LocalTemporalFeedbackRatio) : (0.0f);
+        m_currentCtrlBuff.LocalFeedbackUseRatio = m_currentConsts.LocalFeedbackUseRatio;
+        m_currentConsts.LastFrameTemporalFeedbackAvailable = lastFrameFeedbackAvailable;
+        m_currentCtrlBuff.LastFrameTemporalFeedbackAvailable = lastFrameFeedbackAvailable;
+        m_currentCtrlBuff.LastFrameLocalSamplesAvailable = lastFrameLocalSamplesAvailable && lastFrameFeedbackAvailable;
+        updateControlBuffer = true;
+    }
+
     nvrhi::BindingSetDesc bindingSetDesc;
     FillBindings(bindingSetDesc, scene, materialsBaker, ommBaker, subInstanceDataBuffer, depthBuffer, motionVectors);
     nvrhi::BindingSetHandle bindingSet = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
     nvrhi::BindingSetVector bindings = { bindingSet };
 
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-    uint totalFeedbackY = m_currentConsts.FeedbackResolution.y*2;
-    uint narrowSamplingY = m_currentConsts.NarrowSamplingResolution.y*2;
-#else
-    uint totalFeedbackY = m_currentConsts.FeedbackResolution.y;
-    uint narrowSamplingY = m_currentConsts.NarrowSamplingResolution.y;
-#endif
+	if (updateControlBuffer) // do the partial control buffer update using CS - in practice, we could just do a partial copy into the buffer
+    {
+        RAII_SCOPE(commandList->beginMarker("ReUploadConstAndControlBuffers");, commandList->endMarker(); );
 
-    const dm::uint  itemsPerGroup = 8;
+        // build constants
+        commandList->writeBuffer(m_constantBuffer, &m_currentConsts, sizeof(m_currentConsts));
+        commandList->setBufferState(m_constantBuffer, nvrhi::ResourceStates::ShaderResource);
+
+        // control buffer
+    	m_updateControlBufferMultipass.Execute(commandList, 1, 1, 1, bindings);
+    	commandList->setBufferState(m_controlBuffer, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
+    const dm::uint  itemsPerGroup = LLB_NUM_COMPUTE_THREADS_2D;
 
     // note: temporal feedback must come after ComputeWeights as ComputeWeights initializes counters to 0
-    if (m_currentCtrlBuff.LastFrameTemporalFeedbackAvailable)
+    if (m_currentCtrlBuff.LastFrameTemporalFeedbackAvailable || m_currentConsts.AntiLagEnabled)
     {
         {
-            RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP1");, commandList->endMarker(); );
+            RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP1a"); , commandList->endMarker(); );
 
-            m_processFeedbackHistoryP1.Execute(commandList, div_ceil(m_currentConsts.FeedbackResolution.x, itemsPerGroup), div_ceil(totalFeedbackY, itemsPerGroup), 1, bindings);
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeight, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidates, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidatesScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
 
-            commandList->setTextureState(m_NEE_AT_ReprojectedFeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
-            commandList->setTextureState(m_NEE_AT_ReprojectedLRFeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_processFeedbackHistoryP1a.Execute(commandList, div_ceil(m_currentConsts.BlendedFeedbackResolution.x, itemsPerGroup), div_ceil(m_currentConsts.BlendedFeedbackResolution.y, itemsPerGroup), 1, bindings);
+
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidatesScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightBlended, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidatesBlended, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        }
+
+        {
+            RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP1b");, commandList->endMarker(); );
+
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeight, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidates, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+
+            m_processFeedbackHistoryP1b.Execute(commandList, div_ceil(m_currentConsts.FeedbackResolution.x, itemsPerGroup), div_ceil(m_currentConsts.FeedbackResolution.y, itemsPerGroup), 1, bindings);
+
+            commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            commandList->setTextureState(m_NEE_AT_FeedbackCandidatesScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
         }
 
         {
             RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP2"); , commandList->endMarker(); );
-            m_processFeedbackHistoryP2.Execute(commandList, div_ceil(m_currentConsts.NarrowSamplingResolution.x, itemsPerGroup), div_ceil(narrowSamplingY, itemsPerGroup), 1, bindings);
-            commandList->setTextureState(m_NEE_AT_SamplingBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_processFeedbackHistoryP2.Execute(commandList, div_ceil(m_currentConsts.LocalSamplingResolution.x, itemsPerGroup), div_ceil(m_currentConsts.LocalSamplingResolution.y, itemsPerGroup), 1, bindings);
+            UAV_BARRIER_m_NEE_AT_LocalSamplingBuffer();
         }
 
-        static bool experimentC = true;
-        if (experimentC)
-        {
-            RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP3c"); , commandList->endMarker(); );
-            m_processFeedbackHistoryP3c.Execute(commandList, m_currentConsts.NarrowSamplingResolution.x, narrowSamplingY, 1, bindings);
-            commandList->setTextureState(m_NEE_AT_SamplingBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
-        }
-        else
-        {
-            static bool optimizeFor32ThreadWaves = true;
-            //ImGui::Checkbox("Optimize for 32-thread waves", &optimizeFor32ThreadWaves);
-            if (m_deviceHas32ThreadWaves && optimizeFor32ThreadWaves)
-            {
-                // Optimised code for wave (warp) size of 32
-                // Thread group size is [32 (wave size), 4 (num waves to put into a group), 1]
-                // We dispatch one wave per tile
-                // Thread coords: x : thread in wave
-                //                y : tile x
-                //                z : tile y
-                const uint numWavesInGroup = 4;
-                RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP3b");, commandList->endMarker(); );
-                m_processFeedbackHistoryP3b.Execute(commandList, 1, div_ceil(m_currentConsts.NarrowSamplingResolution.x, numWavesInGroup), narrowSamplingY, bindings);
-            }
-            else
-            {
-                // Thread group size is [itemsPerGroup, itemsPerGroup, 1]
-                // We dispatch one thread per tile
-                // Thread coords: x : tile x
-                //                y : tile y
-                //                z : 0
-                RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP3a");, commandList->endMarker(); );
-                m_processFeedbackHistoryP3a.Execute(commandList, div_ceil(m_currentConsts.NarrowSamplingResolution.x, itemsPerGroup), div_ceil(narrowSamplingY, itemsPerGroup), 1, bindings);
-            }
-        }
-        commandList->setTextureState(m_NEE_AT_SamplingBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryP3"); , commandList->endMarker(); );
+        m_processFeedbackHistoryP3.Execute(commandList, m_currentConsts.LocalSamplingResolution.x, m_currentConsts.LocalSamplingResolution.y, 1, bindings);
+        UAV_BARRIER_m_NEE_AT_LocalSamplingBuffer();
 
-        if (m_currentConsts.DebugDrawTileLights || m_dbgDebugDrawType == LightingDebugViewType::TileHeatmap || m_dbgDebugDrawType == LightingDebugViewType::ValidateCorrectness )
+        if (m_currentConsts.DebugDrawTileLights || m_dbgDebugDrawType == LightingDebugViewType::TileHeatmap || m_dbgDebugDrawType == LightingDebugViewType::ValidateCorrectness || m_dbgFreezeFrustumUpdates)
         {
-            commandList->setTextureState(m_NEE_AT_SamplingBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            UAV_BARRIER_m_NEE_AT_LocalSamplingBuffer();
             commandList->commitBarriers();
 
             RAII_SCOPE(commandList->beginMarker("ProcessFeedbackHistoryDebugViz"); , commandList->endMarker(); );
-            m_processFeedbackHistoryDebugViz.Execute(commandList, div_ceil(m_currentConsts.NarrowSamplingResolution.x, itemsPerGroup), div_ceil(narrowSamplingY, itemsPerGroup), 1, bindings);
+            m_processFeedbackHistoryDebugViz.Execute(commandList, div_ceil(m_currentConsts.LocalSamplingResolution.x, itemsPerGroup), div_ceil(m_currentConsts.LocalSamplingResolution.y, itemsPerGroup), 1, bindings);
 
-            commandList->setTextureState(m_NEE_AT_SamplingBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            UAV_BARRIER_m_NEE_AT_LocalSamplingBuffer();
             commandList->commitBarriers();
         }
     }
@@ -1240,22 +1419,27 @@ void LightsBaker::UpdateLate(nvrhi::ICommandList * commandList, const std::share
     {
         RAII_SCOPE(commandList->beginMarker("ClearFeedbackHistory"); , commandList->endMarker(); );
 
-        commandList->setTextureState(m_NEE_AT_FeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        //commandList->setTextureState(m_NEE_AT_FeedbackTotalWeightScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        //commandList->setTextureState(m_NEE_AT_FeedbackCandidatesScratch, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
 
-        m_clearFeedbackHistory.Execute( commandList, div_ceil(m_currentConsts.FeedbackResolution.x, itemsPerGroup), div_ceil(m_currentConsts.FeedbackResolution.y*2, itemsPerGroup), 1, bindings );
+        m_clearFeedbackHistory.Execute( commandList, div_ceil(m_currentConsts.FeedbackResolution.x, itemsPerGroup), div_ceil(m_currentConsts.FeedbackResolution.y, itemsPerGroup), 1, bindings );
 
-        commandList->setTextureState(m_NEE_AT_FeedbackBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        commandList->setTextureState(m_NEE_AT_FeedbackTotalWeight, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        commandList->setTextureState(m_NEE_AT_FeedbackCandidates, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
 
         m_NEE_AT_FeedbackBufferFilled = true;  // the assumption is that the path tracing happens after and actually fills the data; it's fine if it doesn't, the clear ^ resets it to empty anyway
     }
+
+    // this is useful to avoid "leaking" any barrier issues to subsequent passes which makes it difficult to debug
+    commandList->commitBarriers();
 }
 
 bool LightsBaker::InfoGUI(float indent)
 {
     RAII_SCOPE(ImGui::PushID("LightsBakerInfoGUI");, ImGui::PopID(); );
 
-    const char* modes[] = { "Uniform", "Power", "NEE-AT" };
-    ImGui::Text("Current use mode:  %s", modes[dm::clamp(m_lastReadback.ImportanceSamplingType, 0u, 2u)]);
+    const char* modes[] = { "Uniform", "Power+", "NEE-AT" };
+    ImGui::Text("Current mode:  %s", modes[dm::clamp(m_lastReadback.ImportanceSamplingType, 0u, 2u)]);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("As set in Path Tracer Next Event Estimation options\n(in the future, mode will be set here)");
 
     ImGui::Text("Scene lights by type: ");
@@ -1264,6 +1448,12 @@ bool LightsBaker::InfoGUI(float indent)
     ImGui::Text("   analytic:      %d", m_lastReadback.AnalyticLightCount);
     ImGui::Text("   TOTAL:         %d", m_lastReadback.TotalLightCount);
     ImGui::Text("(proxies: %d, weightsum: %.5f)", m_lastReadback.SamplingProxyCount, m_lastReadback.WeightsSum());
+#if LLB_ENABLE_VALIDATION
+    ImGui::Text("Validation:");
+    float feedbackPerc = m_lastReadback.ValidFeedbackCount / float(m_currentConsts.FeedbackResolution.x * m_currentConsts.FeedbackResolution.y);
+    if (RTXPT_LIGHTING_COUNT_ONLY_ONE_GLOBAL_FEEDBACK==0) feedbackPerc *= RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH;
+    ImGui::Text(" feedback num: %d (%.3f)", m_lastReadback.ValidFeedbackCount, feedbackPerc);
+#endif
 
     return false;
 }
@@ -1284,30 +1474,62 @@ bool LightsBaker::DebugGUI(float indent)
     ImGui::Checkbox("Freeze NEE-AT feedback updates", &m_dbgFreezeUpdates);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Feedback from the path tracer will remain frozen while this option is enabled.");
 
-    const char* debugOptions = "Disabled\0MissingFeedback\0FeedbackRaw\0FeedbackProcessed\0FeedbackHistoric\0FeedbackLowRes\0FeedbackReadyForNew\0TileHeatmap\0ValidateCorrectness\0\0";
+    const char* debugOptions = "Disabled\0MissingFeedbackDirect\0MissingFeedbackIndirect\0FeedbackRawDirect\0FeedbackRawIndirect\0FeedbackAfterClear\0LowResBlendedFeedback\0TileHeatmap\0Disocclusion\0ValidateCorrectness\0\0";
     ImGui::Combo("NEE-AT debug view", (int*)&m_dbgDebugDrawType, debugOptions);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show various NEE-AT buffers");
 
-    if( m_dbgDebugDrawType != LightingDebugViewType::Disabled || m_dbgDebugDrawTileLightConnections )
-    {
-        RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent););
-        ImGui::Checkbox("NEE-AT: debug show direct part", &m_dbgDebugDrawDirect);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("If set, debug view shows direct lighting buffers; otherwise it shows indirect lighting buffers");
-    }
+    // if( m_dbgDebugDrawType != LightingDebugViewType::Disabled || m_dbgDebugDrawTileLightConnections )
+    // {
+    //     RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent););
+    //     ImGui::Checkbox("NEE-AT: debug show direct part", &m_dbgDebugDrawDirect);
+    //     if (ImGui::IsItemHovered()) ImGui::SetTooltip("If set, debug view shows direct lighting buffers; otherwise it shows indirect lighting buffers");
+    // }
 
     ImGui::Checkbox("Disable local tile jitter", &m_dbgDebugDisableJitter);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mapping from pixels to tiles will be jittered to avoid denoising artifacts.\nIt also helps with spatial sharing.\nDisable for debugging.");
     
+    ImGui::Checkbox("Debug freeze frustum updates", &m_dbgFreezeFrustumUpdates);
 
 #if 1
     ImGui::Separator();
     if (ImGui::CollapsingHeader("Advanced settings", 0/*ImGuiTreeNodeFlags_DefaultOpen*/))
     {
-        ImGui::SliderFloat("DirectVsIndirectThreshold", &m_advSetting_DirectVsIndirectThreshold, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("DirectVsIndirectThreshold", &m_advSetting_DirectVsIndirectThreshold, 0.02f, 2.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Used to determine whether to use direct vs indirect light caching strategy for current surface.");
+
+        ImGui::SliderFloat("ReservoirHistoryDropoff", &m_advSetting_reservoirHistoryDropoff, 0.0f, 0.1f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The amount of history sharing from past and from neighbours. Some is useful, \ntoo much will add lag and allow strong lights to dwarf out others.");
+
+        ImGui::SliderFloat("DepthDisocclusionThreshold", &m_depthDisocclusionThreshold, 0.999f, 20.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("During motion reprojection, drop samples if really far from target");
 
         ImGui::Checkbox("Sample environment proxy lights", &m_advSetting_SampleBakedEnvironment);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("If enabled, environment map texture will not be sampled directly by NEE\nbut will be baked into sampling proxies like emissive triangles.\nBiased, faster but more blurry shadows in some cases.");
+
+        {
+            ImGui::Text("Importance boosts:");
+            RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
+            ImGui::Checkbox("...by light intensity change", &m_importanceBoost_IntensityDelta);
+            {
+                RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent););
+                RAII_SCOPE(ImGui::PushID("Delta");, ImGui::PopID(); );
+                ImGui::InputFloat("multiplier", &m_importanceBoost_IntensityDeltaMul);
+                m_importanceBoost_IntensityDeltaMul = dm::clamp(m_importanceBoost_IntensityDeltaMul, 0.0f, 100.0f);
+            }
+            ImGui::Checkbox("...by light frustum proximity", &m_importanceBoost_Frustum);
+            {
+                RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent););
+                RAII_SCOPE(ImGui::PushID("FrustProx"); , ImGui::PopID(); );
+                ImGui::InputFloat("multiplier", &m_importanceBoost_FrustumMul);
+                m_importanceBoost_FrustumMul = dm::clamp(m_importanceBoost_FrustumMul, 0.0f, 100.0f);
+                ImGui::InputFloat("internal fade range scale", &m_importanceBoost_FrustumFadeRangeInt);
+                m_importanceBoost_FrustumFadeRangeInt = dm::clamp(m_importanceBoost_FrustumFadeRangeInt, 0.01f, 10000.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the boost fades within the frustum, based on distance from viewer\nThe bigger the value, the slower it fades");
+                ImGui::InputFloat("external fade range scale", &m_importanceBoost_FrustumFadeRangeExt);
+                m_importanceBoost_FrustumFadeRangeExt = dm::clamp(m_importanceBoost_FrustumFadeRangeExt, 0.01f, 10000.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the boost fades outside of the frustum, based on smallest distance from frustum planes\nThe bigger the value, the slower it fades");
+            }
+        }
     }
 #endif
 

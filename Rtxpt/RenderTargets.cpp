@@ -48,35 +48,31 @@ void RenderTargets::Init(
 
     desc.isVirtual = false; //device->queryFeatureSupport(nvrhi::Feature::VirtualResources); <- codepath not up to date, needs refactoring
 
-    desc.initialState = nvrhi::ResourceStates::RenderTarget;
-    desc.isRenderTarget = true;
-    desc.useClearValue = true;
-    desc.clearValue = nvrhi::Color(0.f);
     desc.sampleCount = 1; assert(m_SampleCount == 1);
     desc.dimension =  nvrhi::TextureDimension::Texture2D;
     desc.keepInitialState = true;
-    desc.isTypeless = false;
-    desc.isUAV = false;
     desc.mipLevels = 1;
 
     desc.format = nvrhi::Format::R32_FLOAT;
     desc.isTypeless = false;
     desc.isUAV = true;
-    desc.isRenderTarget = true;
+    desc.isRenderTarget = false;
     desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
     desc.debugName = "Depth";
-    desc.clearValue = useReverseProjection ? nvrhi::Color(0.f) : nvrhi::Color(1.f);
-    desc.useClearValue = true;
+    //desc.clearValue = useReverseProjection ? nvrhi::Color(0.f) : nvrhi::Color(1.f);
+    //desc.useClearValue = true;
     Depth = device->createTexture(desc);
 
     desc.isTypeless = false;
-    desc.isRenderTarget = true;
+    desc.isRenderTarget = false;
     desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
     desc.clearValue = nvrhi::Color(0.f);
     desc.isUAV = true;
     desc.format = nvrhi::Format::RGBA16_FLOAT;	// allow for .z component too
+    desc.isRenderTarget = true;
     desc.debugName = "ScreenMotionVectors";
     ScreenMotionVectors = device->createTexture(desc);
+    desc.isRenderTarget = false;
     desc.format = nvrhi::Format::RGBA16_FLOAT;
     desc.debugName = "DenoiserMotionVectors";
     DenoiserMotionVectors = device->createTexture(desc);
@@ -152,8 +148,14 @@ void RenderTargets::Init(
     desc.debugName = "AccumulatedRadiance";
     AccumulatedRadiance = device->createTexture(desc);
 
+#if 0
+    nvrhi::Format radianceFormat = nvrhi::Format::R11G11B10_FLOAT;
+#else
+    nvrhi::Format radianceFormat = nvrhi::Format::RGBA16_FLOAT;
+#endif
+
     desc.useClearValue = true;
-    desc.format = nvrhi::Format::RGBA16_FLOAT;  // keep in float for now in case we need 
+    desc.format = radianceFormat;  // keep in float for now in case we need 
     desc.debugName = "OutputColor";
     desc.clearValue = nvrhi::Color(1.0f, 1.0f, 0.0f, 0.0f);   // avoid the debug layer warnings... not actually cleared except for debug purposes
     desc.isUAV = true;
@@ -184,7 +186,7 @@ void RenderTargets::Init(
     desc.width = displaySize.x;
     desc.height = displaySize.y;
 
-    desc.format = nvrhi::Format::RGBA16_FLOAT;
+    desc.format = radianceFormat;
     desc.debugName = "ProcessedOutputColor";
     ProcessedOutputColor = device->createTexture(desc);
     desc.format = nvrhi::Format::RGBA16_SNORM;

@@ -355,7 +355,7 @@ static OpacityMicroMapDebugInfo loadOmmDebugInfo(const DonutGeometrySample donut
     return ommDebug;
 }
 
-static void surfaceDebugViz(const uniform PathTracer::OptimizationHints optimizationHints, const PathTracer::SurfaceData surfaceData, const TriangleHit triangleHit, const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const OpacityMicroMapDebugInfo ommDebug, DebugContext debug)
+static void surfaceDebugViz(uint2 pixelPos, const uniform PathTracer::OptimizationHints optimizationHints, const PathTracer::SurfaceData surfaceData, const TriangleHit triangleHit, const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const OpacityMicroMapDebugInfo ommDebug, DebugContext debug)
 {
 #if ENABLE_DEBUG_VIZUALISATIONS && !NON_PATH_TRACING_PASS && ENABLE_DEBUG_SURFACE_VIZ
     if (g_Const.debug.debugViewType == (int)DebugViewType::Disabled || pathVertexIndex != 1)
@@ -383,19 +383,19 @@ static void surfaceDebugViz(const uniform PathTracer::OptimizationHints optimiza
 
     switch (g_Const.debug.debugViewType)
     {
-    case ((int)DebugViewType::FirstHitBarycentrics):                debug.DrawDebugViz(float4(triangleHit.barycentrics, 0.0, 1.0)); break;
-    case ((int)DebugViewType::FirstHitFaceNormal):                  debug.DrawDebugViz(float4(DbgShowNormalSRGB(shadingData.faceNCorrected), 1.0)); break;
-    case ((int)DebugViewType::FirstHitGeometryNormal):              debug.DrawDebugViz(float4(DbgShowNormalSRGB(shadingData.vertexN), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShadingNormal):               debug.DrawDebugViz(float4(DbgShowNormalSRGB(shadingData.N), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShadingTangent):              debug.DrawDebugViz(float4(DbgShowNormalSRGB(shadingData.T), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShadingBitangent):            debug.DrawDebugViz(float4(DbgShowNormalSRGB(shadingData.B), 1.0)); break;
-    case ((int)DebugViewType::FirstHitFrontFacing):                 debug.DrawDebugViz(float4(saturate(float3(0.15, 0.1 + shadingData.frontFacing, 0.15)), 1.0)); break;
-    case ((int)DebugViewType::FirstHitThinSurface):                 debug.DrawDebugViz(float4(saturate(float3(0.15, 0.1 + shadingData.mtl.isThinSurface(), 0.15)), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShaderPermutation):           debug.DrawDebugViz(float4(optimizationHints.NoTextures, optimizationHints.NoTransmission, optimizationHints.OnlyDeltaLobes, 1.0)); break;
-    case ((int)DebugViewType::FirstHitDiffuse):                     debug.DrawDebugViz(float4(bsdfData.Diffuse().xyz, 1.0)); break;
-    case ((int)DebugViewType::FirstHitSpecular):                    debug.DrawDebugViz(float4(bsdfData.Specular().xyz, 1.0)); break;
-    case ((int)DebugViewType::FirstHitRoughness):                   debug.DrawDebugViz(float4(bsdfData.Roughness().xxx, 1.0)); break;
-    case ((int)DebugViewType::FirstHitMetallic):                    debug.DrawDebugViz(float4(bsdfData.Metallic().xxx, 1.0)); break;
+    case ((int)DebugViewType::FirstHitBarycentrics):                debug.DrawDebugViz(pixelPos, float4(triangleHit.barycentrics, 0.0, 1.0)); break;
+    case ((int)DebugViewType::FirstHitFaceNormal):                  debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.faceNCorrected), 1.0)); break;
+    case ((int)DebugViewType::FirstHitGeometryNormal):              debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.vertexN), 1.0)); break;
+    case ((int)DebugViewType::FirstHitShadingNormal):               debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.N), 1.0)); break;
+    case ((int)DebugViewType::FirstHitShadingTangent):              debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.T), 1.0)); break;
+    case ((int)DebugViewType::FirstHitShadingBitangent):            debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.B), 1.0)); break;
+    case ((int)DebugViewType::FirstHitFrontFacing):                 debug.DrawDebugViz(pixelPos, float4(saturate(float3(0.15, 0.1 + shadingData.frontFacing, 0.15)), 1.0)); break;
+    case ((int)DebugViewType::FirstHitThinSurface):                 debug.DrawDebugViz(pixelPos, float4(saturate(float3(0.15, 0.1 + shadingData.mtl.isThinSurface(), 0.15)), 1.0)); break;
+    case ((int)DebugViewType::FirstHitShaderPermutation):           debug.DrawDebugViz(pixelPos, float4(optimizationHints.NoTextures, optimizationHints.NoTransmission, optimizationHints.OnlyDeltaLobes, 1.0)); break;
+    case ((int)DebugViewType::FirstHitDiffuse):                     debug.DrawDebugViz(pixelPos, float4(bsdfData.Diffuse().xyz, 1.0)); break;
+    case ((int)DebugViewType::FirstHitSpecular):                    debug.DrawDebugViz(pixelPos, float4(bsdfData.Specular().xyz, 1.0)); break;
+    case ((int)DebugViewType::FirstHitRoughness):                   debug.DrawDebugViz(pixelPos, float4(bsdfData.Roughness().xxx, 1.0)); break;
+    case ((int)DebugViewType::FirstHitMetallic):                    debug.DrawDebugViz(pixelPos, float4(bsdfData.Metallic().xxx, 1.0)); break;
     default: break;
     }
 #endif
@@ -418,16 +418,23 @@ float Bridge::getNoisyRadianceAttenuation()
 
 uint Bridge::getMaxBounceLimit()
 {
+#if PT_BOUNCE_COUNT
+    return PT_BOUNCE_COUNT;
+#else
     return g_Const.ptConsts.bounceCount;
+#endif
 }
 
 uint Bridge::getMaxDiffuseBounceLimit()
 {
+#if PT_DIFFUSE_BOUNCE_COUNT
+    return PT_DIFFUSE_BOUNCE_COUNT;
+#else
     return g_Const.ptConsts.diffuseBounceCount;
+#endif
 }
 
-// note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
-Ray Bridge::computeCameraRay(const uint2 pixelPos, const uint subSampleIndex)
+Ray Bridge::computeCameraRay(const uint2 pixelPos)
 {
     SampleGenerator sampleGenerator = SampleGenerator::make( SampleGeneratorVertexBase::make( pixelPos, 0, Bridge::getSampleIndex() ) );
 
@@ -503,7 +510,7 @@ PathTracer::SurfaceData Bridge::loadSurface(
     const float3 rayDir, 
     const RayCone rayCone, 
     const int pathVertexIndex,
-    const uint2 pixelPosition,
+    const uint2 pixelPos,
     DebugContext debug)
 {
     const bool isPrimaryHit     = pathVertexIndex == 1;
@@ -527,13 +534,15 @@ PathTracer::SurfaceData Bridge::loadSurface(
 #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
     STF_SamplerState stfSamplerState;
     float4 u;
+    #if 0
     if (g_Const.ptConsts.STFUseBlueNoise)
     {
-        u = SpatioTemporalBlueNoise2DWhiteNoise2D(pixelPosition, Bridge::getSampleIndex(), t_STBN2DTexture);
+        u = SpatioTemporalBlueNoise2DWhiteNoise2D(pixelPos, Bridge::getSampleIndex(), t_STBN2DTexture);
     } 
     else
+    #endif
     {
-        SampleGeneratorVertexBase sampleGeneratorVertexBase = SampleGeneratorVertexBase::make(pixelPosition, pathVertexIndex, Bridge::getSampleIndex());       
+        SampleGeneratorVertexBase sampleGeneratorVertexBase = SampleGeneratorVertexBase::make(pixelPos, pathVertexIndex, Bridge::getSampleIndex());       
         SampleGenerator sampleGenerator = SampleGenerator::make(sampleGeneratorVertexBase); 
         u = sampleNext4D(sampleGenerator);
     }
@@ -559,18 +568,22 @@ PathTracer::SurfaceData Bridge::loadSurface(
     ptShadingData.V    = -rayDir;
     ptShadingData.N    = donutGS.geometryNormal;
 
+    uint subInstanceDataIndex = donutGS.instance.firstGeometryInstanceIndex + geometryIndex;
+
+    uint materialIndex = t_SubInstanceData[subInstanceDataIndex].GlobalGeometryIndex_PTMaterialDataIndex & 0xFFFF;
+
+    // Get donut material (normal map is evaluated here)
+    MaterialProperties donutMaterial = sampleGeometryMaterialRTXPT(optimizationHints, donutGS, materialIndex, MatAttr_All, s_MaterialSampler, textureSampler);
+
+    bool ignoreTangent = (donutMaterial.flags & PTMaterialFlags_IgnoreMeshTangentSpace) != 0;
+
     // after this point we have valid tangent space in ptShadingData.N/.T/.B using geometry (interpolated) normal, but without normalmap yet
-    const bool validTangentSpace = computeTangentSpace(ptShadingData, donutGS.tangent);
+    computeTangentSpace(ptShadingData, donutGS.tangent, ignoreTangent);
 
     // Primitive data
     ptShadingData.faceNCorrected = (donutGS.frontFacing)?(donutGS.flatNormal):(-donutGS.flatNormal);
     ptShadingData.vertexN = (donutGS.frontFacing)?(donutGS.geometryNormal):(-donutGS.geometryNormal);
     ptShadingData.frontFacing = donutGS.frontFacing;
-
-    uint materialIndex = t_SubInstanceData[donutGS.instance.firstGeometryInstanceIndex + geometryIndex].GlobalGeometryIndex_PTMaterialDataIndex & 0xFFFF;
-
-    // Get donut material (normal map is evaluated here)
-    MaterialProperties donutMaterial = sampleGeometryMaterialRTXPT(optimizationHints, donutGS, materialIndex, MatAttr_All, s_MaterialSampler, textureSampler);
 
     ptShadingData.N = (donutGS.frontFacing)?(donutMaterial.shadingNormal):(-donutMaterial.shadingNormal);
 
@@ -585,7 +598,7 @@ PathTracer::SurfaceData Bridge::loadSurface(
 
     // Helper function to adjust the shading normal to reduce black pixels due to back-facing view direction. Note: This breaks the reciprocity of the BSDF!
     // This also reorthonormalizes the frame based on the normal map, which is necessary (see `ptShadingData.N = donutMaterial.shadingNormal;` line above)
-    adjustShadingNormal( ptShadingData, donutGS.tangent, true );
+    adjustShadingNormal( ptShadingData, donutGS.tangent, true, ignoreTangent );
     // ^^ this should be part of material processing code
 
     ptShadingData.opacity = donutMaterial.opacity;
@@ -660,25 +673,28 @@ PathTracer::SurfaceData Bridge::loadSurface(
     // Assume the default IoR for vacuum on the front-facing side.
     // The renderer may override this for nested dielectrics (see 'handleNestedDielectrics' calling Bridge::updateOutsideIoR)
     ptShadingData.IoR = 1.f;
-    bsdfDataEta = ptShadingData.frontFacing ? (ptShadingData.IoR / matIoR) : (matIoR / ptShadingData.IoR); 
+    bsdfDataEta = ptShadingData.IoR / matIoR; 
+    if (!ptShadingData.mtl.isThinSurface() && !ptShadingData.frontFacing) 
+        bsdfDataEta = (matIoR / ptShadingData.IoR);
 
     // Sample the emissive texture.
     // The standard material supports uniform emission over the hemisphere.
     // Note: we only support single sided emissives at the moment; If upgrading, make sure to upgrade NEE codepath as well (i.e. PolymorphicLight.hlsli)
 
     float3 bsdfDataEmission = 0;
-    uint neeLightIndex = 0xFFFFFFFF;
+    uint neeTriangleLightIndex = 0xFFFFFFFF;
+    uint neeAnalyticLightIndex = 0xFFFFFFFF;
 
     if (ptShadingData.frontFacing && any(donutMaterial.emissiveColor>0))
     {
         bsdfDataEmission = donutMaterial.emissiveColor;
 
-        uint baseIndex = t_SubInstanceData[donutGS.instance.firstGeometryInstanceIndex + geometryIndex].EmissiveLightMappingOffset;
-        neeLightIndex = baseIndex + triangleIndex;
+        uint baseIndex = t_SubInstanceData[subInstanceDataIndex].EmissiveLightMappingOffset;
+        neeTriangleLightIndex = baseIndex + triangleIndex;
 
         //if( debug.IsDebugPixel() )
         //{
-        //    DebugPrint( "a {0}; b {1}, c {2}", geometryIndex, baseIndex, neeLightIndex );
+        //    DebugPrint( "a {0}; b {1}, c {2}", geometryIndex, baseIndex, neeTriangleLightIndex );
         // }
 
 #if 0
@@ -686,10 +702,13 @@ PathTracer::SurfaceData Bridge::loadSurface(
         float3 v0 = mul(donutGS.instance.transform, float4(donutGS.vertexPositions[0], 1)).xyz;
         float3 v1 = mul(donutGS.instance.transform, float4(donutGS.vertexPositions[1], 1)).xyz;
         float3 v2 = mul(donutGS.instance.transform, float4(donutGS.vertexPositions[2], 1)).xyz;
-        bool OK = lightSampler.ValidateTriangleLightIndex( neeLightIndex, v0, v1, v2, donutGS.flatNormal );
+        bool OK = lightSampler.ValidateTriangleLightIndex( neeTriangleLightIndex, v0, v1, v2, donutGS.flatNormal );
         debug.DrawDebugViz( float4(1-OK, OK, 0, 1) );
 #endif
     }
+
+    if ( (donutMaterial.flags & PTMaterialFlags_EnableAsAnalyticLightProxy) != 0 )
+        neeAnalyticLightIndex = t_SubInstanceData[subInstanceDataIndex].AnalyticProxyLightIndex;
 
     StandardBSDF bsdf = StandardBSDF::make(
         StandardBSDFData::make( bsdfDataDiffuse, bsdfDataSpecular, bsdfDataRoughness, bsdfDataMetallic, bsdfDataEta, bsdfDataTransmission, bsdfDataDiffuseTransmission, bsdfDataSpecularTransmission ),
@@ -698,13 +717,12 @@ PathTracer::SurfaceData Bridge::loadSurface(
     // if you think tangent space is broken, test with this (won't make it correctly oriented)
     //ConstructONB( ptShadingData.N, ptShadingData.T, ptShadingData.B );
 
-
-    PathTracer::SurfaceData ret = PathTracer::SurfaceData::make(/*ptVertex, */ptShadingData, bsdf, prevPosW, matIoR, neeLightIndex);
+    PathTracer::SurfaceData ret = PathTracer::SurfaceData::make(/*ptVertex, */ptShadingData, bsdf, prevPosW, matIoR, neeTriangleLightIndex, neeAnalyticLightIndex);
 
 #if ENABLE_DEBUG_VIZUALISATIONS && !NON_PATH_TRACING_PASS
-    if( debug.IsDebugPixel() && pathVertexIndex==1 && !debug.constants.exploreDeltaTree )
+    if( debug.IsDebugPixel(pixelPos) && pathVertexIndex==1 && !debug.constants.exploreDeltaTree )
         debug.SetPickedMaterial( materialIndex );
-    surfaceDebugViz( optimizationHints, ret, triangleHit, rayDir, rayCone, pathVertexIndex, ommDebug, debug );
+    surfaceDebugViz( pixelPos, optimizationHints, ret, triangleHit, rayDir, rayCone, pathVertexIndex, ommDebug, debug );
 #if OMM_DEBUG_VIEW_OVERLAY
     debug.DrawDebugViz(float4(ommDebug.opacityStateDebugColor, 1.0));
 #endif
@@ -841,7 +859,7 @@ bool Bridge::AlphaTestVisibilityRay(uint instanceID, uint instanceIndex, uint ge
 // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
 bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, DebugContext debug)
 {
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> rayQuery;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
     rayQuery.TraceRayInline(SceneBVH, RAY_FLAG_NONE, 0xff, ray);
 
     while (rayQuery.Proceed())
@@ -876,7 +894,7 @@ bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pa
     return !rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
-void Bridge::traceScatterRay(const PathState path, inout RayDesc ray, inout RayQuery<RAY_FLAG_NONE> rayQuery, inout PackedHitInfo packedHitInfo, DebugContext debug)
+void Bridge::traceScatterRay(const PathState path, inout RayDesc ray, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, inout PackedHitInfo packedHitInfo, DebugContext debug)
 {
     ray = path.getScatterRay().toRayDesc();
     rayQuery.TraceRayInline(SceneBVH, RAY_FLAG_NONE, 0xff, ray);
@@ -892,7 +910,7 @@ void Bridge::traceScatterRay(const PathState path, inout RayDesc ray, inout RayQ
                 rayQuery.CandidateGeometryIndex(),
                 rayQuery.CandidatePrimitiveIndex(),
                 rayQuery.CandidateTriangleBarycentrics()
-                //, workingContext.debug
+                //, workingContext.Debug
                 )
             )
             {
@@ -917,12 +935,6 @@ void Bridge::traceScatterRay(const PathState path, inout RayDesc ray, inout RayQ
     }
 }
 
-void Bridge::StoreSecondarySurfacePositionAndNormal(uint2 pixelCoordinate, float3 worldPos, float3 normal)
-{
-    const uint encodedNormal = ndirToOctUnorm32(normal);
-    u_SecondarySurfacePositionNormal[pixelCoordinate] = float4(worldPos, asfloat(encodedNormal));
-}
-
 EnvMap Bridge::CreateEnvMap()
 {
     return EnvMap::make( t_EnvironmentMap, s_EnvironmentMapSampler, g_Const.envMapSceneParams );
@@ -941,14 +953,23 @@ EnvMapSampler Bridge::CreateEnvMapImportanceSampler()
     );
 }
 
-LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, float rayConeWidthOverTotalPathTravel, bool isDebugPixel )
+LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, float rayConeWidth, float totalPathLength )
 {
-    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightNarrowSamplingBuffer, u_LightFeedbackBuffer, t_EnvLookupMap, pixelPos, rayConeWidthOverTotalPathTravel, isDebugPixel );
+    bool isIndirect = LightSampler::IsIndirectHeuristic( t_LightsCB, rayConeWidth, totalPathLength );
+#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeightAntiLag, u_LightFeedbackCandidatesAntiLag, pixelPos, isIndirect );
+#else
+    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeight, u_LightFeedbackCandidates, pixelPos, isIndirect );
+#endif
 }
 
-LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, bool isIndirect, bool isDebugPixel )
+LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, bool isIndirect )
 {
-    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightNarrowSamplingBuffer, u_LightFeedbackBuffer, t_EnvLookupMap, pixelPos, isIndirect, isDebugPixel );
+#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeightAntiLag, u_LightFeedbackCandidatesAntiLag, pixelPos, isIndirect );
+#else
+    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeight, u_LightFeedbackCandidates, pixelPos, isIndirect );
+#endif
 }
 
 bool Bridge::HasEnvMap()

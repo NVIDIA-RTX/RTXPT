@@ -35,7 +35,8 @@ namespace bvh
     static nvrhi::rt::AccelStructDesc GetMeshBlasDesc(
         const Config& cfg,
         const donut::engine::MeshInfo& mesh,
-        const std::vector<OmmAttachment>* ommAttachment)
+        const OmmAttachment* ommAttachment,
+        bool updateSkinMeshes)
     {
         nvrhi::rt::AccelStructDesc blasDesc;
         blasDesc.isTopLevel = false;
@@ -59,8 +60,8 @@ namespace bvh
 
             PTMaterial & materialPT = *PTMaterial::FromDonut(geometry->material);
 
-            if (cfg.excludeTransmissive &&
-                geometry->material->domain == donut::engine::MaterialDomain::Transmissive)
+            if ( (cfg.excludeTransmissive && geometry->material->domain == donut::engine::MaterialDomain::Transmissive) 
+                || materialPT.SkipRender )
             {
                 constexpr float nan = std::numeric_limits<float>::quiet_NaN();
                 constexpr nvrhi::rt::AffineTransform c_NanTransform = {
@@ -73,7 +74,7 @@ namespace bvh
 
             if (ommAttachment)
             {
-                const OmmAttachment& omm = (*ommAttachment)[geomIt];
+                const OmmAttachment& omm = ommAttachment[geomIt];
                 triangles.opacityMicromap = omm.ommBuffer;
                 triangles.ommIndexBuffer = omm.ommIndexBuffer;
                 triangles.ommIndexBufferOffset = omm.ommIndexBufferOffset;
@@ -92,11 +93,11 @@ namespace bvh
         // don't compact acceleration structures that are built per frame
         if (mesh.skinPrototype.use_count() != 0)
         {
-            blasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastBuild;
+            blasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace | (updateSkinMeshes ? nvrhi::rt::AccelStructBuildFlags::PerformUpdate : nvrhi::rt::AccelStructBuildFlags::AllowUpdate);
         }
         else
         {
-            blasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace | nvrhi::rt::AccelStructBuildFlags::AllowCompaction;
+            blasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace | nvrhi::rt::AccelStructBuildFlags::AllowCompaction; // | nvrhi::rt::AccelStructBuildFlags::MinimizeMemory;
         }
 
         return blasDesc;

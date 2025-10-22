@@ -20,6 +20,7 @@
 #include "Rendering/Materials/InteriorList.hlsli"
 #include "Rendering/Materials/TexLODHelpers.hlsli"
 #include "Lighting/LightingTypes.h"
+#include "PathTracerHelpers.hlsli"
 
 // Be careful with changing these. PathFlags share 32-bit uint with vertexIndex. For now, we keep 10 bits for vertexIndex.
 // PathFlags take higher bits, VertexIndex takes lower bits.
@@ -42,11 +43,13 @@ enum class PathFlags
     delta                           = (1<<4),   ///< Scatter ray went through a delta event.
 
     insideDielectricVolume          = (1<<5),   ///< Path vertex is inside a dielectric volume.
-    terminateAtNextBounce           = (1<<6),   ///< This path is flagged for termination next bounce; in the next bounce it not collect NEE - it's dead 
-    //<removed, empty space>          = (1<<7),   ///<
+    terminateAtNextBounce           = (1<<6),   ///< This path is flagged for termination next bounce; in the next bounce it should not collect NEE - it's dead 
+    
+    // see https://github.com/NVIDIA-RTX/RTXDI/blob/main/Doc/RestirGI.md
+    restirGIStarted                 = (1<<7),   ///< This path has started collecting data for ReSTIR GI - all radiance from now on is diverted into ReSTIR GI buffers
+    restirGICollectSecondarySurface = (1<<8),   ///< This path has started collecting data for ReSTIR GI - next hit surface (or sky) info needs to be saved into ReSTIR GI buffers !!and the flag will be removed then!!
 
-    diffusePrimaryHit               = (1<<8),   ///< Scatter ray went through a diffuse event on primary hit.
-    specularPrimaryHit              = (1<<9),   ///< Scatter ray went through a specular event on primary hit.
+    //specularPrimaryHit              = (1<<9),   ///< Scatter ray went through a specular event on primary hit.
     //<removed, empty space>          = (1<<10),  ///<
     deltaTransmissionPath           = (1<<11),  ///< Path started with and followed delta transmission events (whenever possible - TIR could be an exception) until it hit the first non-delta event.
     deltaOnlyPath                   = (1<<12),  ///< There was no non-delta events along the path so far.
@@ -56,8 +59,8 @@ enum class PathFlags
     stablePlaneIndexBit1            = (1<<15),  ///< StablePlaneIndex, bit 1 -- just reserving space for kStablePlaneIndexBitOffset & kStablePlaneIndexBitMask which must be 14
     stablePlaneOnPlane              = (1<<16),  ///< Current vertex is on a stable plane; this is where we update stablePlaneBaseScatterDiff
     stablePlaneOnBranch             = (1<<17),  ///< Current vertex is on a stable plane or stable branch; all emission is stable and was already collected
-    stablePlaneBaseScatterDiff      = (1<<18),  ///< When stepping off the last stable plane & branch, we had a diffuse scatter event
-    stablePlaneOnDeltaBranch        = (1<<19),  ///< The first scatter from a stable plane was a delta event
+    stablePlaneBaseScatterDiff      = (1<<18),  ///< When stepping off the last stable plane & branch, we had a diffuse scatter event (this determines if the radiance is diffuse or specular for denoising purposes)
+    //stablePlaneOnDeltaBranch        = (1<<19),  ///< The first scatter from a stable plane was a delta event
     stablePlaneOnDominantBranch     = (1<<20),  ///< Are we on the dominant stable plane or one of its branches (landing on a new stable branch will re-set this flag accordingly)
 
     // Bits to kPathFlagsBitCount are still unused.
@@ -79,11 +82,15 @@ enum class PackedCounters // each packed to 8 bits, 4 max fits in 32bit uint
 */
 struct PathState
 {
-    uint        id;                     ///< Path ID encodes (pixel, sampleIdx) with 12 bits each for pixel x|y and 8 bits for sample index.
+    uint        id;                     ///< See PathIDToPixel/PathIDFromPixel for encoding
     uint        flagsAndVertexIndex;    ///< Higher kPathFlagsBitCount bits: Flags indicating the current status. This can be multiple PathFlags flags OR'ed together.
                                         ///< Lower kVertexIndexBitCount bits: Current vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
 
     float       sceneLength;            ///< [DO NOT COMPRESS TO 16bit float!] Path length in scene units (was 0.f at primary hit originally, in this implementation it includes camera to primary hit).
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
+    float       sceneLengthFromDenoisingLayer; ///< [can be compressed to 16bit in most cases] Path length in scene units between denoising layer vertex and the next vertex; useful for estimating denoising motion vectors
+    float       specHitT;               ///< tracks rough hitT (weighted average of sceneLengthFromDenoisingLayer, with L.a used as a weight) 
+#endif
 
     lpfloat     fireflyFilterK;         ///< (0, 1] multiplier for the global firefly filter threshold if used; CAN be compressed to 16bit float!
     lpuint      packedMISInfo;          ///< See NEEBSDFMISInfo
@@ -97,31 +104,29 @@ struct PathState
     float3      origin;                 ///< Origin of the scatter ray.
     float3      dir;                    ///< Scatter ray normalized direction.
     
-    // removed until needed again for emissive triangle sampling MIS 
-    // float3      normal;                 ///< Shading normal at the scatter ray origin.
-
     PackedHitInfo hitPacked;            ///< Hit information for the scatter ray. This is populated at committed triangle hits. 4 uints (16 bytes)
 
     float3      thp;                    ///< Path throughput.
-    float       thpRRBoost;             ///< Since we use RR to decide early termination for next frame, the correct place to apply RR thp boost that preserves unbiasedness is only AFTER emissive/sky is collected.
-
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_FILL_STABLE_PLANES // nothing to accumulate in this case - all goes to denoiser
-    float3      L;                      ///< Accumulated path contribution.
-#else
-    lpfloat4    denoiserDiffRadianceHitDist;
-    lpfloat4    denoiserSpecRadianceHitDist;
-    float3      secondaryL;             ///< Radiance reflected and emitted by the secondary surface
-    float       denoiserSampleHitTFromPlane;
-#endif
+    lpfloat     thpRuRuCorrection;      ///< Since we use Russian Roulette to decide early termination for next frame, the correct place to apply RR thp boost that preserves unbiasedness is only AFTER emissive/sky is collected.
 
     InteriorList interiorList;          ///< Interior list. Keeping track of a stack of materials with medium properties. Size depends on INTERIOR_LIST_SLOT_COUNT. 2 slots (8 bytes) by default.
     RayCone     rayCone;                ///< 4 or 8 bytes depending on USE_RAYCONES_WITH_FP16_IN_RAYPAYLOAD (on, so 4 bytes by default). 
 
 #if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
     lpfloat3x3  imageXform;             ///< Accumulated rotational image transform along the path. This can be float16_t.
+#else
+    float4      L;                      ///< .rgb - accumulated path contribution; .a - specularness (weighted average)
 #endif
 
     // Accessors
+
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
+    float GetSceneLengthFromDenoisingLayer()    { return sceneLengthFromDenoisingLayer; }
+    float GetSpecHitT()                         { return specHitT; }
+#else
+    float GetSceneLengthFromDenoisingLayer()    { return 0.0f; }
+    float GetSpecHitT()                         { return 0.0f; }
+#endif
 
     bool isTerminated() { return !isActive(); }
     bool isActive() { return hasFlag(PathFlags::active); }
@@ -131,8 +136,8 @@ struct PathState
     bool wasScatterDelta() { return hasFlag(PathFlags::delta); }                                    ///< Get flag indicating that last scatter ray went through a delta event.
     bool isInsideDielectricVolume() { return hasFlag(PathFlags::insideDielectricVolume); }
 
-    bool isDiffusePrimaryHit() { return hasFlag(PathFlags::diffusePrimaryHit); }
-    bool isSpecularPrimaryHit() { return hasFlag(PathFlags::specularPrimaryHit); }
+    // bool isDiffusePrimaryHit() { return hasFlag(PathFlags::diffusePrimaryHit); }
+    // bool isSpecularPrimaryHit() { return hasFlag(PathFlags::specularPrimaryHit); }
     bool isDeltaTransmissionPath() { return hasFlag(PathFlags::deltaTransmissionPath); }
     bool isDeltaOnlyPath() { return hasFlag(PathFlags::deltaOnlyPath); }
 
@@ -156,8 +161,8 @@ struct PathState
     void setScatterSpecular(bool value = true) { setFlag(PathFlags::specular, value); }                    ///< Set flag indicating that scatter ray went through a specular event.
     void setScatterDelta(bool value = true) { setFlag(PathFlags::delta, value); }                          ///< Set flag indicating that scatter ray went through a delta event.
     void setInsideDielectricVolume(bool value = true) { setFlag(PathFlags::insideDielectricVolume, value); }
-    void setDiffusePrimaryHit(bool value = true) { setFlag(PathFlags::diffusePrimaryHit, value); }
-    void setSpecularPrimaryHit(bool value = true) { setFlag(PathFlags::specularPrimaryHit, value); }
+    // void setDiffusePrimaryHit(bool value = true) { setFlag(PathFlags::diffusePrimaryHit, value); }
+    // void setSpecularPrimaryHit(bool value = true) { setFlag(PathFlags::specularPrimaryHit, value); }
     void setDeltaTransmissionPath(bool value = true) { setFlag(PathFlags::deltaTransmissionPath, value); }
     void setDeltaOnlyPath(bool value = true) { setFlag(PathFlags::deltaOnlyPath, value); }
 
@@ -193,9 +198,7 @@ struct PathState
         packedCounters += (1u << shift);
     }
 
-    // fixed to 1 sample and moved to PathTracerTypes, PathIDToPixel - sorry - we might bring it back here
-    // uint2 getPixel() { return uint2(id, id >> 12) & 0xfff; }
-    // uint getSampleIdx() { return id >> 24; }
+    uint2 GetPixelPos() { return PathIDToPixel(id); }
 
     // Unsafe - assumes that index is small enough.
     void setVertexIndex(uint index)

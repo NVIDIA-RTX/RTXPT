@@ -196,14 +196,14 @@ void EnvMapImportanceSamplingBaker::FillBakerConsts(EnvMapImportanceSamplingBake
     constants.SampleIndex = sampleIndex;
 }
 
-void EnvMapImportanceSamplingBaker::PreUpdate(nvrhi::TextureHandle sourceCubemap)
+void EnvMapImportanceSamplingBaker::PreUpdate(nvrhi::TextureHandle sourceCubemap, bool newSource)
 {
     assert(sourceCubemap);
 
     if (m_importanceMapTexture == nullptr)
         CreateImportanceMap();
 
-    if (m_importanceMapBindingSet == nullptr)
+    if (m_importanceMapBindingSet == nullptr || newSource)
     {
         nvrhi::BindingSetDesc bindingSetDesc;
         bindingSetDesc.bindings = {
