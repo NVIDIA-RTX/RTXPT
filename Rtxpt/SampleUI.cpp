@@ -61,8 +61,13 @@ SampleUI::SampleUI(DeviceManager* deviceManager, Sample& app, SampleUIData& ui, 
 
     ImGui::GetIO().IniFilename = nullptr;
 
-    m_ui.NVAPIHitObjectExtension    = NVAPI_SERSupported;  // no need to check for or attempt using HitObjectExtension if SER not supported
-    //m_ui.DXHitObjectExtension = true;
+    // Choose which, if any, hit object extension we can use
+#if RTXPT_D3D_AGILITY_SDK_VERSION >= 619
+    m_ui.DXHitObjectExtension = (GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12);
+    m_ui.NVAPIHitObjectExtension = !m_ui.DXHitObjectExtension && NVAPI_SERSupported;
+#else
+    m_ui.NVAPIHitObjectExtension = NVAPI_SERSupported;  // no need to check for or attempt using HitObjectExtension if SER not supported
+#endif
 
 #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
     m_ImNodesContext = ImNodes::Ez::CreateContext();
@@ -846,9 +851,9 @@ void SampleUI::buildUI(void)
                     m_ui.NVAPIHitObjectExtension = false;
                 }
 
-#if RTXPT_D3D_AGILITY_SDK_VERSION >= 717
+#if RTXPT_D3D_AGILITY_SDK_VERSION >= 619
+                if(GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
                 {
-                    ImGui::TextColored(warnColor, "!!AgilitySDK717+!!");
                     RESET_ON_CHANGE(ImGui::Checkbox("dx::HitObject codepath", &m_ui.DXHitObjectExtension));
                     if (m_ui.DXHitObjectExtension)
                     {
@@ -857,7 +862,6 @@ void SampleUI::buildUI(void)
                     }
                     if (m_ui.DXHitObjectExtension)
                         m_ui.NVAPIHitObjectExtension = false;
-                    ImGui::TextColored(warnColor, "!!AgilitySDK717+!!");
                 }
 #endif
             }

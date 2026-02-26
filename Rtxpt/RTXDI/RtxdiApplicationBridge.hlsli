@@ -132,15 +132,15 @@ struct RayHitInfo
 };
 
 #if !USE_RAY_QUERY
-struct RayPayload
+struct PAYLOAD_QUALIFIER RayPayload
 {
-    float3 throughput;
-    float committedRayT;
-    uint instanceIndex;
-    uint geometryIndex;
-    uint primitiveIndex;
-    bool frontFace;
-    float2 barycentrics;
+    float3 throughput PAYLOAD_FIELD_RW_ALL;
+    float committedRayT PAYLOAD_FIELD_RW_ALL;
+    uint instanceIndex PAYLOAD_FIELD_RW_ALL;
+    uint geometryIndex PAYLOAD_FIELD_RW_ALL;
+    uint primitiveIndex PAYLOAD_FIELD_RW_ALL;
+    bool frontFace PAYLOAD_FIELD_RW_ALL;
+    float2 barycentrics PAYLOAD_FIELD_RW_ALL;
 };
 
 // Not implemented, use alphaTest() instead 

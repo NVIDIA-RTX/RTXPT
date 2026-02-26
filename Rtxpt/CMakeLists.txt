@@ -37,6 +37,9 @@ if(DONUT_WITH_AFTERMATH OR DONUT_EMBED_SHADER_PDBS)
 endif()
 
 #set(shadermake_options --verbose)
+if(RTXPT_D3D_AGILITY_SDK_VERSION AND (RTXPT_D3D_AGILITY_SDK_VERSION GREATER_EQUAL "619"))
+    set(shadermake_options "-m 6_9")
+endif()
 
 donut_compile_shaders(
     TARGET rtxpt_shaders
@@ -143,6 +146,7 @@ if (RTXPT_D3D_AGILITY_SDK_PATH AND RTXPT_D3D_AGILITY_SDK_VERSION)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
     )
     target_compile_definitions(${project} PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
+    target_include_directories(${project} PRIVATE ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/include)
 endif()
 
 ##########################################################################

@@ -14,8 +14,6 @@
 #include <donut/core/json.h>
 #include <donut/app/ApplicationBase.h>
 #include <donut/engine/SceneTypes.h>
-#include <json/json.h>
-#include <json/value.h>
 #include <fstream>
 
 using namespace donut;

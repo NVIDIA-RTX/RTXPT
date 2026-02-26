@@ -93,7 +93,7 @@ private:
 public:
     using Scene::Scene;
 
-    bool LoadWithExecutor(const std::filesystem::path& jsonFileName, tf::Executor* executor) override;
+    bool LoadWithThreadPool(const std::filesystem::path& sceneFileName, donut::engine::ThreadPool* threadPool) override;
     std::shared_ptr<SampleSettings> GetSampleSettingsNode() const   { return m_loadedSettings; }
     std::shared_ptr<GameSettings>   GetGameSettingsNode() const     { return m_loadedGameSettings; }
 

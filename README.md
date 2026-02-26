@@ -1,6 +1,11 @@
-# RTX Path Tracing v1.7.0
+# RTX Path Tracing v1.7.1
 
 ![Title](./Docs/r-title.png)
+
+## What's new in 1.7.1
+ * A small update that uses Agility SDK 1.619
+	* Uses the DXR version of OMMs by default, rather than NvAPI
+	* Uses the SM6.9 HitObject API for Shader Execution Reordering by default, rather than NvAPI
 
 ## What's new in 1.7.0
  * New scene (bistro-programmer-art) for stress testing animation and dynamic lighting scenarios

@@ -103,34 +103,49 @@ option(STREAMLINE_FEATURE_DEEPDVC   "Include DEEPDVC dll"           OFF )
 option(STREAMLINE_FEATURE_DIRECTSR  "Include DirectSR dll"          OFF )
 #----------------------------------------------------------------------------------------------------------------------
 
+
 #----------------------------------------------------------------------------------------------------------------------
 # Get and unpack DXC for DirectX shader compilation
-CheckAndDownloadPackage("DXC" "v1.8.2505" ${CMAKE_CURRENT_SOURCE_DIR}/external/dxc https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505/dxc_2025_05_24.zip "zip")
-set(DXC_CUSTOM_PATH "${CMAKE_SOURCE_DIR}/External/dxc/bin/x64/" CACHE STRING "Path to embedded dxc")
+CheckAndDownloadPackage("DXC" "v1.9.2602.17" ${CMAKE_CURRENT_SOURCE_DIR}/external/dxc https://www.nuget.org/api/v2/package/Microsoft.Direct3D.DXC/1.9.2602.17 "zip")
+set(DXC_CUSTOM_PATH "${CMAKE_SOURCE_DIR}/External/dxc/build/native/bin/x64/" CACHE STRING "Path to embedded dxc")
 #----------------------------------------------------------------------------------------------------------------------
 
 
-set(RTXPT_DOWNLOAD_AND_ENABLE_AGILITY_SDK "" CACHE BOOL "Attempt to automatically download DirectX AgilitySDK and enable experimental features")
+#----------------------------------------------------------------------------------------------------------------------
+# Get and unpack the Agility SDK
+set(RTXPT_D3D_AGILITY_SDK_VERSION_NAME "1.619.0" CACHE STRING "Optional Agility SDK version to download")
+set_property(CACHE RTXPT_D3D_AGILITY_SDK_VERSION_NAME PROPERTY STRINGS "1.619.0" "1.717.0-preview" "1.719.0-preview" "")
 
-if (RTXPT_DOWNLOAD_AND_ENABLE_AGILITY_SDK)
-set(RTXPT_D3D_AGILITY_SDK_PATH ${CMAKE_CURRENT_SOURCE_DIR}/external/AgilitySDK/v1.717.0-preview CACHE STRING "AgilitySDKPath" FORCE)
-set(RTXPT_D3D_AGILITY_SDK_VERSION "717" CACHE STRING "AgilitySDKVersion" FORCE)
-CheckAndDownloadPackage("Agility SDK" "1.717.0-preview" ${RTXPT_D3D_AGILITY_SDK_PATH} https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.717.0-preview "zip")
+if (RTXPT_D3D_AGILITY_SDK_VERSION_NAME)
+    # Extract the numeric SDK version (e.g. "1.717.0-preview" -> "717")
+    string(REGEX MATCH "^[0-9]+\\.([0-9]+)\\." _agility_ver_match "${RTXPT_D3D_AGILITY_SDK_VERSION_NAME}")
+    set(_agility_numeric_ver "${CMAKE_MATCH_1}")
+    if (NOT _agility_numeric_ver)
+        message(FATAL_ERROR "Could not extract numeric version from: ${RTXPT_D3D_AGILITY_SDK_VERSION_NAME}")
+    endif()
+
+    set(RTXPT_D3D_AGILITY_SDK_PATH ${CMAKE_CURRENT_SOURCE_DIR}/external/AgilitySDK/${RTXPT_D3D_AGILITY_SDK_VERSION_NAME} CACHE STRING "AgilitySDKPath" FORCE)
+    set(RTXPT_D3D_AGILITY_SDK_VERSION "${_agility_numeric_ver}" CACHE STRING "AgilitySDKVersion" FORCE)
+    CheckAndDownloadPackage("Agility SDK" "${RTXPT_D3D_AGILITY_SDK_VERSION_NAME}"
+        ${RTXPT_D3D_AGILITY_SDK_PATH} "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/${RTXPT_D3D_AGILITY_SDK_VERSION_NAME}" "zip")
 else()
-set(RTXPT_D3D_AGILITY_SDK_PATH "" CACHE STRING "AgilitySDKPath")
-set(RTXPT_D3D_AGILITY_SDK_VERSION "" CACHE STRING "AgilitySDKVersion")
+    set(RTXPT_D3D_AGILITY_SDK_PATH "" CACHE STRING "AgilitySDKPath" FORCE)
+    set(RTXPT_D3D_AGILITY_SDK_VERSION "" CACHE STRING "AgilitySDKVersion" FORCE)
 endif()
 
-
+#----------------------------------------------------------------------------------------------------------------------
 option(NVRHI_WITH_NVAPI "Include NVAPI support (requires NVAPI SDK)" ON)
 set(NVAPI_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/External/nvapi/" CACHE STRING "Path to NVAPI include headers/shaders" )
 set(NVAPI_LIBRARY "${CMAKE_SOURCE_DIR}/External/nvapi/amd64/nvapi64.lib" CACHE STRING "Path to NVAPI .lib file")
 
 set(DXC_PATH "${DXC_CUSTOM_PATH}/dxc.exe" CACHE STRING "Path to embedded dxc file for DX12")
 set(DXC_DXIL_EXECUTABLE "${DXC_CUSTOM_PATH}/dxc.exe" CACHE STRING "Path to embedded dxc file for DX12")
-#set(DXC_SPIRV_EXECUTABLE "${DXC_CUSTOM_PATH}/dxc.exe" CACHE STRING "Path to embedded dxc file for SPIRV") # default to using dxc from the Vulkan SDK; remove this to use embedded .dxc
+set(DXC_SPIRV_PATH "${DXC_CUSTOM_PATH}/dxc.exe" CACHE STRING "Path to embedded dxc file for SPIRV")
 
-option (SHADERMAKE_FIND_DXC_SPIRV "Toggles whether to search for DXC for SPIR-V" ON)
+set(SHADERMAKE_FIND_DXC OFF CACHE BOOL  "" FORCE)
+set(SHADERMAKE_FIND_DXC_VK OFF CACHE BOOL "" FORCE)
+set(SHADERMAKE_DXC_PATH "${DXC_PATH}" CACHE STRING "" FORCE)
+set(SHADERMAKE_DXC_VK_PATH "${DXC_PATH}" CACHE STRING "" FORCE)
 
 # option(USE_RAY_TRACING_DENOISER "Include NRD as part of the sample." ON)
 
@@ -144,10 +159,18 @@ option(DONUT_WITH_LZ4 "Include LZ4" OFF)
 
 add_subdirectory("External")
 
+# Default to using DXR OMMs if we can
+if(NVRHI_WITH_DX12 AND RTXPT_D3D_AGILITY_SDK_VERSION AND (RTXPT_D3D_AGILITY_SDK_VERSION GREATER_EQUAL "619"))
+    set(NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP ON CACHE BOOL "" FORCE)
+else()
+    set(NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP OFF CACHE BOOL "" FORCE)
+endif()
+
 if (NVRHI_WITH_VULKAN OR NVRHI_WITH_DX12)
 	add_subdirectory(Rtxpt)
 	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Rtxpt)
 endif()
+#----------------------------------------------------------------------------------------------------------------------
 
 
 #----------------------------------------------------------------------------------------------------------------------
