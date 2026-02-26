@@ -69,7 +69,7 @@ void PTPipelineVariant::CompileIfNeededPrepare(std::filesystem::file_time_type l
 
     std::string command;
 
-#if RTXPT_D3D_AGILITY_SDK_VERSION >= 717
+#if RTXPT_D3D_AGILITY_SDK_VERSION >= 619
         command += " -T lib_6_9";
         //command += " -Vd";
 #else

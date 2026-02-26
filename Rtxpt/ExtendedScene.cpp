@@ -12,7 +12,6 @@
 #include <donut/core/json.h>
 #include <donut/core/vfs/VFS.h>
 #include <donut/core/log.h>
-#include <json/value.h>
 #include <nvrhi/utils.h>
 #include <nvrhi/common/misc.h>
 #include <json/json.h>
@@ -143,9 +142,9 @@ void ExtendedScene::ProcessNodesRecursive(donut::engine::SceneGraphNode* node)
         ProcessNodesRecursive(node->GetChild(i));
 }
 
-bool ExtendedScene::LoadWithExecutor(const std::filesystem::path& jsonFileName, tf::Executor* executor)
+bool ExtendedScene::LoadWithThreadPool(const std::filesystem::path& sceneFileName, donut::engine::ThreadPool* threadPool)
 {
-	if (!Scene::LoadWithExecutor(jsonFileName, executor))
+	if (!Scene::LoadWithThreadPool(sceneFileName, threadPool))
 		return false;
 
     ProcessNodesRecursive( GetSceneGraph()->GetRootNode().get() );

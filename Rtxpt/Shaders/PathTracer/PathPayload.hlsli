@@ -13,20 +13,11 @@
 
 #include "Config.h"    
 
-#if NON_PATH_TRACING_PASS || defined(__cplusplus) || (__SHADER_TARGET_MAJOR < 6 || __SHADER_TARGET_MINOR < 8)
-    #define RAYPAYLOAD_QUALIFIER
-    #define RAYPAYLOAD_FIELD_QUALIFIER
-#else
-    #define RAYPAYLOAD_QUALIFIER        [raypayload] 
-    #define RAYPAYLOAD_FIELD_QUALIFIER  : read(caller, closesthit, miss) : write(caller, closesthit, miss)
-#endif
-
-
 // packed and aligned representation of PathState in a pre-raytrace state (no HitInfo, but path.origin and path.direction set)
-struct RAYPAYLOAD_QUALIFIER PathPayload
+struct PAYLOAD_QUALIFIER PathPayload
 {
 // #if PATH_TRACER_MODE==PATH_TRACER_MODE_REFERENCE      
-    uint4   packed[5] RAYPAYLOAD_FIELD_QUALIFIER; // normal reference codepath
+    uint4 packed[5] PAYLOAD_FIELD_RW_ALL; // normal reference codepath
 
 #ifdef PATH_STATE_DEFINED
     static PathPayload pack(const PathState path);

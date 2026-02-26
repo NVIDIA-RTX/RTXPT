@@ -81,7 +81,7 @@ extern "C"
 
 static const int c_swapchainCount = 3;
 
-static const char* g_windowTitle = "RTX Path Tracing v1.7.0";
+static const char* g_windowTitle = "RTX Path Tracing v1.7.1";
 
 const float c_envMapRadianceScale = 1.0f / 4.0f; // used to make input 32bit float radiance fit into 16bit float range that baker supports; going lower than 1/4 causes issues with current BC6U compression algorithm when used
 
@@ -2810,15 +2810,10 @@ int main(int __argc, const char** __argv)
         deviceParams.enableNvrhiValidationLayer = true;
     }
 
-    if (cmdLine.useVulkan && std::string(g_windowTitle) == "RTX Path Tracing v1.7.0")   // temporary workaround for 1.7.0 until bug fixed - sorry
-    {
-        deviceParams.enableDebugRuntime = false;
-    }
-
-#if RTXPT_D3D_AGILITY_SDK_VERSION == 717
-        // currently broken!
-        deviceParams.enableDebugRuntime = deviceParams.enableNvrhiValidationLayer = false;
-#endif
+    // We currently have an issue with the debug layer, leading to a GPU crash
+    // It's being actively investigated and this project will be updated as soon
+    // as we have a fix.
+    deviceParams.enableDebugRuntime = false;
 
     deviceParams.backBufferWidth = cmdLine.width;
     deviceParams.backBufferHeight = cmdLine.height;
@@ -2853,6 +2848,26 @@ int main(int __argc, const char** __argv)
         log::fatal("The graphics device does not support Ray Queries");
         return 4;
     }
+
+#if DONUT_WITH_DX12 && (RTXPT_D3D_AGILITY_SDK_VERSION >= 619)
+    // When using AgilitySDK >= 619, we require shader model 6.9
+    if(deviceManager->GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
+    {
+        ID3D12Device* d3d12Device = static_cast<ID3D12Device*>(
+            deviceManager->GetDevice()->getNativeObject(nvrhi::ObjectTypes::D3D12_Device)
+        );
+
+        D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_9 };
+
+        HRESULT hr = d3d12Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel));
+        assert(SUCCEEDED(hr));
+        if(shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_9)
+        {
+            log::fatal("Shader Model 6.9 is required, but unsupported on the current device. Please check for newer graphics drivers.");
+            return 4;
+        }
+    }
+#endif
 
     bool NVAPI_SERSupported = deviceManager->GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12 && deviceManager->GetDevice()->queryFeatureSupport(nvrhi::Feature::ShaderExecutionReordering);
     
