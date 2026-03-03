@@ -11,8 +11,8 @@
 #pragma once
 
 #include "../Shaders/PathTracer/Config.h"
-#include "../SampleCommon.h"
-#include "../SampleUI.h"
+//#include "../SampleCommon/SampleCommon.h"
+//#include "../SampleUI.h"
 #include "GameMisc.h"
 
 #include <donut/app/Camera.h>

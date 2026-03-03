@@ -10,7 +10,7 @@
 
 #include "PrepareLightsPass.h"
 #include "RtxdiResources.h"
-#include "../ExtendedScene.h"
+#include "../SampleCommon/ExtendedScene.h"
 #include <donut/engine/Scene.h>
 
 #include <donut/engine/ShaderFactory.h>
@@ -25,9 +25,9 @@ using namespace donut::math;
 #include "ShaderParameters.h"
 #include "../Lighting/Distant/EnvMapBaker.h"
 #include "../Lighting/Distant/EnvMapImportanceSamplingBaker.h"
-#include "../RenderTargets.h"
+#include "../SampleCommon/RenderTargets.h"
 
-#include "../ShaderDebug.h"
+#include "../Misc/ShaderDebug.h"
 
 #include "../Materials/MaterialsBaker.h"
 #include "../OpacityMicroMap/OmmBaker.h"
@@ -158,7 +158,7 @@ void PrepareLightsPass::CountLightsInScene(uint32_t& numEmissiveMeshes, uint32_t
     {
         for (const auto& geometry : instance->GetMesh()->geometries)
         {
-            PTMaterial & materialPT = *PTMaterial::FromDonut(geometry->material);
+            PTMaterial & materialPT = *PTMaterial::SafeCast(geometry->material);
             if (materialPT.IsEmissive())
             {
                 numEmissiveMeshes += 1;
@@ -259,7 +259,7 @@ static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfo
 #endif
  
 	case LightType_Spot: {
-		auto& spot = static_cast<const SpotLight&>(light);
+		auto& spot = dynamic_cast<const SpotLight&>(light);
 
         // Sphere lights not supported in the RTXPT currently
         if (spot.radius == 0.f)
@@ -317,7 +317,7 @@ static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfo
         return true;
     }*/
     case LightType_Point: {
-        auto& point = static_cast<const donut::engine::PointLight&>(light);
+        auto& point = dynamic_cast<const donut::engine::PointLight&>(light);
      
         if (point.radius == 0.f)
         {
@@ -403,7 +403,7 @@ RTXDI_LightBufferParameters PrepareLightsPass::Process(nvrhi::ICommandList* comm
             nvrhi::hash_combine(instanceHash, instance.get());
             nvrhi::hash_combine(instanceHash, geometryIndex);
 
-            PTMaterial & materialPT = *PTMaterial::FromDonut(geometry->material);
+            PTMaterial & materialPT = *PTMaterial::SafeCast(geometry->material);
             if (!materialPT.IsEmissive())
             {
                 // remove the info about this instance, just in case it was emissive and now it's not

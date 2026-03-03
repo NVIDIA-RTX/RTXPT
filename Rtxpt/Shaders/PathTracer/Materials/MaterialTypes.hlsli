@@ -26,8 +26,10 @@ struct MaterialProperties
     lpfloat roughness;
     lpfloat3 baseColor; // native in metal-rough, derived in spec-gloss
     lpfloat metalness; // native in metal-rough, derived in spec-gloss
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
     lpfloat transmission;
     lpfloat diffuseTransmission;
+#endif
     lpfloat ior;
     lpfloat shadowNoLFadeout;
     uint flags;
@@ -45,8 +47,10 @@ struct MaterialProperties
         result.roughness = 0;
         result.baseColor = 0;
         result.metalness = 0;
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
         result.transmission = 0;
         result.diffuseTransmission = 0;
+#endif
         result.ior = 1.5;
         result.flags = 0;
         return result;

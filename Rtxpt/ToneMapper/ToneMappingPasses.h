@@ -47,7 +47,7 @@ struct ToneMappingParameters
     bool whiteBalance = false;
     float whitePoint = 6500.0f;
     float whiteMaxLuminance = 1.0f;
-    float whiteScale = 11.2f;
+    float whiteScale = 5.1f;
     bool clamped = true;
     float exposureValueMin = -16.0f;
     float exposureValueMax = 16.0f;

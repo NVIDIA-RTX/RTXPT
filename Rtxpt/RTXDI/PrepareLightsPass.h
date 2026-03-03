@@ -16,7 +16,8 @@
 #include <memory>
 #include <unordered_map>
 
-#include "../Shaders/PathTracer/Lighting/LightingTypes.h"
+#include "../Shaders/PathTracer/Lighting/LightingTypes.hlsli"
+#include "../Shaders/PathTracer/Lighting/EnvMap.hlsli"
 
 namespace donut::engine
 {

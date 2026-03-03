@@ -39,8 +39,6 @@ uint StablePlanesVertexIndexFromBranchID(const uint stableBranchID);
 bool StablePlaneIsOnPlane(const uint planeBranchID, const uint vertexBranchID);
 bool StablePlaneIsOnStablePath(const uint planeBranchID, const uint planeVertexIndex, const uint vertexBranchID, const uint vertexIndex);
 bool StablePlaneIsOnStablePath(const uint planeBranchID, const uint vertexBranchID);
-float StablePlaneAdvanceLayerSceneLength(float currentHitT, float currentSegmentT, uint bouncesFromPlane, bool pathIsDeltaOnlyPath);
-//float4 StablePlaneCombineWithHitTCompensation(float4 currentRadianceHitDist, float3 newRadiance, float newHitT);
 float3 StablePlaneDebugVizColor(const uint planeIndex);
 
 #if !defined(__cplusplus) // shader only!
@@ -49,16 +47,17 @@ static const float kSpecHeuristicBoost = 1.0f;
 
 struct StablePlane
 {
-    uint4   PackedHitInfo;                  // Hit surface info
-    float3  RayDir;                         // Last surface hit direction
+    float3  RayOrigin;                      // Last surface hit position (minus offset to enable re-hitting again); if sky hit, then (+inf, +inf, +inf)
+    float   LastRayTCurrent;                // space to pack something else
+    float3  RayDir;                         // Last surface hit ray direction
     float   SceneLength;                    // total ray travel (PathState::sceneLength)
     uint3   PackedThpAndMVs;                // throughput and motion vectors packed in fp16; throughput might no longer be required since it's baked into bsdfestimate
     uint    VertexIndexAndRoughness;        // 16bits for vertex index (only 8 actually needed), 16bits for roughness
     uint3   DenoiserPackedBSDFEstimate;     // diff and spec bsdf estimates packed in fp16
     uint    PackedNormal;                   // normal packed in uint32 oct
     uint2   PackedNoisyRadianceAndSpecAvg;  // noisy radiance, and separate spec avg
-    float   NoisyRadianceSpecHitDist;       // spec hit distance - can be packed to fp16 
-    uint    Padding;                        // space to pack something else (needs
+    uint    FlagsAndVertexIndex;            // to be able to restart path correctly
+    uint    PackedCounters;                 // to be able to restart path correctly
 
 #if !defined(__cplusplus) // shader only!
     bool            IsEmpty()                   { return (VertexIndexAndRoughness >> 16) == 0; }
@@ -131,20 +130,20 @@ struct StablePlanesContext
         StablePlanesHeaderUAV[uint3(pixelPos, planeIndex)] = stableBranchID;
     }
 
-    static void UnpackStablePlane(const StablePlane sp, out uint vertexIndex, out uint4 packedHitInfo, out float3 rayDir, out float sceneLength, out float3 thp, out float3 motionVectors)
+    static void UnpackStablePlane(const StablePlane sp, out uint vertexIndex, out float3 rayOrigin, out float3 rayDir, out float sceneLength, out float3 thp, out float3 motionVectors)
     {
-        vertexIndex     = sp.VertexIndexAndRoughness>>16;
-        packedHitInfo   = sp.PackedHitInfo;
+        vertexIndex     = sp.VertexIndexAndRoughness>>16; // do not change before checking if used elsewhere
+        rayOrigin       = sp.RayOrigin;
         sceneLength     = sp.SceneLength;
         rayDir          = sp.RayDir;
         UnpackTwoFp32ToFp16(sp.PackedThpAndMVs, thp, motionVectors);
     }
 
-    void    LoadStablePlane(const uint2 pixelPos, const uint planeIndex, out uint vertexIndex, out uint4 packedHitInfo, out uint stableBranchID, 
-                            out float3 rayDir, out float sceneLength, out float3 thp, out float3 motionVectors )
+    void    LoadStablePlane(const uint2 pixelPos, const uint planeIndex, out uint vertexIndex, out float3 rayOrigin, out float3 rayDir, 
+                            out uint stableBranchID, out float sceneLength, out float3 thp, out float3 motionVectors )
     {
         stableBranchID = GetBranchID(pixelPos, planeIndex);
-        UnpackStablePlane( LoadStablePlane(pixelPos, planeIndex), vertexIndex, packedHitInfo, rayDir, sceneLength, thp, motionVectors );
+        UnpackStablePlane( LoadStablePlane(pixelPos, planeIndex), vertexIndex, rayOrigin, rayDir, sceneLength, thp, motionVectors );
     }
 
 #if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // should only be written in the first pass
@@ -161,13 +160,16 @@ struct StablePlanesContext
 
 
 #if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
-    // this stores at surface hit, with path processed in PathTracer::handleHit and decision taken to use vertex as stable plane
-    void                StoreStablePlane(const uint2 pixelPos, const uint planeIndex, const uint vertexIndex, const uint4 packedHitInfo, const uint stableBranchID, const float3 rayDir, const float sceneLength,
-                                            const float3 thp, const float3 motionVectors, const float roughness, const float3 worldNormal, const float3 diffBSDFEstimate, const float3 specBSDFEstimate, bool dominantSP )
+    // this stores at surface hit, and decision taken to use vertex as stable plane
+    // NOTE 1: the PathState stored here is >before< any surface processing has happened (and actually requires short re-raytrace due to inability to store at exactly the surface)
+    // NOTE 2: and the world location is "just before the hit"
+    void                StoreStablePlane(const uint2 pixelPos, const uint planeIndex, const uint vertexIndex, const float3 rayOrigin, const float3 rayDir, const uint stableBranchID, const float sceneLength, const float rayTCurrent,
+                                            const float3 thp, const float3 motionVectors, const float roughness, const float3 worldNormal, const float3 diffBSDFEstimate, const float3 specBSDFEstimate, bool dominantSP,
+                                            uint flagsAndVertexIndex, uint packedCounters)
     {
         uint address = PixelToAddress( pixelPos, planeIndex );
         StablePlane sp;
-        sp.PackedHitInfo            = packedHitInfo;
+        sp.RayOrigin                = rayOrigin;
         sp.RayDir                   = rayDir; //*clamp( sceneLength, 1e-7, kMaxRayTravel );
         sp.SceneLength              = sceneLength;
         sp.VertexIndexAndRoughness  = (vertexIndex << 16) | (f32tof16(roughness));
@@ -178,12 +180,13 @@ struct StablePlanesContext
         float3 fullDiffBSDFEstimate = clamp( diffBSDFEstimate /** thp*/, kNRDMinReflectance.xxx, kNRDMaxReflectance.xxx );
         const float3 fullSpecBSDFEstimate = clamp( specBSDFEstimate /** thp*/, kNRDMinReflectance.xxx, kNRDMaxReflectance.xxx );
 
-        sp.DenoiserPackedBSDFEstimate = PackTwoFp32ToFp16( fullDiffBSDFEstimate, fullSpecBSDFEstimate );
-        sp.PackedNormal               = NDirToOctUnorm32( worldNormal );
+        sp.DenoiserPackedBSDFEstimate   = PackTwoFp32ToFp16( fullDiffBSDFEstimate, fullSpecBSDFEstimate );
+        sp.PackedNormal                 = NDirToOctUnorm32( worldNormal );
         sp.PackedNoisyRadianceAndSpecAvg = Fp32ToFp16(float4(0,0,0,0));
-        sp.NoisyRadianceSpecHitDist   = 0;
-        sp.Padding                  = 0;
-        StablePlanesUAV[address] = sp;
+        sp.LastRayTCurrent              = rayTCurrent;
+        sp.FlagsAndVertexIndex          = flagsAndVertexIndex;
+        sp.PackedCounters               = packedCounters;
+        StablePlanesUAV[address]        = sp;
         SetBranchID(pixelPos, planeIndex, stableBranchID);
 
         if (dominantSP && planeIndex != 0) // planeIndex 0 is dominant by default
@@ -217,7 +220,7 @@ struct StablePlanesContext
     {
         // TODO optimize this; no need for this many reads, could just store availability
         availableCount = 0;
-        for( int i = 1; i < min(PTConstants.activeStablePlaneCount, cStablePlaneCount); i++ )    // we know 1st isn't available so ignore it
+        for( int i = 1; i < min(PTConstants.GetActiveStablePlaneCount(), cStablePlaneCount); i++ )    // we know 1st isn't available so ignore it
             if( GetBranchID(pixelPos, i) == cStablePlaneInvalidBranchID )
                 availablePlanes[availableCount++] = i;
     }
@@ -238,28 +241,21 @@ struct StablePlanesContext
     {
         const uint2 pixelPos                        = path.GetPixelPos();
         const uint planeIndex                       = path.getStablePlaneIndex();
-        const float sceneLengthFromDenoisingLayer   = path.sceneLengthFromDenoisingLayer;
         const bool baseScatterDiff                  = path.hasFlag(PathFlags::stablePlaneBaseScatterDiff);
         const bool onDominantBranch                 = path.hasFlag(PathFlags::stablePlaneOnDominantBranch);
 
         uint address = PixelToAddress( pixelPos, planeIndex ); 
 
-        float4 accumRadiance        = path.L;
-        float  accumSpecHitT        = path.specHitT;
+        float4 accumRadiance        = path.GetL();
         const uint2 existingRadiancePacked = StablePlanesUAV[address].PackedNoisyRadianceAndSpecAvg;
         if ( existingRadiancePacked.x != 0 && existingRadiancePacked.y != 0 )
         {
             float4 existingRadiance = Fp16ToFp32(existingRadiancePacked);
-            float existingSpecHitT  = StablePlanesUAV[address].NoisyRadianceSpecHitDist;
-            accumSpecHitT           = AccumulateHitT( existingRadiance.a, existingSpecHitT, accumRadiance.a, accumSpecHitT );
             accumRadiance.rgba      += existingRadiance.rgba;
         }
         StablePlanesUAV[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16(accumRadiance);
-        StablePlanesUAV[address].NoisyRadianceSpecHitDist      = accumSpecHitT;
         
-        path.L = float4(0,0,0,0);
-        path.sceneLengthFromDenoisingLayer  = 0.0;
-        path.specHitT = 0.0;
+        path.SetL( float4(0,0,0,0) );
     }
 #endif // #if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
 
@@ -321,26 +317,7 @@ inline float3 StablePlaneDebugVizColor(const uint planeIndex)
 }
 
 #if !defined(__cplusplus) // shader only!
-inline float StablePlaneAdvanceLayerSceneLength(float currentHitT, float currentSegmentT, uint bouncesFromPlane, bool pathIsDeltaOnlyPath)
-{
-    if (bouncesFromPlane==1)    // first hit from stable (denoising) plane always starts recording hitT
-        return currentSegmentT;
-#if 1 // allow one typical glass-like interface (2 bounces - one for glass entry one for glass exit bounce) to let the hitT computation pass through; this isn't perfect, it should only be done for transmission and mild refraction
-    else if( pathIsDeltaOnlyPath && bouncesFromPlane > 1 && bouncesFromPlane <= 3 )
-        return currentHitT+currentSegmentT;
-#endif
-    else
-        return currentHitT;
-}
-//inline float4 StablePlaneCombineWithHitTCompensation(float4 currentRadianceHitDist, float3 newRadiance, float newHitT)
-//{
-//    float lNew = luminance(newRadiance);
-//    if (lNew < 1e-5)
-//        return currentRadianceHitDist;
-//    float lOld = luminance(currentRadianceHitDist.rgb);
-//    float weightNew = lNew / (lOld + lNew);
-//    return float4( currentRadianceHitDist.rgb + newRadiance.rgb, abs(currentRadianceHitDist.w) * (1-weightNew) + newHitT * weightNew );
-//}
+
 inline uint3 StablePlaneDebugVizFourWaySplitCoord(const int dbgPlaneIndex, const uint2 pixelPos, const uint2 screenSize)
 {
     if( dbgPlaneIndex >= 0 )
@@ -361,7 +338,8 @@ inline uint3 StablePlaneDebugVizFourWaySplitCoord(const int dbgPlaneIndex, const
 void StablePlane::PackCustomPayload(const uint4 packed[5])
 {
     // WARNING: take care when changing these - error could be subtle and very hard to track down later
-    PackedHitInfo                   = packed[0];
+    RayOrigin                       = asfloat(packed[0].xyz);
+    LastRayTCurrent                 = asfloat(packed[0].w);
     RayDir                          = asfloat(packed[1].xyz);
     SceneLength                     = asfloat(packed[1].w);
     PackedThpAndMVs                 = packed[2].xyz;
@@ -369,13 +347,14 @@ void StablePlane::PackCustomPayload(const uint4 packed[5])
     DenoiserPackedBSDFEstimate      = packed[3].xyz;
     PackedNormal                    = packed[3].w;
     PackedNoisyRadianceAndSpecAvg   = packed[4].xy;
-    NoisyRadianceSpecHitDist        = asfloat(packed[4].z);
-    Padding                         = packed[4].w;
+    FlagsAndVertexIndex             = packed[4].z;
+    PackedCounters                  = packed[4].w;
 }
 void StablePlane::UnpackCustomPayload(inout uint4 packed[5])
 {
     // WARNING: take care when changing these - error could be subtle and very hard to track down later
-    packed[0]                       = PackedHitInfo;
+    packed[0].xyz                   = asuint(RayOrigin);
+    packed[0].w                     = asuint(LastRayTCurrent);
     packed[1].xyz                   = asuint(RayDir);
     packed[1].w                     = asuint(SceneLength);
     packed[2].xyz                   = PackedThpAndMVs;
@@ -383,8 +362,8 @@ void StablePlane::UnpackCustomPayload(inout uint4 packed[5])
     packed[3].xyz                   = DenoiserPackedBSDFEstimate;
     packed[3].w                     = PackedNormal;
     packed[4].xy                    = PackedNoisyRadianceAndSpecAvg;
-    packed[4].z                     = asuint(NoisyRadianceSpecHitDist);
-    packed[4].w                     = Padding;
+    packed[4].z                     = FlagsAndVertexIndex;
+    packed[4].w                     = PackedCounters;
 }
 #endif
 

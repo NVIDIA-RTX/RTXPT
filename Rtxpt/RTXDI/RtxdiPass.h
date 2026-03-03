@@ -15,12 +15,13 @@
 #include <memory>
 #include <unordered_map>
 #include <rtxdi/ImportanceSamplingContext.h>
-#include "../ComputePass.h"
+#include "../SampleCommon/ComputePass.h"
 #include "RayTracingPass.h"
 #include "RtxdiResources.h"
 #include "RtxdiApplicationSettings.h"
 
-#include "../Shaders/PathTracer/Lighting/LightingTypes.h"
+#include "../Shaders/PathTracer/Lighting/LightingTypes.hlsli"
+#include "../Shaders/PathTracer/Lighting/EnvMap.hlsli"
 
 class RenderTargets;
 class PrepareLightsPass;

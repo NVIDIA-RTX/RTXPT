@@ -95,6 +95,28 @@ enum class StfMagnificationMethod
 };
 #endif // RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
 
+struct PerformancePreset
+{
+    const char* Name;
+    int         NEECandidateSamples;
+    int         NEEFullSamples;
+    int         NEEMISType;
+    int         RealtimeSamplesPerPixel;
+    int         BounceCount;
+    int         DiffuseBounceCount;
+    float       TexLODBias;
+    int         NestedDielectricsQuality;
+    int         EnvironmentMapDiffuseSampleMIPLevel;
+    int         StablePlanesActiveCount;
+    bool        AllowPrimarySurfaceReplacement;
+    bool        EnableBloom;
+    bool        EnableLDSamplerForBSDF;
+    float       FireflyThreshold;
+#if DONUT_WITH_STREAMLINE
+    SI::DLSSMode DLSSMode;
+#endif
+};
+
 struct SampleUIData
 {
     bool                                ActualUseRTXDIPasses() const { return (RealtimeMode) && (UseReSTIRDI || UseReSTIRGI); }
@@ -102,67 +124,63 @@ struct SampleUIData
     bool                                ActualUseReSTIRGI() const { return (RealtimeMode) && (UseReSTIRGI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
     uint                                ActualSamplesPerPixel() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSamplesPerPixel : 1u; }
     bool                                ActualUseStandaloneDenoiser() const { return (RealtimeMode && RealtimeAA < 3) ? StandaloneDenoiser : false; }
+    float                               ActualNEEAT_LocalToGlobalSampleRatio() const { return (NEEType == 2) ? (NEEAT_LocalToGlobalSampleRatio) : (0); }    // make sure we use no local samples when NEE-AT disabled!
+    bool                                ActualFireflyFilterEnabled() const { return (RealtimeMode)?RealtimeFireflyFilterEnabled:ReferenceFireflyFilterEnabled; }
 
 #if DONUT_WITH_STREAMLINE
-    int                                 ActualReflexMode() const { return (RealtimeMode && IsReflexSupported) ? (ReflexMode) : (SI::ReflexMode::eOff); }
-    SI::DLSSGMode                       ActualDLSSGMode() const { return (RealtimeMode && IsDLSSGSupported) ? (DLSSGMode) : (SI::DLSSGMode::eOff); }
+    int                                 ActualReflexMode() const { return (RealtimeMode && IsReflexSupported) ? (ReflexMode || (ActualDLSSFGMode()!=SI::DLSSGMode::eOff)) : (SI::ReflexMode::eOff); }
+    SI::DLSSGMode                       ActualDLSSFGMode() const { return (RealtimeMode && IsDLSSFGSupported) ? (DLSSFGMode) : (SI::DLSSGMode::eOff); }
 #endif
 
-    bool                                ShowUI = true;
-    int                                 FPSLimiter = 0; // 0 - no limit, otherwise limit fps to FPSLimiter and fix scene update deltaTime to 1./FPSLimiter
-    bool                                RenderWhenOutOfFocus = false; // if window is out of focus window render loop is paused
-    bool                                ShowConsole = false;
-    bool                                EnableAnimations = false;
-    bool                                EnableVsync = false;
+    bool                                ActualUseApproximateMIS() const { return (RealtimeMode)?(NEEMISType!=0):(NEEMISType==2); }
+
+    bool                                ActualEnableVsync() const       { return (ActualDLSSFGMode() != SI::DLSSGMode::eOff) ? (false) : (EnableVsync); }
+    int                                 ActualFPSLimiter() const        { return (ActualDLSSFGMode() != SI::DLSSGMode::eOff) ? (0) : (FPSLimiter); }
+
+    bool                                ShowUI                                  = true;
+    int                                 FPSLimiter                              = 0; // 0 - no limit, otherwise limit fps to FPSLimiter and fix scene update deltaTime to 1./FPSLimiter
+    bool                                RenderWhenOutOfFocus                    = false; // if window is out of focus window render loop is paused
+    bool                                ShowConsole                             = false;
+    bool                                EnableAnimations                        = false;
+    bool                                EnableVsync                             = false;
     std::shared_ptr<donut::engine::Material> SelectedMaterial;
-    bool                                ShaderReloadRequested = false;
-    bool                                AccelerationStructRebuildRequested = false;
-    float                               ShaderAndACRefreshDelayedRequest = 0.0f;
-    std::filesystem::path               ScreenshotFileName;
-    std::string                         ScreenshotSequencePath = "D:/AnimSequence/";
-    bool                                ScreenshotSequenceCaptureActive = false;
-    int                                 ScreenshotSequenceCaptureIndex = -64; // -x means x warmup frames for recording to stabilize denoiser
-    bool                                ExperimentalPhotoModeScreenshot = false;
+    bool                                ShaderReloadRequested                   = false;
+    bool                                AccelerationStructRebuildRequested      = false;
+    float                               ShaderAndACRefreshDelayedRequest        = 0.0f;
+    bool                                ExperimentalPhotoModeScreenshot         = false;
 
-    bool                                ScreenshotResetAndDelay = false;
-    int                                 ScreenshotResetAndDelayFrames = 0;
-    int                                 ScreenshotResetAndDelayCounter = -1;
-    bool                                ScreenshotMiniSequence = false;
-    int                                 ScreenshotMiniSequenceFrames = 5;
-    int                                 ScreenshotMiniSequenceCounter = -1;
-
-    bool                                UseNEE                                  = true;
-    int                                 NEEType                                 = 2;        // '0' is uniform, '1' is power, '2' is NEE-AT; once this solidifies make it a proper enum
-    int                                 NEECandidateSamples                     = 4;        // each full sample is picked from a number of candidate samples; these are not visibility tested so taking too many can hurt quality in heavily shadowed scenarios
-    int                                 NEEFullSamples                          = 2;        // each full sample requires a shadow ray!
-    bool                                NEEAT_AntiLagPass                       = false;
-    bool                                NEEAT_GlobalTemporalFeedbackEnabled     = true;
-    float                               NEEAT_GlobalTemporalFeedbackRatio       = 0.75f;
-    bool                                NEEAT_LocalTemporalFeedbackEnabled     = true;
-    float                               NEEAT_LocalTemporalFeedbackRatio       = 0.65f;
-    float                               NEEAT_MIS_Boost                         = 1.0f;
+    bool                                UseNEE          /*Defaults in CommandLine >*/;
+    int                                 NEEType         /*Defaults in CommandLine >*/;      // '0' is uniform, '1' is power, '2' is NEE-AT; once this solidifies make it a proper enum
+    int                                 NEECandidateSamples                     = 5;        // each full sample is picked from a number of candidate samples; these are not visibility tested so taking too many can hurt quality in heavily shadowed scenarios
+    int                                 NEEFullSamples                          = 1;        // each full sample requires a shadow ray!
+    int                                 NEEMISType                              = 1;        // '0' full MIS always; '1' full MIS in reference, approx in realtime; '2' approx MIS always
+    //bool                                NEEAT_AntiLagPass                       = false;
+    float                               NEEAT_GlobalTemporalFeedbackWeight      = 0.75f;
+    float                               NEEAT_LocalToGlobalSampleRatio          = 0.65f;
+    //float                               NEEAT_MIS_Boost                         = 1.0f;
     float                               NEEAT_Distant_vs_Local_Importance       = 1.0f;
-    int                                 NEEBoostSamplingOnDominantPlane = 0;    // Boost light sampling only on the dominant denoising surface
-    bool                                UseReSTIRDI = false;
-    bool                                UseReSTIRGI = false;
-    bool                                RealtimeMode = false;
-    int                                 RealtimeSamplesPerPixel = 1;        // equivalent to m_ui.AccumulationTarget in reference mode (except looping x times within frame)
-    bool                                RealtimeNoise = true;               // stops noise from changing at real-time - useful for reproducing rare bugs
-    bool                                StandaloneDenoiser = true;
+    //int                                 NEEBoostSamplingOnDominantPlane = 0;    // Boost light sampling only on the dominant denoising surface
+    bool                                UseReSTIRDI /*Defaults in CommandLine >*/;
+    bool                                UseReSTIRGI /*Defaults in CommandLine >*/;
+    bool                                RealtimeMode = true;
+    int                                 RealtimeSamplesPerPixel /*Defaults in CommandLine >*/;        // equivalent to m_ui.AccumulationTarget in reference mode (except looping x times within frame)
+    bool                                StandaloneDenoiser /*Defaults in CommandLine >*/;
     bool                                ResetAccumulation = false;
     bool                                ResetRealtimeCaches = false;
-    int                                 BounceCount = 24;
-    int                                 ReferenceDiffuseBounceCount = 6;
-    int                                 RealtimeDiffuseBounceCount = 3;
-    int                                 AccumulationTarget = 4096;
+    int                                 BounceCount = 20;
+    int                                 DiffuseBounceCount = 2;             // should be 2 on default quality, 3 on ultra high and 1 on ultra fast
+    int                                 AccumulationTarget /*Defaults in CommandLine >*/;
     bool                                AccumulationPreWarmRealtimeCaches = true;
     bool                                AccumulationAA = true;
-    int                                 RealtimeAA = 3;                     // 0 - no AA, 1 - TAA, 2 - DLSS, 3 - DLSS-RR
+    int                                 RealtimeAA /*Defaults in CommandLine >*/;           // 0 - no AA, 1 - TAA, 2 - DLSS, 3 - DLSS-RR (if available)
     float                               CameraAperture = 0.0f;
     float                               CameraFocalDistance = 10000.0f;
     float                               CameraMoveSpeed = 1.0f;
     float                               CameraAntiRRSleepJitter = 0.0f;
     float                               TexLODBias = -1.0f;                 // as small as possible without reducing performance!
+    int                                 NestedDielectricsQuality    = 1;    // 0 - off; 1 - fast; 2 - quality
+    bool                                UseFp16Types = true;
+    bool                                EnableLDSamplerForBSDF = true;
 #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
     StfFilterMode                       STFFilterMode = StfFilterMode::Linear;
     StfMagnificationMethod              STFMagnificationMethod = StfMagnificationMethod::Default;
@@ -194,16 +212,16 @@ struct SampleUIData
     bool                                ReferenceFireflyFilterEnabled = true;
     float                               ReferenceFireflyFilterThreshold = 5.0f;
     bool                                RealtimeFireflyFilterEnabled = true;
-    float                               RealtimeFireflyFilterThreshold = 0.15f;
-    bool                                RealtimeFireflyFilterRelaxOnNonNoisy = true;
+    float                               RealtimeFireflyFilterThreshold = 0.10f;
 
     float                               DenoiserRadianceClampK = 8.0f;
+    float                               DLSSRRBrightnessClampK = 4096.0f;
 
     bool                                EnableRussianRoulette = true;
 
     int                                 EnvironmentMapDiffuseSampleMIPLevel = 2;
 
-    bool                                NVAPIHitObjectExtension = false;    // initialized in constructor
+    bool                                NVAPIHitObjectExtension = true;
     bool                                NVAPIReorderThreads     = true;
 
     bool                                DXHitObjectExtension    = false;
@@ -231,13 +249,13 @@ struct SampleUIData
     float                               DLSSLodBiasOverride = 0.f;
     bool                                DLSSAlwaysUseExtents = false;
 
-    // DLSSG specific parameters
-    bool                                IsDLSSGSupported = false;
-    SI::DLSSGMode                       DLSSGMode = SI::DLSSGMode::eOff;
-    SI::DLSSGOptions                    DLSSGOptions = {};
-    uint32_t                            DLSSGMultiplier = 1;
-    uint32_t                            DLSSGNumFramesToGenerate = 1;
-    uint32_t                            DLSSGMaxNumFramesToGenerate = 1;
+    // DLSSFG specific parameters
+    bool                                IsDLSSFGSupported = false;
+    SI::DLSSGMode                       DLSSFGMode = SI::DLSSGMode::eOff;
+    SI::DLSSGOptions                    DLSSFGOptions = {};
+    uint32_t                            DLSSFGMultiplier = 1;
+    uint32_t                            DLSSFGNumFramesToGenerate = 1;
+    uint32_t                            DLSSFGMaxNumFramesToGenerate = 1;
 
     // Reflex latency specific parameters
     bool                                IsReflexSupported = false;
@@ -258,7 +276,7 @@ struct SampleUIData
 
     // See UI tooltips for more info (or search code for ImGui::SetTooltip()!)
     int                                 StablePlanesActiveCount             = cStablePlaneCount;
-    int                                 StablePlanesMaxVertexDepth          = std::min(5u, cStablePlaneMaxVertexIndex); // more is not necessarily better with current heuristics
+    int                                 StablePlanesMaxVertexDepth          = std::min(9u, cStablePlaneMaxVertexIndex); // more is not necessarily better with current heuristics
     float                               StablePlanesSplitStopThreshold      = 0.95f;
     bool                                AllowPrimarySurfaceReplacement      = true;
     bool                                StablePlanesSuppressPrimaryIndirectSpecular = true;
@@ -272,10 +290,10 @@ struct SampleUIData
 
     // Denoiser
     bool                                NRDModeChanged = false;
-    NrdConfig::DenoiserMethod           NRDMethod = NrdConfig::DenoiserMethod::RELAX;
-    float                               NRDDisocclusionThreshold = 0.01f;
+    NrdConfig::DenoiserMethod           NRDMethod = NrdConfig::DenoiserMethod::REBLUR;
+    float                               NRDDisocclusionThreshold = 0.03f;
     bool                                NRDUseAlternateDisocclusionThresholdMix = true;
-    float                               NRDDisocclusionThresholdAlternate = 0.1f;
+    float                               NRDDisocclusionThresholdAlternate = 0.2f;
     nrd::RelaxSettings                  RelaxSettings;
     nrd::ReblurSettings                 ReblurSettings;
     //nrd::ReferenceSettings              NRDReferenceSettings;
@@ -287,6 +305,16 @@ struct SampleUIData
     bool                                EnableBloom = true;
     float                               BloomRadius = 8.0f;
     float                               BloomIntensity = 0.004f;
+
+    bool                                DbgFreezeRealtimeNoiseSeed = false;               // stops noise from changing at real-time - useful for reproducing rare bugs
+    bool                                DbgDisableSERTerminationHint = false;
+
+    bool                                DbgDiscardNonNEELighting = false;
+    bool                                DbgDiscardNEELighting = false;
+
+    bool                                DbgDisablePostProcessFilters = false;
+
+    int                                 MaterialVariantIndex = 0;                       // each scene can have multiple material presets
 };
 
 extern SampleUIData g_sampleUIData;
@@ -294,7 +322,7 @@ extern SampleUIData g_sampleUIData;
 class SampleUI : public donut::app::ImGui_Renderer
 {
 public:
-    SampleUI(donut::app::DeviceManager* deviceManager, class Sample & app, SampleUIData& ui, bool NVAPI_SERSupported);
+    SampleUI(donut::app::DeviceManager* deviceManager, class SampleBaseApp & baseApp, class Sample & app, SampleUIData& ui, bool NVAPI_SERSupported, const struct CommandLineOptions& cmdLine);
     virtual ~SampleUI();
 protected:
     virtual void buildUI(void) override;
@@ -306,9 +334,13 @@ private:
     virtual void Animate(float elapsedTimeSeconds) override;
 
     bool BuildUIScriptsAndEtc(void);
-
+    void BuildUIResolutionPicker();
+    void BuildUIPerformancePresets();
+    
+    void DLSSFGSelectorUI();
 
 private:
+    class SampleBaseApp& m_baseApp;
     class Sample& m_app;
 
     int                         m_currentFontScaleIndex = -1;

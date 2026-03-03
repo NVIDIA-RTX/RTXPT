@@ -9,9 +9,12 @@
 */
 
 #include "EnvMapBaker.h"
+#include "CubemapProcessing.hlsl"
 
 #include "EnvMapImportanceSamplingBaker.h"
+#include "../../SampleCommon/ComputePipelineBaker.h"
 
+#include <donut/engine/BindingCache.h>
 #include <donut/engine/ShaderFactory.h>
 #include <donut/engine/FramebufferFactory.h>
 #include <donut/engine/CommonRenderPasses.h>
@@ -27,9 +30,7 @@
 
 #include <fstream>
 
-#include "../../SampleCommon.h"
-
-#include "../../ShaderDebug.h"
+#include "../../Misc/ShaderDebug.h"
 
 
 using namespace donut;
@@ -40,14 +41,10 @@ std::filesystem::path GetLocalPath(std::string subfolder);
 
 static const int    c_BlockCompressionBlockSize = 4; 
 
-EnvMapBaker::EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::CommonRenderPasses> commonPasses )
+EnvMapBaker::EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, bool enableRasterPrecompute )
     : m_device(device)
     , m_textureCache(textureCache)
-    , m_commonPasses(commonPasses)
-    , m_bindingCache(device)
-    , m_shaderFactory(shaderFactory)
 {
-    m_importanceSamplingBaker = std::make_shared<EnvMapImportanceSamplingBaker>(device, textureCache, shaderFactory, commonPasses);
 }
 
 EnvMapBaker::~EnvMapBaker()
@@ -55,16 +52,40 @@ EnvMapBaker::~EnvMapBaker()
     UnloadSourceBackgrounds();
 }
 
-void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug)
+void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<ComputePipelineBaker> computePipelineBaker)
 {
+    m_importanceSamplingBaker = nullptr;
     m_shaderDebug = shaderDebug;
+    m_computePipelineBaker = computePipelineBaker;
+
+    // Release existing compute shader variants from the baker
+    if (m_computePipelineBaker && m_enableRasterPrecompute)
+    {
+        if (m_ggxPrefilterVariant)
+            m_computePipelineBaker->ReleaseVariant(m_ggxPrefilterVariant);
+        if (m_irradianceConvolveVariant)
+            m_computePipelineBaker->ReleaseVariant(m_irradianceConvolveVariant);
+    }
+    m_ggxPrefilterVariant = nullptr;
+    m_irradianceConvolveVariant = nullptr;
+
+    // early de-alloc when re-creating passes
+    m_lowResPrePassLayerCS = m_baseLayerCS = m_MIPReduceCS = nullptr;
+    m_commonBindingLayout = m_reduceBindingLayout = nullptr;
+    m_lowResPrePassLayerPSO = m_baseLayerPSO = m_MIPReducePSO = m_BC6UCompressLowPSO = m_BC6UCompressHighPSO = nullptr;
+    m_pointSampler = m_linearSampler = m_equiRectSampler = nullptr;
+    
+    // Reset new processing shaders
+    m_brdfLUTCS = nullptr;
+    m_brdfLUTPSO = nullptr;
+    m_brdfLUTBindingLayout = m_ggxPrefilterBindingLayout = m_irradianceConvolveBindingLayout = nullptr;
 
     std::vector<donut::engine::ShaderMacro> shaderMacros;
     //shaderMacros.push_back(donut::engine::ShaderMacro({              "BLEND_DEBUG_BUFFER", "1" }));
 
-    m_lowResPrePassLayerCS = m_shaderFactory->CreateShader("app/Lighting/Distant/EnvMapBaker.hlsl", "LowResPrePassLayerCS", &shaderMacros, nvrhi::ShaderType::Compute);
-    m_baseLayerCS = m_shaderFactory->CreateShader("app/Lighting/Distant/EnvMapBaker.hlsl", "BaseLayerCS", &shaderMacros, nvrhi::ShaderType::Compute);
-    m_MIPReduceCS = m_shaderFactory->CreateShader("app/Lighting/Distant/EnvMapBaker.hlsl", "MIPReduceCS", &shaderMacros, nvrhi::ShaderType::Compute);
+    m_lowResPrePassLayerCS = shaderFactory->CreateShader("app/Lighting/Distant/EnvMapBaker.hlsl", "LowResPrePassLayerCS", &shaderMacros, nvrhi::ShaderType::Compute);
+    m_baseLayerCS = shaderFactory->CreateShader("app/Lighting/Distant/EnvMapBaker.hlsl", "BaseLayerCS", &shaderMacros, nvrhi::ShaderType::Compute);
+    m_MIPReduceCS = shaderFactory->CreateShader("app/Lighting/Distant/EnvMapBaker.hlsl", "MIPReduceCS", &shaderMacros, nvrhi::ShaderType::Compute);
 
     {
         nvrhi::BindingLayoutDesc layoutDesc;
@@ -137,14 +158,15 @@ void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug)
     samplerDesc.setAllFilters(true);
     m_equiRectSampler = m_device->createSampler(samplerDesc);
 
+    m_importanceSamplingBaker = std::make_shared<EnvMapImportanceSamplingBaker>(m_device, shaderFactory);
     m_importanceSamplingBaker->CreateRenderPasses();
 
     if (m_BC6UCompressionEnabled)
     {
         std::vector<donut::engine::ShaderMacro> smQ0 = { donut::engine::ShaderMacro({ "QUALITY", "0" }) };
         std::vector<donut::engine::ShaderMacro> smQ1 = { donut::engine::ShaderMacro({ "QUALITY", "1" }) };
-        m_BC6UCompressLowCS = m_shaderFactory->CreateShader("app/Lighting/Distant/BC6UCompress.hlsl", "CSMain", &smQ0, nvrhi::ShaderType::Compute);
-        m_BC6UCompressHighCS = m_shaderFactory->CreateShader("app/Lighting/Distant/BC6UCompress.hlsl", "CSMain", &smQ1, nvrhi::ShaderType::Compute);
+        m_BC6UCompressLowCS = shaderFactory->CreateShader("app/Lighting/Distant/BC6UCompress.hlsl", "CSMain", &smQ0, nvrhi::ShaderType::Compute);
+        m_BC6UCompressHighCS = shaderFactory->CreateShader("app/Lighting/Distant/BC6UCompress.hlsl", "CSMain", &smQ1, nvrhi::ShaderType::Compute);
 
         nvrhi::BindingLayoutDesc layoutDesc;
         layoutDesc.visibility = nvrhi::ShaderType::Compute;
@@ -163,8 +185,91 @@ void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug)
         m_BC6UCompressHighPSO = m_device->createComputePipeline(pipelineDesc);
     }
 
+    // === BRDF LUT Generation ===
+    if (m_enableRasterPrecompute)
+    {
+        m_brdfLUTCS = shaderFactory->CreateShader("app/Lighting/Distant/BRDFLUTGenerator.hlsl", "main", nullptr, nvrhi::ShaderType::Compute);
+        
+        nvrhi::BindingLayoutDesc layoutDesc;
+        layoutDesc.visibility = nvrhi::ShaderType::Compute;
+        layoutDesc.bindings = {
+            nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
+            nvrhi::BindingLayoutItem::Texture_UAV(0)
+        };
+        m_brdfLUTBindingLayout = m_device->createBindingLayout(layoutDesc);
+        
+        nvrhi::ComputePipelineDesc pipelineDesc;
+        pipelineDesc.bindingLayouts = { m_brdfLUTBindingLayout };
+        pipelineDesc.CS = m_brdfLUTCS;
+        m_brdfLUTPSO = m_device->createComputePipeline(pipelineDesc);
+        
+        m_brdfLUTConstantBuffer = m_device->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(
+            sizeof(BRDFLUTConstants), "BRDFLUTConstants", engine::c_MaxRenderPassConstantBufferVersions));
+        
+        // Create BRDF LUT texture
+        nvrhi::TextureDesc lutDesc;
+        lutDesc.width = c_BRDFLUTSize;
+        lutDesc.height = c_BRDFLUTSize;
+        lutDesc.format = nvrhi::Format::RG16_FLOAT;
+        lutDesc.dimension = nvrhi::TextureDimension::Texture2D;
+        lutDesc.debugName = "BRDF_LUT";
+        lutDesc.isUAV = true;
+        lutDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        lutDesc.keepInitialState = true;
+        m_brdfLUT = m_device->createTexture(lutDesc);
+    }
+    
+    // === GGX Pre-filtering ===
+    if (m_enableRasterPrecompute)
+    {
+        nvrhi::BindingLayoutDesc layoutDesc;
+        layoutDesc.visibility = nvrhi::ShaderType::Compute;
+        layoutDesc.bindings = {
+            nvrhi::BindingLayoutItem::PushConstants(0, sizeof(GGXPrefilterConstants)),
+            nvrhi::BindingLayoutItem::Texture_SRV(0),
+            nvrhi::BindingLayoutItem::Texture_UAV(0),
+            nvrhi::BindingLayoutItem::Sampler(0)
+        };
+        m_ggxPrefilterBindingLayout = m_device->createBindingLayout(layoutDesc);
+                
+        if (m_computePipelineBaker)
+        {
+            m_ggxPrefilterVariant = m_computePipelineBaker->CreateVariant(
+                "../Lighting/Distant/CubemapProcessing.hlsl",  // source path relative to ShadersPath (Rtxpt/Shaders)
+                "GGXPrefilterCS",                               // entry point
+                {},                                             // macros (empty)
+                { m_ggxPrefilterBindingLayout },                // binding layouts
+                "GGXPrefilter");                                // debug name
+        }
+    }
+    
+    // === Diffuse Irradiance Convolution ===
+    if (m_enableRasterPrecompute)
+    {
+        nvrhi::BindingLayoutDesc layoutDesc;
+        layoutDesc.visibility = nvrhi::ShaderType::Compute;
+        layoutDesc.bindings = {
+            nvrhi::BindingLayoutItem::PushConstants(0, sizeof(IrradianceConvolveConstants)),
+            nvrhi::BindingLayoutItem::Texture_SRV(0),
+            nvrhi::BindingLayoutItem::Texture_UAV(0),
+            nvrhi::BindingLayoutItem::Sampler(0)
+        };
+        m_irradianceConvolveBindingLayout = m_device->createBindingLayout(layoutDesc);
+                
+        if (m_computePipelineBaker)
+        {
+            m_irradianceConvolveVariant = m_computePipelineBaker->CreateVariant(
+                "../Lighting/Distant/CubemapProcessing.hlsl",  // source path relative to ShadersPath (Rtxpt/Shaders)
+                "ConvolveIrradianceCS",                         // entry point
+                {},                                             // macros (empty)
+                { m_irradianceConvolveBindingLayout },          // binding layouts
+                "IrradianceConvolve");                          // debug name
+        }
+    }
+
     // if we've recompiled shaders, force re-bake to avoid having stale data!
     m_renderPassesDirty = true;
+    m_brdfLUTGenerated = false; // Force BRDF LUT regeneration
 }
 
 void EnvMapBaker::UnloadSourceBackgrounds()
@@ -175,6 +280,7 @@ void EnvMapBaker::UnloadSourceBackgrounds()
     if (m_loadedSourceBackgroundTextureCubemap != nullptr)
         m_textureCache->UnloadTexture(m_loadedSourceBackgroundTextureCubemap);
     m_loadedSourceBackgroundTextureCubemap = nullptr;
+    m_loadedSourceBackgroundPath = "";
 }
 
 void EnvMapBaker::InitBuffers(uint cubeDim)
@@ -255,7 +361,7 @@ int EnvMapBaker::GetTargetCubeResolution() const
     return m_targetResolution; 
 }
 
-void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMapBackgroundPath)
+void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::string envMapBackgroundPath)
 {
     if( m_device->getGraphicsAPI() == nvrhi::GraphicsAPI::VULKAN && m_BC6UCompressionEnabled )
     {
@@ -285,13 +391,13 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMap
     // Load static (background) environment map or procedural sky if enabled
     if (m_sourceBackgroundPath != m_loadedSourceBackgroundPath)
     {
-        m_loadedSourceBackgroundPath = m_sourceBackgroundPath;
         UnloadSourceBackgrounds();
+        m_loadedSourceBackgroundPath = m_sourceBackgroundPath;
 
         if (!proceduralSkyEnabled)
         {
             std::filesystem::path fullPath = GetLocalPath(c_AssetsFolder) / m_loadedSourceBackgroundPath;
-            m_textureCache->LoadTextureFromFile(fullPath, false, m_commonPasses.get(), commandList);
+            m_textureCache->LoadTextureFromFile(fullPath, false, commonPasses.get(), commandList);
             commandList->close();
             m_device->executeCommandList(commandList);
             m_device->waitForIdle();
@@ -308,17 +414,15 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::string envMap
             else
                 m_loadedSourceBackgroundPath = "";
         }
-        else
-        {
-            if (m_proceduralSky == nullptr)
-                m_proceduralSky = std::make_shared<SampleProceduralSky>(m_device, m_textureCache, m_commonPasses, commandList);
-        }
 
         m_renderPassesDirty = true;
     }
+
+    if (proceduralSkyEnabled && m_proceduralSky == nullptr)
+        m_proceduralSky = std::make_shared<SampleProceduralSky>(m_device, m_textureCache, commonPasses, commandList);
 }
 
-bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & _settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate)
+bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::BindingCache & bindingCache, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const BakeSettings & _settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate)
 {
     BakeSettings settings = _settings;
 
@@ -390,14 +494,14 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
             //nvrhi::BindingSetItem::PushConstants(1, sizeof(SampleMiniConstants)),
             nvrhi::BindingSetItem::Texture_UAV(0, m_cubemapLowRes, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(0, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
             nvrhi::BindingSetItem::Texture_UAV(1, m_cubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(1, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
-            nvrhi::BindingSetItem::Texture_SRV(0, (m_loadedSourceBackgroundTextureEquirect != nullptr) ? (m_loadedSourceBackgroundTextureEquirect->texture) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture.Get())),
-            nvrhi::BindingSetItem::Texture_SRV(1, (m_loadedSourceBackgroundTextureCubemap != nullptr) ? (m_loadedSourceBackgroundTextureCubemap->texture) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackCubeMapArray.Get())),
-            nvrhi::BindingSetItem::Texture_SRV(2, (nvrhi::TextureHandle)m_commonPasses->m_BlackCubeMapArray.Get()),
-            nvrhi::BindingSetItem::Texture_SRV(10, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetTransmittanceTexture()) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture.Get())),
-            nvrhi::BindingSetItem::Texture_SRV(11, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetScatterringTexture()) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture3D.Get())),
-            nvrhi::BindingSetItem::Texture_SRV(12, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetIrradianceTexture()) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture.Get())),
-            nvrhi::BindingSetItem::Texture_SRV(13, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetCloudsTexture()) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture.Get())),
-            nvrhi::BindingSetItem::Texture_SRV(14, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetNoiseTexture()) : ((nvrhi::TextureHandle)m_commonPasses->m_BlackTexture.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(0, (m_loadedSourceBackgroundTextureEquirect != nullptr) ? (m_loadedSourceBackgroundTextureEquirect->texture) : ((nvrhi::TextureHandle)commonPasses->m_BlackTexture.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(1, (m_loadedSourceBackgroundTextureCubemap != nullptr) ? (m_loadedSourceBackgroundTextureCubemap->texture) : ((nvrhi::TextureHandle)commonPasses->m_BlackCubeMapArray.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(2, (nvrhi::TextureHandle)commonPasses->m_BlackCubeMapArray.Get()),
+            nvrhi::BindingSetItem::Texture_SRV(10, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetTransmittanceTexture()) : ((nvrhi::TextureHandle)commonPasses->m_BlackTexture.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(11, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetScatterringTexture()) : ((nvrhi::TextureHandle)commonPasses->m_BlackTexture3D.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(12, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetIrradianceTexture()) : ((nvrhi::TextureHandle)commonPasses->m_BlackTexture.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(13, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetCloudsTexture()) : ((nvrhi::TextureHandle)commonPasses->m_BlackTexture.Get())),
+            nvrhi::BindingSetItem::Texture_SRV(14, (m_proceduralSky != nullptr && proceduralSkyEnabled) ? (m_proceduralSky->GetNoiseTexture()) : ((nvrhi::TextureHandle)commonPasses->m_BlackTexture.Get())),
             //nvrhi::BindingSetItem::Texture_UAV(0, m_Cubemap),
             nvrhi::BindingSetItem::Sampler(0, m_pointSampler),
             nvrhi::BindingSetItem::Sampler(1, m_linearSampler),
@@ -405,10 +509,10 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
             nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
             nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),
     };
-    nvrhi::BindingSetHandle bindingSetLowResPrePass = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
+    nvrhi::BindingSetHandle bindingSetLowResPrePass = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
     bindingSetDesc.bindings[5] = nvrhi::BindingSetItem::Texture_SRV(2, m_cubemapLowRes );
     bindingSetDesc.bindings[1] = nvrhi::BindingSetItem::Texture_UAV(0, m_cubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(0, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray);
-    nvrhi::BindingSetHandle bindingSetBake = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
+    nvrhi::BindingSetHandle bindingSetBake = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_commonBindingLayout);
 
     {
         // Low res pre-pass (only needed for proc sky)
@@ -467,7 +571,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
                     nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
                     nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),
             };
-            nvrhi::BindingSetHandle localBindingSet = m_bindingCache.GetOrCreateBindingSet(localBindingSetDesc, m_reduceBindingLayout);
+            nvrhi::BindingSetHandle localBindingSet = bindingCache.GetOrCreateBindingSet(localBindingSetDesc, m_reduceBindingLayout);
         
             nvrhi::ComputeState state;
             state.bindings = { localBindingSet };
@@ -499,7 +603,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, const BakeSettings & 
                     nvrhi::BindingSetItem::Texture_SRV(0, m_cubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(i, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
                     nvrhi::BindingSetItem::Sampler(0, m_pointSampler),
             };
-            nvrhi::BindingSetHandle localBindingSet = m_bindingCache.GetOrCreateBindingSet(localBindingSetDesc, m_BC6UCompressBindingLayout);
+            nvrhi::BindingSetHandle localBindingSet = bindingCache.GetOrCreateBindingSet(localBindingSetDesc, m_BC6UCompressBindingLayout);
 
             nvrhi::ComputeState state;
             state.bindings = { localBindingSet };
@@ -630,4 +734,204 @@ bool EnvMapBaker::DebugGUI(float indent)
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save baked cubemap. It will be rebaked with EnvMapRadianceScale set to 1.0 before saving.");
 
     return resetAccumulation;
+}
+
+bool EnvMapBaker::GenerateBRDFLUT(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache)
+{
+    if (!m_enableRasterPrecompute || m_brdfLUTGenerated)
+        return false;
+    
+    RAII_SCOPE(commandList->beginMarker("GenerateBRDFLUT");, commandList->endMarker(););
+    
+    BRDFLUTConstants consts;
+    consts.LUTSize = c_BRDFLUTSize;
+    consts.SampleCount = BRDF_LUT_SAMPLE_COUNT;
+    consts.Padding0 = 0;
+    consts.Padding1 = 0;
+    commandList->writeBuffer(m_brdfLUTConstantBuffer, &consts, sizeof(consts));
+    
+    nvrhi::BindingSetDesc bindingSetDesc;
+    bindingSetDesc.bindings = {
+        nvrhi::BindingSetItem::ConstantBuffer(0, m_brdfLUTConstantBuffer),
+        nvrhi::BindingSetItem::Texture_UAV(0, m_brdfLUT)
+    };
+    nvrhi::BindingSetHandle bindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_brdfLUTBindingLayout);
+    
+    nvrhi::ComputeState state;
+    state.bindings = { bindingSet };
+    state.pipeline = m_brdfLUTPSO;
+    commandList->setComputeState(state);
+    
+    const uint threads = 8;
+    const dm::uint2 dispatchSize = dm::uint2(div_ceil(c_BRDFLUTSize, threads), div_ceil(c_BRDFLUTSize, threads));
+    commandList->dispatch(dispatchSize.x, dispatchSize.y, 1);
+        
+    m_brdfLUTGenerated = true;
+    return true;
+}
+
+void EnvMapBaker::GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
+    nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap)
+{
+    if (!m_enableRasterPrecompute)
+        return;
+
+    RAII_SCOPE(commandList->beginMarker("GGXPrefilter");, commandList->endMarker(););
+    
+    // Get pipeline from hot-reloadable variant
+    auto pipeline = m_ggxPrefilterVariant ? m_ggxPrefilterVariant->GetPipeline() : nullptr;
+    if (!pipeline)
+        return; // Pipeline not yet compiled or compilation failed
+    
+    uint srcSize = srcCubemap->getDesc().width;
+    uint mipLevels = dstCubemap->getDesc().mipLevels;
+    
+    GGXPrefilterConstants consts;
+    consts.SrcCubemapSize = srcSize;
+    consts.MaxMipLevels = mipLevels;
+    consts.SampleCount = 64;
+
+    for (uint mip = 0; mip < mipLevels; mip++)
+    {
+        uint dstMipSize = srcSize >> mip;
+        float roughness = static_cast<float>(mip) / static_cast<float>(mipLevels - 1);
+        roughness = max(0.001f, roughness);
+        
+        consts.DstMipSize = dstMipSize;
+        consts.MipLevel = mip;
+        consts.Roughness = roughness;
+        consts.Padding1 = 0;
+        consts.Padding2 = 0;
+        
+        nvrhi::BindingSetDesc bindingSetDesc;
+        bindingSetDesc.bindings = {
+            nvrhi::BindingSetItem::PushConstants(0, sizeof(GGXPrefilterConstants)),
+            nvrhi::BindingSetItem::Texture_SRV(0, srcCubemap),
+            nvrhi::BindingSetItem::Texture_UAV(0, dstCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(mip, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
+            nvrhi::BindingSetItem::Sampler(0, m_linearSampler)
+        };
+        nvrhi::BindingSetHandle bindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_ggxPrefilterBindingLayout);
+        
+        nvrhi::ComputeState state;
+        state.bindings = { bindingSet };
+        state.pipeline = pipeline;
+        commandList->setComputeState(state);
+        commandList->setPushConstants(&consts, sizeof(consts));
+        
+        const uint threads = CUBEMAP_PROCESS_THREADS;
+        const dm::uint2 dispatchSize = dm::uint2(div_ceil(dstMipSize,threads),div_ceil(dstMipSize, threads));
+        commandList->dispatch(dispatchSize.x, dispatchSize.y, 6);
+        
+        // UAV barrier between mips
+        commandList->setTextureState(dstCubemap, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+    }
+}
+
+void EnvMapBaker::ConvolveDiffuseIrradiance(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache,
+    nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap)
+{
+    if (!m_enableRasterPrecompute)
+        return;
+
+    RAII_SCOPE(commandList->beginMarker("ConvolveIrradiance");, commandList->endMarker(););
+    
+    // Get pipeline from hot-reloadable variant
+    auto pipeline = m_irradianceConvolveVariant ? m_irradianceConvolveVariant->GetPipeline() : nullptr;
+    if (!pipeline)
+        return; // Pipeline not yet compiled or compilation failed
+    
+    IrradianceConvolveConstants consts;
+    consts.SrcCubemapSize = srcCubemap->getDesc().width;
+    consts.DstCubemapSize = c_IrradianceCubeSize;
+    consts.SampleCount = 1024;
+    consts.Padding = 0;
+    
+    nvrhi::BindingSetDesc bindingSetDesc;
+    bindingSetDesc.bindings = {
+        nvrhi::BindingSetItem::PushConstants(0, sizeof(IrradianceConvolveConstants)),
+        nvrhi::BindingSetItem::Texture_SRV(0, srcCubemap),
+        nvrhi::BindingSetItem::Texture_UAV(0, dstCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(0, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
+        nvrhi::BindingSetItem::Sampler(0, m_linearSampler)
+    };
+    nvrhi::BindingSetHandle bindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_irradianceConvolveBindingLayout);
+    
+    nvrhi::ComputeState state;
+    state.bindings = { bindingSet };
+    state.pipeline = pipeline;
+    commandList->setComputeState(state);
+    commandList->setPushConstants(&consts, sizeof(IrradianceConvolveConstants));
+    
+    // Dispatch once per face - 1024 threads per group, one group per face (32x32 resolution)
+    commandList->dispatch(1, 1, 6);
+}
+
+void EnvMapBaker::GenerateCubemapMips(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
+    nvrhi::TextureHandle cubemap)
+{
+    // Reuse the existing MIPReduceCS for solid-angle weighted mip generation
+    RAII_SCOPE(commandList->beginMarker("GenerateCubemapMips");, commandList->endMarker(););
+    
+    // Write dummy constants (MIPReduceCS doesn't actually read them, but binding layout requires it)
+    EnvMapBakerConstants dummyConsts = {};
+    commandList->writeBuffer(m_constantBuffer, &dummyConsts, sizeof(dummyConsts));
+    
+    uint mipLevels = cubemap->getDesc().mipLevels;
+    uint baseSize = cubemap->getDesc().width;
+    
+    for (uint i = 1; i < mipLevels; i++)
+    {
+        nvrhi::BindingSetDesc localBindingSetDesc;
+        localBindingSetDesc.bindings = {
+            nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
+            nvrhi::BindingSetItem::Texture_UAV(0, cubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(i, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
+            nvrhi::BindingSetItem::Texture_UAV(1, cubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(i - 1, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
+            nvrhi::BindingSetItem::Sampler(0, m_pointSampler),
+            nvrhi::BindingSetItem::Sampler(1, m_linearSampler),
+            nvrhi::BindingSetItem::Sampler(2, m_equiRectSampler),
+            nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
+            nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),
+        };
+        nvrhi::BindingSetHandle localBindingSet = bindingCache.GetOrCreateBindingSet(localBindingSetDesc, m_reduceBindingLayout);
+        
+        nvrhi::ComputeState state;
+        state.bindings = { localBindingSet };
+        state.pipeline = m_MIPReducePSO;
+        commandList->setComputeState(state);
+        
+        uint destinationRes = baseSize >> i;
+        
+        const dm::uint threads = EMB_NUM_COMPUTE_THREADS_PER_DIM;
+        const dm::uint2 dispatchSize = dm::uint2((destinationRes + threads - 1) / threads, (destinationRes + threads - 1) / threads);
+        commandList->dispatch(dispatchSize.x, dispatchSize.y, 6);
+    }
+}
+
+void EnvMapBaker::ProcessCubemap(
+    nvrhi::ICommandList* commandList,
+    donut::engine::BindingCache& bindingCache,
+    nvrhi::TextureHandle sourceCubemap,
+    const CubemapProcessingOptions& options,
+    const CubemapProcessingResults& results)
+{
+    RAII_SCOPE(commandList->beginMarker("ProcessCubemap");, commandList->endMarker(););
+    
+    // Generate mips for source if needed
+    if (options.generateMips)
+    {
+        GenerateCubemapMips(commandList, bindingCache, sourceCubemap);
+    }
+    
+    // GGX pre-filtering for specular
+    if (options.ggxPrefilter)
+    {
+        assert(results.filteredCubemap);
+        GGXPrefilterCubemap(commandList, bindingCache, sourceCubemap, results.filteredCubemap);
+    }
+    
+    // SH-based diffuse irradiance
+    if (options.projectToSH)
+    {
+        assert(results.diffuseIrradianceCube);
+        ConvolveDiffuseIrradiance(commandList, bindingCache, sourceCubemap, results.diffuseIrradianceCube);
+    }
 }

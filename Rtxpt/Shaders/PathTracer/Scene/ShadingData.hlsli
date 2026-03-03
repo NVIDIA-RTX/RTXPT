@@ -44,16 +44,20 @@ struct ShadingData
     float3      N;                      ///< Shading normal at shading hit. Can MAYBE be optimized to fp16.
     float3      T;                      ///< Shading tangent at shading hit. Can MAYBE be optimized to fp16.
     float3      B;                      ///< Shading bitangent at shading hit. Can MAYBE be optimized to fp16.
-    lpfloat2    uv;                     ///< Texture mapping coordinates. CAN be optimized to fp16 without any issues.
-    float3      vertexN;                ///< A.k.a. "geometry normal" - interpolated vertex normal, corrected for front-facing flag but not corrected for the ray view direction (can point away since interpolated). Could LIKELY be optimized to fp16.
-    bool        frontFacing;            ///< True if primitive seen from the front-facing side, as determined by dot product between view direction and triangle face normal (faceN - not corrected). Should be packed into flags.
+    //lpfloat2    uv;                     ///< Texture mapping coordinates. CAN be optimized to fp16 without any issues.
+    float3      vertexN;                ///< !!!!RENAME!!!! A.k.a. "geometry normal" - interpolated vertex normal, corrected for front-facing flag but not corrected for the ray view direction (can point away since interpolated). Could LIKELY be optimized to fp16.
+    bool        frontFacing;            //<move to ShadingFlags           ///< True if primitive seen from the front-facing side, as determined by dot product between view direction and triangle face normal (faceN - not corrected). Should be packed into flags.
 
     // Material data
-    MaterialHeader mtl;                 ///< Material header data.
+    MaterialHeader mtl;                 ///< Material header data.      TODO: rename this to ShadingFlags
     uint        materialID;             ///< Material ID at shading location - equivalent to MaterialPTData buffer index. Can be optimized to uint16 depending on RTXPT_MATERIAL_MAX_COUNT
-    lpfloat     opacity;                ///< Opacity value in [0,1]. This is used for alpha testing. Can be optimized to fp16 without any issues.
-    lpfloat     IoR;                    ///< Index of refraction for the medium on the front-facing side (i.e. "outside" the material at the hit). Can be optimized to fp16 without any issues.
-    lpfloat     shadowNoLFadeout;       ///< See corresponding material setting. Can be optimized to fp16 without any issues.
+    // lpfloat     opacity;                ///< Opacity value in [0,1]. This is used for alpha testing. Can be optimized to fp16 without any issues.
+    lpfloat     IoR;                    ///<move to fp16 and combine with interiorIoR           < Index of refraction for the medium on the front-facing side (i.e. "outside" the material at the hit). Can be optimized to fp16 without any issues.
+    lpfloat     shadowNoLFadeout;       ///<move to ShadingFlags if possible           < See corresponding material setting. Can be optimized to fp16 without any issues.
+
+#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
+    lpfloat3    emission;               /// move to SurfaceData and compress
+#endif
 
     static ShadingData make()
     {
@@ -63,7 +67,7 @@ struct ShadingData
         shadingData.N = 0;
         shadingData.T = 0;
         shadingData.B = 0;
-        shadingData.uv = 0;
+        //shadingData.uv = 0;
         shadingData.faceNCorrected = 0;
         shadingData.vertexN = 0;
         //shadingData.frontFacing = 0;
@@ -71,9 +75,12 @@ struct ShadingData
 
         shadingData.mtl = MaterialHeader::make();
         shadingData.materialID = 0;
-        shadingData.opacity = 0;
+        // shadingData.opacity = 0;
         shadingData.IoR = 0;
         shadingData.shadowNoLFadeout = 0;
+#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
+        shadingData.emission = 0;
+#endif
         return shadingData;
     }
 

@@ -28,6 +28,8 @@ RWTexture2D<float4>                     u_PostTonemapOutputColor        : regist
 RWTexture2D<uint>                       u_Throughput                    : register(u4); // used by RTXDI, etc. Packed as R11G11B10_FLOAT
 RWTexture2D<float4>                     u_MotionVectors                 : register(u5); // used by RTXDI, DLSS/TAA, etc.
 RWTexture2D<float>                      u_Depth                         : register(u6); // used by RTXDI, DLSS/TAA, etc.
+RWTexture2D<float>                      u_SpecularHitT                  : register(u7); // used by denoisers
+RWTexture2D<float>                      u_ScratchFloat1                 : register(u8); // used by post-processing
 
 RWTexture2DArray<uint>                  u_StablePlanesHeader            : register(u40);
 RWStructuredBuffer<StablePlane>         u_StablePlanesBuffer            : register(u42);
@@ -35,7 +37,6 @@ RWTexture2D<float4>                     u_StableRadiance                : regist
 RWStructuredBuffer<PackedPathTracerSurfaceData> u_SurfaceData           : register(u45);
 
 // this is for debugging viz
-RWTexture2D<float4>                     u_DebugVizOutput                : register(u50);
 RWStructuredBuffer<DebugFeedbackStruct> u_FeedbackBuffer                : register(u51);
 RWStructuredBuffer<DebugLineStruct>     u_DebugLinesBuffer              : register(u52);
 RWStructuredBuffer<DeltaTreeVizPathVertex> u_DebugDeltaPathTree         : register(u53);
@@ -46,5 +47,23 @@ RWTexture2D<float4>                     u_RRDiffuseAlbedo               : regist
 RWTexture2D<float4>                     u_RRSpecAlbedo                  : register(u71);
 RWTexture2D<float4>                     u_RRNormalsAndRoughness         : register(u72);
 RWTexture2D<float2>                     u_RRSpecMotionVectors           : register(u73);
+RWTexture2D<float4>                     u_RRTransparencyLayer           : register(u74);
+RWTexture2D<float4>                     u_DenoisingAvgLayerRadiance     : register(u75);
+
+// Local cubemap for raster renderer
+TextureCube<float4>                     t_LocalCubemapGGX               : register(t80);  // GGX-filtered local cubemap
+TextureCube<float4>                     t_DiffuseIrradianceCube         : register(t81);  // SH-based diffuse irradiance
+Texture2D<float4>                       t_SSRBlurChain                  : register(t82);  // SSR result with blur mips
+Texture2D<float2>                       t_BRDFLUT                       : register(t83);  // Split-sum BRDF integration LUT
+Texture2D<float>                        t_DepthHierarchy                : register(t84);  // Hi-Z depth pyramid for SSR
+
+// SSR result UAV (depth hierarchy UAVs u80-84 are in a dedicated binding set in IntroSample)
+RWTexture2D<float4>                     u_SSRResult                     : register(u85);  // SSR output (rgb=color, a=confidence)
+
+// GTAO output (full-res, written by GTAORenderer, read by deferred lighting)
+Texture2D<float>                        t_GTAOOutput                    : register(t86);
+
+// Previous frame depth (full-res, for temporal reprojection / disocclusion detection)
+Texture2D<float>                        t_PrevDepth                     : register(t87);
 
 #endif // #ifndef __SHADER_RESOURCE_BINDINGS_HLSLI__

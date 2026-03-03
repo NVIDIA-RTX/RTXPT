@@ -209,6 +209,12 @@ uint Fp32ToFp16(float2 v)
 	return (r.y << 16) | (r.x & 0xFFFF);
 }
 
+uint Fp32ToFp16NoClamp(float2 v)
+{
+	const uint2 r = f32tof16(v);
+	return (r.y << 16) | (r.x & 0xFFFF);
+}
+
 float2 Fp16ToFp32(uint r)
 {
 	uint2 v;
@@ -221,6 +227,13 @@ uint2 Fp32ToFp16(float4 v)
 {
 	const uint d0 = Fp32ToFp16(v.xy);
 	const uint d1 = Fp32ToFp16(v.zw);
+	return uint2(d0, d1);
+}
+
+uint2 Fp32ToFp16NoClamp(float4 v)
+{
+	const uint d0 = Fp32ToFp16NoClamp(v.xy);
+	const uint d1 = Fp32ToFp16NoClamp(v.zw);
 	return uint2(d0, d1);
 }
 

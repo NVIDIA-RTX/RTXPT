@@ -12,7 +12,7 @@
 
 #include <donut/engine/SceneTypes.h>
 #include <donut/engine/TextureCache.h>
-#include "../AccelerationStructureUtil.h"
+#include "../SampleCommon/AccelerationStructureUtil.h"
 
 #include <nvrhi/nvrhi.h>
 #include <omm-gpu-nvrhi.h>

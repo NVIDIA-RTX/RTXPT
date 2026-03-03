@@ -22,63 +22,21 @@
 */
 struct MaterialHeader
 {
-    uint2 packedData; // = {}; <- not supported in .hlsl ! use MaterialHeader::make()
+    uint packedData; // = {}; <- not supported in .hlsl ! use MaterialHeader::make()
 
-    static const uint kMaterialTypeBits = 16;
     static const uint kNestedPriorityBits = 4;
     static const uint kLobeTypeBits = 8; // Only 6 bits needed if packing LobeType
-    //static const uint kSamplerIDBits = 8;
-    static const uint kAlphaModeBits = 1;
-    static const uint kAlphaThresholdBits = 16; // Using float16_t format
     static const uint kPSDDominantDeltaLobeP1Bits = 4;
 
     // packedData.x bit layout
-    static const uint kMaterialTypeOffset = 0;
-    static const uint kNestedPriorityOffset = kMaterialTypeOffset + kMaterialTypeBits;
+    static const uint kNestedPriorityOffset = 0;
     static const uint kLobeTypeOffset = kNestedPriorityOffset + kNestedPriorityBits;
-    static const uint kDoubleSidedFlagOffset = kLobeTypeOffset + kLobeTypeBits;
-    static const uint kThinSurfaceFlagOffset = kDoubleSidedFlagOffset + 1;
-    static const uint kEmissiveFlagOffset = kThinSurfaceFlagOffset + 1;
-    static const uint kIsBasicMaterialFlagOffset = kEmissiveFlagOffset + 1;
+    static const uint kThinSurfaceFlagOffset = kLobeTypeOffset + kLobeTypeBits;
+    static const uint kPSDExcludeFlagOffset = kThinSurfaceFlagOffset + 1;
+    static const uint kPSDBlockMotionVectorsAtSurfaceFlagOffset = kPSDExcludeFlagOffset + 1;
+    static const uint kPSDDominantDeltaLobeP1Offset = kPSDBlockMotionVectorsAtSurfaceFlagOffset + 1;
 
-    static const uint kTotalHeaderBitsX = kIsBasicMaterialFlagOffset + 1;
-
-    // packedData.y bit layout
-    static const uint kAlphaThresholdOffset = 0;
-    static const uint kAlphaModeOffset = kAlphaThresholdOffset + kAlphaThresholdBits;
-    //static const uint kSamplerIDOffset = kAlphaModeOffset + kAlphaModeBits;
-    static const uint kPSDExcludeFlagOffset = kAlphaModeOffset + kAlphaModeBits;
-    static const uint kPSDDominantDeltaLobeP1Offset = kPSDExcludeFlagOffset + 1;
-
-    static const uint kTotalHeaderBitsY = kPSDDominantDeltaLobeP1Offset + kPSDDominantDeltaLobeP1Bits;
-
-
-    // /** Set material type.
-    // */
-    // void setMaterialType(MaterialType type) { packedData.x = PACK_BITS(kMaterialTypeBits, kMaterialTypeOffset, packedData.x, (uint)type); }
-    // 
-    // /** Get material type.
-    // */
-    // MaterialType getMaterialType() { return (MaterialType)(EXTRACT_BITS(kMaterialTypeBits, kMaterialTypeOffset, packedData.x)); }
-
-    // /** Set alpha testing mode.
-    // */
-    // void setAlphaMode(AlphaMode mode) { packedData.y = PACK_BITS(kAlphaModeBits, kAlphaModeOffset, packedData.y, (uint)mode); }
-    // 
-    // /** Get material type.
-    // */
-    // AlphaMode getAlphaMode() { return (AlphaMode)EXTRACT_BITS(kAlphaModeBits, kAlphaModeOffset, packedData.y); }
-
-    /** Set alpha threshold.
-    */
-    // native types require "[-HV 2018] -enable-16bit-types -T *s_6_2"
-    // void setAlphaThreshold(float16_t alphaThreshold) { packedData.y = PACK_BITS_UNSAFE(kAlphaThresholdBits, kAlphaThresholdOffset, packedData.y, (uint)asuint16(alphaThreshold)); }
-    void setAlphaThreshold(float alphaThreshold) { packedData.y = PACK_BITS_UNSAFE(kAlphaThresholdBits, kAlphaThresholdOffset, packedData.y, f32tof16(alphaThreshold)); }
-
-    /** Get alpha threshold.
-    */
-    //float16_t getAlphaThreshold() { return asfloat16((uint16_t)EXTRACT_BITS(kAlphaThresholdBits, kAlphaThresholdOffset, packedData.y)); }
-    float getAlphaThreshold() { return f16tof32(EXTRACT_BITS(kAlphaThresholdBits, kAlphaThresholdOffset, packedData.y)); }
+    static const uint kTotalHeaderBitsX = kPSDDominantDeltaLobeP1Offset + kPSDDominantDeltaLobeP1Bits;
 
     /** Set the nested priority used for nested dielectrics.
     */
@@ -99,78 +57,32 @@ struct MaterialHeader
     */
     uint getActiveLobes() { return EXTRACT_BITS(kLobeTypeBits, kLobeTypeOffset, packedData.x); }
 
-    // /** Set default texture sampler ID.
-    // */
-    // void setDefaultTextureSamplerID(uint samplerID) { packedData.y = PACK_BITS(kSamplerIDBits, kSamplerIDOffset, packedData.y, samplerID); }
-    // 
-    // /** Get default texture sampler ID.
-    // */
-    // uint getDefaultTextureSamplerID() { return EXTRACT_BITS(kSamplerIDBits, kSamplerIDOffset, packedData.y); }
-
-    // /** Set double-sided flag.
-    // */
-    // void setDoubleSided(bool doubleSided) { packedData.x = PACK_BITS(1, kDoubleSidedFlagOffset, packedData.x, doubleSided ? 1 : 0); }
-    // 
-    // /** Get double-sided flag.
-    // */
-    // bool isDoubleSided() { return packedData.x & (1u << kDoubleSidedFlagOffset); }
-
     /** Set thin surface flag.
     */
+#ifdef RTXPT_MATERIAL_THIN_SURFACE
+    void setThinSurface(bool thinSurface) { }
+#else
     void setThinSurface(bool thinSurface) { packedData.x = PACK_BITS(1, kThinSurfaceFlagOffset, packedData.x, thinSurface ? 1 : 0); }
+#endif
 
     /** Get thin surface flag.
     */
+#ifdef RTXPT_MATERIAL_THIN_SURFACE
+    bool isThinSurface() { return RTXPT_MATERIAL_THIN_SURFACE; }
+#else
     bool isThinSurface() { return packedData.x & (1u << kThinSurfaceFlagOffset); }
-
-    // /** Set emissive flag.
-    // */
-    // void setEmissive(bool isEmissive) { packedData.x = PACK_BITS(1, kEmissiveFlagOffset, packedData.x, isEmissive ? 1 : 0); }
-    // 
-    // /** Get emissive flag.
-    // */
-    // bool isEmissive() { return packedData.x & (1u << kEmissiveFlagOffset); }
-
-    // /** Set basic material flag. This flag is an optimization to allow quick type checking.
-    // */
-    // void setIsBasicMaterial(bool isBasicMaterial) { packedData.x = PACK_BITS(1, kIsBasicMaterialFlagOffset, packedData.x, isBasicMaterial ? 1 : 0); }
-    // 
-    // /** Get basic material flag. This flag is an optimization to allow quick type checking.
-    // */
-    // bool isBasicMaterial() { return packedData.x & (1u << kIsBasicMaterialFlagOffset); }
-
-    void setPSDExclude(bool psdExclude) { packedData.y = PACK_BITS(1, kPSDExcludeFlagOffset, packedData.y, psdExclude ? 1 : 0); }
-    bool isPSDExclude()  { return packedData.y & (1u << kPSDExcludeFlagOffset); }
-
-    void setPSDDominantDeltaLobeP1(uint psdDominantDeltaLobeP1) { packedData.y = PACK_BITS(kPSDDominantDeltaLobeP1Bits, kPSDDominantDeltaLobeP1Offset, packedData.y, (uint)psdDominantDeltaLobeP1); }
-    uint getPSDDominantDeltaLobeP1()             { return EXTRACT_BITS(kPSDDominantDeltaLobeP1Bits, kPSDDominantDeltaLobeP1Offset, packedData.y); }
-
-#ifdef HOST_CODE
-    friend bool operator==(const MaterialHeader& lhs, const MaterialHeader& rhs);
-    friend bool operator!=(const MaterialHeader& lhs, const MaterialHeader& rhs) { return !(lhs == rhs); }
 #endif
 
-    static MaterialHeader make( ) { MaterialHeader header; header.packedData = uint2(0,0); return header; }
-};
+    void setPSDExclude(bool psdExclude) { packedData.x = PACK_BITS(1, kPSDExcludeFlagOffset, packedData.x, psdExclude ? 1 : 0); }
+    bool isPSDExclude()  { return packedData.x & (1u << kPSDExcludeFlagOffset); }
+    
+    void setPSDBlockMotionVectorsAtSurface(bool PSDBlockMotionVectorsAtSurface) { packedData.x = PACK_BITS(1, kPSDBlockMotionVectorsAtSurfaceFlagOffset, packedData.x, PSDBlockMotionVectorsAtSurface ? 1 : 0); }
+    bool isPSDBlockMotionVectorsAtSurface()  { return packedData.x & (1u << kPSDBlockMotionVectorsAtSurfaceFlagOffset); }
 
-/** This is a host/device structure for material payload data (120B).
-    The format of the data depends on the material type. 
-*/
-struct MaterialPayload
-{
-    uint data[30];
-};
+    void setPSDDominantDeltaLobeP1(uint psdDominantDeltaLobeP1) { packedData.x = PACK_BITS(kPSDDominantDeltaLobeP1Bits, kPSDDominantDeltaLobeP1Offset, packedData.x, (uint)psdDominantDeltaLobeP1); }
+    uint getPSDDominantDeltaLobeP1()             { return EXTRACT_BITS(kPSDDominantDeltaLobeP1Bits, kPSDDominantDeltaLobeP1Offset, packedData.x); }
 
-/** This is a host/device structure representing a blob of material data (128B).
-    The material data blob consists of a header and a payload. The header is always valid.
-    The blob is sized to fit into one cacheline for efficient access. Do not change the size.
-    All material types should keep their main material data within this footprint.
-    Material that need more can reference additional sideband data stored elsewhere.
-*/
-struct MaterialDataBlob
-{
-    MaterialHeader header; // 8B
-    MaterialPayload payload; // 120B
+    static MaterialHeader make( ) { MaterialHeader header; header.packedData = 0; return header; }
 };
 
 #endif // __MATERIAL_DATA_HLSLI__

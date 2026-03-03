@@ -11,7 +11,7 @@
 #pragma once
 
 #include "../Shaders/PathTracer/Config.h"
-#include "../SampleCommon.h"
+//#include "../SampleCommon.h"
 #include "GameMisc.h"
 
 namespace donut::engine

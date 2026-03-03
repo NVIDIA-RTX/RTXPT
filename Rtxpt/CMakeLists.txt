@@ -9,7 +9,12 @@
 
 include(../External/Donut/compileshaders.cmake)
 file(GLOB_RECURSE shaders "*.hlsl" "*.hlsli")
-file(GLOB_RECURSE sources "*.cpp" "*.h" "*.md")
+file(GLOB_RECURSE shared_sources "*.cpp" "*.h" "*.md")
+# Separate out shared sources from entry point files
+list(REMOVE_ITEM shared_sources 
+    "${CMAKE_CURRENT_SOURCE_DIR}/IntroSample.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/AdvancedSample.cpp"
+)
 
 file(GLOB NRD_INTEGRATION_HEADERS "../External/Nrd/Integration/*.h" "../External/Nrd/Integration/*.hpp")
 source_group("RayTracingDenoiser" FILES ${NRD_INTEGRATION_HEADERS})
@@ -37,6 +42,7 @@ if(DONUT_WITH_AFTERMATH OR DONUT_EMBED_SHADER_PDBS)
 endif()
 
 #set(shadermake_options --verbose)
+
 if(RTXPT_D3D_AGILITY_SDK_VERSION AND (RTXPT_D3D_AGILITY_SDK_VERSION GREATER_EQUAL "619"))
     set(shadermake_options "-m 6_9")
 endif()
@@ -118,35 +124,49 @@ add_custom_target(ShaderDynamicAssets ALL DEPENDS "${DYNSH_COPY1_MARKER}" "${DYN
 
 ##########################################################################
 
-add_executable(${project} WIN32 ${sources})
-
-add_dependencies(${project} rtxpt_shaders nrd_shaders omm_shaders ShaderDynamicAssets ShaderDynamicAssets_CopyAlways)
-
-target_link_libraries(${project} cxxopts donut_render donut_app donut_engine NRD Rtxdi omm-lib omm-gpu-nvrhi)
-
-set_target_properties(${project} PROPERTIES FOLDER ${folder})
-
+# Create a static library for shared code (used by both samples)
+add_library(RtxptCore STATIC ${shared_sources})
+target_link_libraries(RtxptCore PUBLIC cxxopts donut_render donut_app donut_engine NRD Rtxdi omm-lib omm-gpu-nvrhi)
+target_include_directories(RtxptCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "../External/Nrd/Include" ${CMAKE_SOURCE_DIR}/External/Rtxdi/Include)
+target_compile_definitions(RtxptCore PUBLIC RTXPT_D3D12_WITH_NVAPI=$<BOOL:${NVRHI_WITH_NVAPI}>)
+add_dependencies(RtxptCore rtxpt_shaders nrd_shaders omm_shaders ShaderDynamicAssets ShaderDynamicAssets_CopyAlways)
+set_target_properties(RtxptCore PROPERTIES FOLDER ${folder})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${shaders})
-
-target_include_directories(${project} PRIVATE "../External/Nrd/Include" ${CMAKE_SOURCE_DIR}/External/Rtxdi/Include) 
-
-
-##########################################################################
-############################# AgilitySDK #################################
-
+# AgilitySDK support for RtxptCore
 if (RTXPT_D3D_AGILITY_SDK_PATH AND RTXPT_D3D_AGILITY_SDK_VERSION)
     if (NOT DEFINED RTXPT_D3D_AGILITY_SDK_VERSION)
         message(FATAL_ERROR "RTXPT_D3D_AGILITY_SDK_VERSION must be defined when RTXPT_D3D_AGILITY_SDK_PATH is defined")
     endif()
-    target_compile_definitions(${project} PUBLIC RTXPT_D3D_AGILITY_SDK_VERSION=${RTXPT_D3D_AGILITY_SDK_VERSION})
-    add_custom_command(
-        TARGET ${project} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${project}>/D3D12/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/D3D12Core.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
-    )
-    target_compile_definitions(${project} PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
-    target_include_directories(${project} PRIVATE ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/include)
+    target_compile_definitions(RtxptCore PUBLIC RTXPT_D3D_AGILITY_SDK_VERSION=${RTXPT_D3D_AGILITY_SDK_VERSION})
+    target_compile_definitions(RtxptCore PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
+    target_include_directories(RtxptCore PRIVATE ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/include)
 endif()
 
-##########################################################################
+# Macro to create sample executables with common settings
+macro(add_rtxpt_sample TARGET_NAME MAIN_SOURCE)
+    add_executable(${TARGET_NAME} WIN32 ${MAIN_SOURCE})
+    target_link_libraries(${TARGET_NAME} PRIVATE RtxptCore)
+    add_dependencies(${TARGET_NAME} rtxpt_shaders nrd_shaders omm_shaders ShaderDynamicAssets ShaderDynamicAssets_CopyAlways)
+    set_target_properties(${TARGET_NAME} PROPERTIES 
+        FOLDER ${folder}
+        OUTPUT_NAME_DEBUG "${TARGET_NAME}D"
+        OUTPUT_NAME_RELEASE "${TARGET_NAME}"
+    )
+    
+    # AgilitySDK support for this target
+    if (RTXPT_D3D_AGILITY_SDK_PATH AND RTXPT_D3D_AGILITY_SDK_VERSION)
+        target_compile_definitions(${project} PUBLIC RTXPT_D3D_AGILITY_SDK_VERSION=${RTXPT_D3D_AGILITY_SDK_VERSION})
+        add_custom_command(
+            TARGET ${project} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${project}>/D3D12/"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/D3D12Core.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
+        )
+        target_compile_definitions(${project} PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
+        target_include_directories(${project} PRIVATE ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/include)
+    endif()
+endmacro()
+
+# Build both sample executables
+#add_rtxpt_sample(IntroSample "IntroSample.cpp") # Work in progress!
+add_rtxpt_sample(Rtxpt "AdvancedSample.cpp")

@@ -19,10 +19,11 @@
 #include "GeneratePdfMipsPass.h"
 #include "../Lighting/Distant/EnvMapBaker.h"
 #include "../Lighting/Distant/EnvMapImportanceSamplingBaker.h"
-#include "../ExtendedScene.h"
+#include "../SampleCommon/ExtendedScene.h"
 #include "ShaderParameters.h"
+#include "../Shaders/SampleConstantBuffer.h"
 
-#include "../RenderTargets.h"
+#include "../SampleCommon/RenderTargets.h"
 
 using namespace donut::math;
 using namespace donut::engine;
@@ -559,7 +560,7 @@ void RtxdiPass::ExecuteComputePass(
 {
 	commandList->beginMarker(passName);
     
-    uint4 unusedPushConstants = {0,0,0,0};  // shared bindings require them
+    SampleMiniConstants unusedPushConstants = { };  // shared bindings require them
 	pass.Execute(commandList, dispatchSize.x, dispatchSize.y, dispatchSize.z, m_bindingSet,
 		extraBindingSet, m_Scene->GetDescriptorTable(), &unusedPushConstants, sizeof(unusedPushConstants));
 
@@ -576,7 +577,7 @@ void RtxdiPass::ExecuteRayTracingPass(
 {
 	commandList->beginMarker(passName);
 	
-    uint4 unusedPushConstants = { 0,0,0,0 };  // shared bindings require them
+    SampleMiniConstants unusedPushConstants = { };  // shared bindings require them
 	pass.Execute(commandList, dispatchSize.x, dispatchSize.y, m_bindingSet, 
 		extraBindingSet, m_Scene->GetDescriptorTable(), &unusedPushConstants, sizeof(unusedPushConstants));
 

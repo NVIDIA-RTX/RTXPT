@@ -10,7 +10,6 @@
 
 #pragma once
 
-#include <donut/engine/BindingCache.h>
 #include <nvrhi/nvrhi.h>
 #include <donut/core/math/math.h>
 #include <memory>
@@ -19,16 +18,18 @@
 
 #include <filesystem>
 
-#include "../../SampleCommon.h"
+#include "../../SampleCommon/SampleCommon.h"
 
 using namespace donut::math;
 
 #include "EnvMapBaker.hlsl"
+#include "BRDFLUTGenerator.hlsl"
 
 #include "SampleProceduralSky.h"
 
 namespace donut::engine
 {
+    class BindingCache;
     class FramebufferFactory;
     class TextureCache;
     class TextureHandle;
@@ -39,9 +40,12 @@ namespace donut::engine
 
 class ShaderDebug;
 class EnvMapImportanceSamplingBaker;
+class ComputePipelineBaker;
+class ComputeShaderVariant;
 
 // This is used to bake the cubemap with the given inputs. Inputs can be equirectangular envmap image or procedural sky, and directional lights.
 // There's a low resolution (half by half) pass which can be used to speed up baking - currently only used for procedural sky.
+// Also provides shared cubemap processing functionality (mips, GGX filtering, SH projection) via ProcessCubemap().
 class EnvMapBaker 
 {
 public:
@@ -55,20 +59,39 @@ public:
         //BakeSettings(const float envMapRadianceScale) : EnvMapRadianceScale(envMapRadianceScale) {}
     };
 
+    // Options for ProcessCubemap() - shared cubemap processing
+    struct CubemapProcessingOptions
+    {
+        bool generateMips = true;           // Solid-angle weighted mip chain
+        bool ggxPrefilter = false;          // GGX specular convolution (for IBL specular)
+        bool projectToSH = false;           // Project to SH and reproject to low-res diffuse cube
+        bool bc6hCompress = false;          // BC6H compression
+        bool generateImportanceMap = false; // For path tracer importance sampling
+    };
+
+    // Results from ProcessCubemap() - caller provides the destination textures
+    struct CubemapProcessingResults
+    {
+        nvrhi::TextureHandle filteredCubemap;       // GGX-filtered mip chain (for specular)
+        nvrhi::TextureHandle diffuseIrradianceCube; // Low-res SH-reprojected cubemap (for diffuse)
+    };
+
     constexpr static uint           c_MaxDirLights  = EMB_MAXDIRLIGHTS;    // Can't have any more than this number of directional lights baked into cubemap, sorry.
+    constexpr static uint           c_BRDFLUTSize   = BRDF_LUT_SIZE;       // Size of the BRDF integration LUT
+    constexpr static uint           c_IrradianceCubeSize = 32;             // Size of diffuse irradiance cubemap
     
 
 public:
-    EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses );
+    EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, bool enableRasterPrecompute );
     ~EnvMapBaker();
 
     void                            SceneReloaded()                 { m_targetResolution = 0; } // change default target resolution on each scene load
 
-    void                            CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug);
+    void                            CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<ComputePipelineBaker> computePipelineBaker);
 
-    void                            PreUpdate( nvrhi::ICommandList* commandList, std::string envMapBackgroundPath );    // use to update to figure out GetTargetCubeResolution() default cubemap resolution and needed before Update; Ignore return if not needed.
+    void                            PreUpdate( nvrhi::ICommandList* commandList, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::string envMapBackgroundPath );    // use to update to figure out GetTargetCubeResolution() default cubemap resolution and needed before Update; Ignore return if not needed.
     // Returns 'true' if contents changed; note: directionalLights must be transformed to Environment map local space. 
-    bool                            Update( nvrhi::ICommandList * commandList, const BakeSettings & settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate );
+    bool                            Update( nvrhi::ICommandList * commandList, donut::engine::BindingCache & bindingCache, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const BakeSettings & settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate );
 
     nvrhi::TextureHandle            GetEnvMapCube() const           { return (m_outputIsCompressed)?(m_cubemapBC6H):(m_cubemap); }
     nvrhi::SamplerHandle            GetEnvMapCubeSampler() const    { return m_linearSampler; }
@@ -87,17 +110,36 @@ public:
     const std::shared_ptr<EnvMapImportanceSamplingBaker>
                                     GetImportanceSampling() const   { return m_importanceSamplingBaker; }
 
+    // BRDF LUT for split-sum IBL approximation (generated once at startup)
+    nvrhi::TextureHandle            GetBRDFLUT() const              { return m_brdfLUT; }
+    bool                            IsBRDFLUTReady() const          { return m_brdfLUT != nullptr && m_brdfLUTGenerated; }
+
+    // Process an external cubemap with the specified options
+    // This allows reusing the mip generation, GGX filtering, and SH projection for external cubemaps (e.g., local RT cubemap)
+    void                            ProcessCubemap(
+                                        nvrhi::ICommandList* commandList,
+                                        donut::engine::BindingCache& bindingCache,
+                                        nvrhi::TextureHandle sourceCubemap,
+                                        const CubemapProcessingOptions& options,
+                                        const CubemapProcessingResults& results);
+    
+    // Generate the BRDF integration LUT (should be called once during initialization)
+    bool                            GenerateBRDFLUT(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache);
     
 private:
+    void                            GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
+                                        nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap);
+    void                            ConvolveDiffuseIrradiance(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache,
+                                        nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap);
+    void                            GenerateCubemapMips(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
+                                        nvrhi::TextureHandle cubemap);
+
     void                            InitBuffers(uint cubeDim);
     void                            UnloadSourceBackgrounds();
 
 private:
     nvrhi::DeviceHandle             m_device;
     std::shared_ptr<donut::engine::TextureCache> m_textureCache;
-    std::shared_ptr<donut::engine::CommonRenderPasses> m_commonPasses;
-    std::shared_ptr<donut::engine::FramebufferFactory> m_framebufferFactory;
-    std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
     std::shared_ptr<ShaderDebug>    m_shaderDebug;
 
     nvrhi::ShaderHandle             m_lowResPrePassLayerCS;
@@ -118,9 +160,6 @@ private:
     nvrhi::ShaderHandle             m_BC6UCompressHighCS;
     nvrhi::ComputePipelineHandle    m_BC6UCompressHighPSO;
     nvrhi::BindingLayoutHandle      m_BC6UCompressBindingLayout;
-
-
-    donut::engine::BindingCache     m_bindingCache;
 
     nvrhi::BufferHandle             m_constantBuffer;
 
@@ -162,4 +201,25 @@ private:
 
     std::shared_ptr<EnvMapImportanceSamplingBaker>
                                     m_importanceSamplingBaker;
+
+    bool                            m_enableRasterPrecompute = false;
+
+    // BRDF LUT for split-sum IBL
+    nvrhi::TextureHandle            m_brdfLUT;
+    nvrhi::ShaderHandle             m_brdfLUTCS;
+    nvrhi::ComputePipelineHandle    m_brdfLUTPSO;
+    nvrhi::BindingLayoutHandle      m_brdfLUTBindingLayout;
+    nvrhi::BufferHandle             m_brdfLUTConstantBuffer;
+    bool                            m_brdfLUTGenerated = false;
+
+    // GGX pre-filtering for specular IBL - managed by ComputePipelineBaker for hot reload
+    std::shared_ptr<ComputeShaderVariant> m_ggxPrefilterVariant;
+    nvrhi::BindingLayoutHandle      m_ggxPrefilterBindingLayout;
+
+    // Diffuse irradiance convolution (SH-based) - managed by ComputePipelineBaker for hot reload
+    std::shared_ptr<ComputeShaderVariant> m_irradianceConvolveVariant;
+    nvrhi::BindingLayoutHandle      m_irradianceConvolveBindingLayout;
+
+    // Reference to compute pipeline baker for hot reload support
+    std::shared_ptr<ComputePipelineBaker> m_computePipelineBaker;
 };

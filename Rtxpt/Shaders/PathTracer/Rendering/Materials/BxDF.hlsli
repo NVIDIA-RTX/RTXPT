@@ -246,6 +246,28 @@ struct DiffuseTransmissionLambert // : IBxDF
     }
 };
 
+// Cheap polynomial approximation to single the average energy compensation for multiple bounces
+// Ems = (1-Ess) / Ess
+float EmsApprox(float r2, float NdV)
+{
+    float r4 = r2 * r2;
+    
+    float nv0 = 0.2 * r2;
+    float nv1 = 0.32 * r2 + 1.94 * r4;
+    
+    return lerp(nv0, nv1, NdV);
+}
+
+float3 MultiScatterSpecularApprox(float alpha, float NdV, float3 F0)
+{    
+	// Multiple scattering
+    float Ems = EmsApprox(alpha, NdV);
+    
+    // Turquin's cheap MS approximation
+    // https://blog.selfshadow.com/publications/turquin/ms_comp_final.pdf
+    return 1 + F0 * Ems;
+}
+
 /** Specular reflection using microfacets.
 */
 struct SpecularReflectionMicrofacet // : IBxDF
@@ -277,7 +299,10 @@ struct SpecularReflectionMicrofacet // : IBxDF
         float G = evalMaskingSmithGGXCorrelated(alpha, wi.z, wo.z);
 #endif
         float3 F = evalFresnelSchlick(albedo, 1.f, wiDotH);
-        return F * D * G * 0.25f / wi.z;
+        
+        float3 ms = MultiScatterSpecularApprox(alpha, wi.z, albedo);
+        
+        return ms * F * (D * G * 0.25f / wi.z);
     }
 
     bool sample(const float3 wi, out float3 wo, out float pdf, out float3 weight, out uint lobe, out float lobeP, float3 preGeneratedSample)
@@ -581,7 +606,7 @@ struct SpecularReflectionTransmissionMicrofacet// : IBxDF
     }
 };
 
-#define RTXPT_STANDARD_BSDF_DATA_MANUAL_PACK    0       // interesting test, not beneficial
+#define RTXPT_STANDARD_BSDF_DATA_MANUAL_PACK    0       // interesting test, not beneficial (yet!)
 
 // TODO: Reduce to 52B
 /** BSDF parameters for the standard BSDF.
@@ -593,15 +618,19 @@ struct StandardBSDFData
     uint2       _diffuse_roughness;
     uint2       _specular_metallic;
     uint2       _transmission_eta;
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
     uint        _diffuseTransmission_specularTransmission;
+#endif
 #else
     lpfloat3    _diffuse;                ///< Diffuse albedo.
     lpfloat     _roughness;              ///< This is the original roughness, before remapping.
     lpfloat3    _specular;               ///< Specular albedo.
     lpfloat     _metallic;               ///< Metallic parameter, blends between dielectric and conducting BSDFs.
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
     lpfloat3    _transmission;           ///< Transmission color.
     lpfloat     _diffuseTransmission;    ///< Diffuse transmission, blends between diffuse reflection and transmission lobes.
     lpfloat     _specularTransmission;   ///< Specular transmission, blends between opaque dielectric BRDF and specular transmissive BSDF.
+#endif
     lpfloat     _eta;                    ///< Relative index of refraction (incident IoR / transmissive IoR).
 #endif
 
@@ -613,16 +642,20 @@ struct StandardBSDFData
         d._diffuse_roughness  = Fp32ToFp16(float4(diffuse, roughness));
         d._specular_metallic  = Fp32ToFp16(float4(specular, metallic));
         d._transmission_eta   = Fp32ToFp16(float4(transmission, eta));
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
         d._diffuseTransmission_specularTransmission = Fp32ToFp16(float2(diffuseTransmission, specularTransmission));
+#endif
 #else
         d._diffuse = diffuse;
         d._specular = specular;
         d._roughness = roughness;
         d._metallic = metallic;
         d._eta = eta;
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
         d._transmission = transmission;
         d._diffuseTransmission = diffuseTransmission;
         d._specularTransmission = specularTransmission;
+#endif
 #endif
         return d;
     }
@@ -632,10 +665,16 @@ struct StandardBSDFData
     lpfloat     Roughness           ()  { float4 val = Fp16ToFp32(_diffuse_roughness); return (lpfloat)val.w; }
     lpfloat3    Specular            ()  { float4 val = Fp16ToFp32(_specular_metallic); return (lpfloat3)val.xyz; }
     lpfloat     Metallic            ()  { float4 val = Fp16ToFp32(_specular_metallic); return (lpfloat)val.w; }
-    lpfloat3    Transmission        ()  { float4 val = Fp16ToFp32(_transmission_eta); return (lpfloat3)val.xyz; }
     lpfloat     Eta                 ()  { float4 val = Fp16ToFp32(_transmission_eta); return (lpfloat)val.w; }
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
+    lpfloat3    Transmission        ()  { float4 val = Fp16ToFp32(_transmission_eta); return (lpfloat3)val.xyz; }
     lpfloat     DiffuseTransmission ()  { return (lpfloat)f16tof32(_diffuseTransmission_specularTransmission & 0xFFFF); }
     lpfloat     SpecularTransmission()  { return (lpfloat)f16tof32(_diffuseTransmission_specularTransmission >> 16); }
+#else
+    lpfloat3    Transmission        ()  { return 0;         }
+    lpfloat     DiffuseTransmission ()  { return 0;  }
+    lpfloat     SpecularTransmission()  { return 0; }
+#endif
     // this is needed when updating interior<->exterior transitions
     void        SetEta(lpfloat eta)                                     { _transmission_eta.y = (_transmission_eta.y & 0xFFFF) | (f32tof16((float)eta)<<16); }
     // this is needed when limiting roughness in some denoising cases
@@ -645,10 +684,16 @@ struct StandardBSDFData
     lpfloat     Roughness           ()  { return _roughness;            }
     lpfloat3    Specular            ()  { return _specular;             }
     lpfloat     Metallic            ()  { return _metallic;             }
-    lpfloat3    Transmission        ()  { return _transmission;         }
     lpfloat     Eta                 ()  { return _eta;                  }
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
+    lpfloat3    Transmission        ()  { return _transmission;         }
     lpfloat     DiffuseTransmission ()  { return _diffuseTransmission;  }
     lpfloat     SpecularTransmission()  { return _specularTransmission; }
+#else
+    lpfloat3    Transmission        ()  { return 0;         }
+    lpfloat     DiffuseTransmission ()  { return 0;  }
+    lpfloat     SpecularTransmission()  { return 0; }
+#endif
     // this is needed when updating interior<->exterior transitions
     void        SetEta(lpfloat eta)                                     { _eta = eta; }
     // this is needed when limiting roughness in some denoising cases

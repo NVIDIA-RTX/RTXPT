@@ -71,9 +71,9 @@
 #define ENABLE_DEBUG_RTXDI_VIZUALISATION        0
 #endif
 
-#ifndef NON_PATH_TRACING_PASS
-#define NON_PATH_TRACING_PASS 0
-#endif
+// #ifndef NON_PATH_TRACING_PASS
+// #define NON_PATH_TRACING_PASS 0
+// #endif
 
 // for NVAPI integration
 #define NV_SHADER_EXTN_SLOT                 u127    // pick an arbitrary unused slot
@@ -82,29 +82,26 @@
 #define NV_SHADER_EXTN_REGISTER_SPACE_NUM   0       // must match NV_SHADER_EXTN_REGISTER_SPACE
 
 #define  kMaxSceneDistance                  50000.0         // used as a general max distance between any two surface points in the scene, excluding environment map - should be less than kMaxRayTravel; 50k is within fp16 floats; note: actual sceneLength can be longer due to bounces.
+#define  kEnvironmentMapSceneDistance       kMaxSceneDistance * 100.0 // this seems sufficient for parallax in any case where envmap is used
 #define  kMaxRayTravel                      (1e15f)         // one AU is ~1.5e11; 1e15 is high enough to use as environment map distance to avoid parallax but low enough to avoid precision issues with various packing and etc.
 
 #define  cStablePlaneCount                  (3u)            // more than 3 is not supported although 4 could be supported if needed (with some reshuffling)
 
 #define  NUM_COMPUTE_THREADS_PER_DIM        8
 
-// should be pow of 2 when using low discrepancy sampling or the result can be biased; it also must be a multiple of 256 due to compute shader hardcoding
+// RTXDI only - should be pow of 2 when using low discrepancy sampling or the result can be biased; it also must be a multiple of 256 due to compute shader hardcoding
 #define  ENVMAP_PRESAMPLED_COUNT            2048u           // 1024 is ok quality, 4096 is plenty enough but still fits into small enough memory block (32Kb), 2048u is good compromise
-
-#define  RTXPT_LP_TYPES_USE_16BIT_PRECISION 0               // all lpfloat/lpuint/etc uses will be 16bit if this set; not actually beneficial on average
 
 #define  RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE 0        // 0 - disable STF; 1 - enable STF
 
-#define  RTXPT_FIREFLY_FILTER               1
-
-#if NON_PATH_TRACING_PASS || defined(__cplusplus) || (__SHADER_TARGET_MAJOR < 6 || __SHADER_TARGET_MINOR < 7)
-	#define PAYLOAD_QUALIFIER
-	#define PAYLOAD_FIELD_RW_ALL
-	#define PAYLOAD_FIELD_READCALLER
+#if NON_PATH_TRACING_PASS || defined(__cplusplus) || (__SHADER_TARGET_MAJOR < 6 || __SHADER_TARGET_MINOR < 6)
+    #define PAYLOAD_QUALIFIER
+    #define PAYLOAD_FIELD_RW_ALL
+    #define PAYLOAD_FIELD_READCALLER
 #else
-	#define PAYLOAD_QUALIFIER           [raypayload]
-	#define PAYLOAD_FIELD_RW_ALL        : read(caller, closesthit, anyhit, miss) : write(caller, closesthit, miss)
-	#define PAYLOAD_FIELD_READCALLER    : read(caller) : write(closesthit, miss)
+    #define PAYLOAD_QUALIFIER           [raypayload]
+    #define PAYLOAD_FIELD_RW_ALL        : read(caller, closesthit, anyhit, miss) : write(caller, closesthit, anyhit, miss)
+    #define PAYLOAD_FIELD_READCALLER    : read(caller) : write(closesthit, anyhit, miss)
 #endif
 
 #endif // __CONFIG_H__

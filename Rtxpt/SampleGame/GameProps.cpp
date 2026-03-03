@@ -18,9 +18,12 @@
 #include <donut/app/Camera.h>
 #include <cmath>
 
-#include "../ExtendedScene.h"
+#include "../SampleCommon/CommandLine.h"
+
+#include "../SampleCommon/ExtendedScene.h"
 
 #include "../Misc/Korgi.h"
+#include "../SampleCommon/SampleCommon.h"
 #include <json/json.h>
 
 #include <fstream>
@@ -180,6 +183,8 @@ void PropBase::Load(const Json::Value& jsonRoot)
         m_defaultCameraPose.Read(jsonDefaultCameraPose);
 
     jsonRoot["animPlaybackSpeed"] >> m_animPlaybackSpeed;
+
+    jsonRoot["showOnlyIfTagged"] >> m_showOnlyIfTagged;
 
     Json::Value animationRecording = jsonRoot["animation"];
 
@@ -378,6 +383,10 @@ void SimpleProp::Reset()
 void SimpleProp::Load(const Json::Value& jsonRoot)
 {
     PropBase::Load(jsonRoot);
+
+    if (m_showOnlyIfTagged != "")
+        if (FindSubStringIgnoreCase(m_gameScene.GetCmdLine().PropShowTags, m_showOnlyIfTagged) == std::string::npos)
+            return; // nothing to see here
 
     jsonRoot["modelName"] >> m_modelName;
     auto modelType = m_gameScene.FindModelType(m_modelName);

@@ -36,20 +36,12 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
         {
             uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
             float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
-            float specHitDist   = u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist;
 
             if (hasDI)
-            {
-                specHitDist = AccumulateHitT( radiance.a, specHitDist, radianceAndSpecAvgDI.a, hitDistanceDI );
                 radiance   += radianceAndSpecAvgDI;
-            }
             if (hasGI)
-            {
-                specHitDist = AccumulateHitT( radiance.a, specHitDist, radianceAndSpecAvgGI.a, hitDistanceGI );
                 radiance   += radianceAndSpecAvgGI;
-            }
 
-            u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist = specHitDist;
             u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16( radiance );
         }
         else

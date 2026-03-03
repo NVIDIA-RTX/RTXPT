@@ -21,7 +21,8 @@ using namespace donut::math;
 
 #include "PathTracer/PathTracerDebug.hlsli"
 
-#include "PathTracer/Lighting/LightingTypes.h"
+#include "PathTracer/Lighting/LightingTypes.hlsli"
+#include "PathTracer/Lighting/EnvMap.hlsli"
 
 
 struct SimpleViewConstants
@@ -64,6 +65,9 @@ struct SampleConstants
 struct SampleMiniConstants
 {
     uint4 params;
+    uint4 params1;
+    uint4 params2;
+    uint4 params3;
 };
 
 #endif // __SAMPLE_CONSTANT_BUFFER_H__

@@ -21,8 +21,8 @@
 
 #include <donut/app/imgui_renderer.h>
 
-#include "../SampleCommon.h"
-#include "../ExtendedScene.h"
+#include "../SampleCommon/SampleCommon.h"
+#include "../SampleCommon/ExtendedScene.h"
 
 #include <donut/core/json.h>
 #include <json/json.h>
@@ -35,11 +35,30 @@
 
 #include "../SampleUI.h"
 
+#include "../Misc/picosha2.h"
+
+#include <donut/shaders/bindless.h>
+
 using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
 
 static std::string kNoModel = "<no_model>";
+
+static std::array<unsigned char, picosha2::k_digest_size> HashMyString(const std::string& string)
+{
+    std::array<unsigned char, picosha2::k_digest_size> arr;
+    picosha2::hash256(string.begin(), string.end(), arr.begin(), arr.end());
+    return arr;
+}
+
+static size_t ShortHash(const std::array<unsigned char, picosha2::k_digest_size> longHash)
+{
+    size_t h = 0;
+    for (auto b : longHash)
+        h ^= static_cast<size_t>(b) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+}
 
 void PTTexture::InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTexture> & loaded, bool _sRGB, bool _normalMap, const std::filesystem::path & mediaPath)
 {
@@ -52,7 +71,7 @@ void PTTexture::InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTextu
     NormalMap = _normalMap;
 }
 
-std::shared_ptr<PTMaterial> PTMaterial::FromDonut(const std::shared_ptr<Material>& donutMaterial)
+std::shared_ptr<PTMaterial> PTMaterial::SafeCast(const std::shared_ptr<Material>& donutMaterial)
 {
     if (donutMaterial == nullptr)
         return nullptr;
@@ -110,8 +129,8 @@ void PTMaterial::Write(Json::Value& output)
     STORE_FIELD(ThinSurface);
     STORE_FIELD(ExcludeFromNEE);
     STORE_FIELD(PSDExclude);
-
     STORE_FIELD(PSDDominantDeltaLobe);
+    STORE_FIELD(PSDBlockMotionVectorsAtSurfaceType);
     STORE_FIELD(NestedPriority);
 
     STORE_FIELD(VolumeAttenuationDistance);
@@ -209,6 +228,7 @@ bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath
     LOAD_FIELD(ThinSurface);
     LOAD_FIELD(ExcludeFromNEE);
     LOAD_FIELD(PSDExclude);
+    LOAD_FIELD(PSDBlockMotionVectorsAtSurfaceType);
 
     LOAD_FIELD(PSDDominantDeltaLobe);
     LOAD_FIELD(NestedPriority);
@@ -255,8 +275,11 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
     if (ImGui::CollapsingHeader("Special Properties"))
     {
         ImGui::Indent();
-        update |= ImGui::Checkbox("Thin surface", &ThinSurface);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.");
+        {
+            UI_SCOPED_DISABLE(!EnableTransmission);
+            update |= ImGui::Checkbox("Thin surface", &ThinSurface);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.\nNon-transparent materials are always considered thin surface.");
 
         update |= ImGui::Checkbox("Ignore by NEE shadow ray (bias!)", &ExcludeFromNEE);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation\nNote: this isn't physically correct - it adds bias!");
@@ -282,6 +305,11 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
 
         update |= ImGui::Checkbox("Skip render", &SkipRender);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignore all meshes with this material - sometimes easier than removing the object itself.\nNote: this will not remove it as an emissive light on the light sampling side!");
+
+        std::string fullName = UniqueFullName();
+        ImGui::TextWrapped("Full, unique ID: %s", fullName.c_str());
+        if (ImGui::Button("Copy to clipboard"))
+            ImGui::SetClipboardText(fullName.c_str());
 
         ImGui::Unindent();
     }
@@ -410,11 +438,15 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
     {
         ImGui::Indent();
 
+        update |= ImGui::Combo("Block mv-s at surface", (int*)&PSDBlockMotionVectorsAtSurfaceType, "Off\0AutoLow\0AutoHigh\0Full\0");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Curved surfaces cause motion vectors on reflected or transmitted\nsegments to be incorrect and are better disabled.\n"
+            "When this is enabled, motion for all de-composited paths will come\nfrom this surface. AutoLow and AutoHigh will attempt to set the flag based on\n surface curvature (with Low and High sensitivities).");
+
         bool psdEnable = !PSDExclude; // makes more sense from UI perspective - avoids double negative
         update |= ImGui::Checkbox("Enable delta lobe decomposition", &psdEnable);
         PSDExclude = !psdEnable;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Some materials/meshes look best without decomposition.");
-
+        
         {
             UI_SCOPED_DISABLE(PSDExclude);
             int dominantDeltaLobeP1 = dm::clamp(PSDDominantDeltaLobe, -1, 1) + 1;
@@ -508,11 +540,17 @@ void PTMaterial::FillData(PTMaterialData & data)
     if (MetalnessInRedChannel)
         data.Flags |= PTMaterialFlags_MetalnessInRedChannel;
 
-    if (ThinSurface)
+    if (ThinSurface || !EnableTransmission) // materials with no transmission are automatically considered thin surface - simplifies a lot of things
         data.Flags |= PTMaterialFlags_ThinSurface;
 
     if (PSDExclude)
         data.Flags |= PTMaterialFlags_PSDExclude;
+
+    if (PSDBlockMotionVectorsAtSurfaceType % 2)
+        data.Flags |= PTMaterialFlags_PSDBlockMVsAtSurfaceTypeB0;
+
+    if (PSDBlockMotionVectorsAtSurfaceType / 2)
+        data.Flags |= PTMaterialFlags_PSDBlockMVsAtSurfaceTypeB1;
 
     if (EnableAsAnalyticLightProxy)
         data.Flags |= PTMaterialFlags_EnableAsAnalyticLightProxy;
@@ -564,12 +602,35 @@ std::filesystem::path MaterialsBaker::GetMaterialStoragePath(PTMaterialBase& mat
     return matPath;
 }
 
-MaterialsBaker::MaterialsBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory)
-    : m_device(device)
+MaterialsBaker::MaterialsBaker(const std::string & relativeShaderSourcePath, nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory)
+    : m_relativeShaderSourcePath(relativeShaderSourcePath)
+    , m_device(device)
     , m_textureCache(textureCache)
     , m_bindingCache(device)
     , m_shaderFactory(shaderFactory)
 {
+}
+
+void MaterialsBaker::InitializeUniqueDeterministicName(const std::shared_ptr<PTMaterialBase> & material)
+{
+    std::string hashBase = material->ModelName + "_" + material->Name;
+    uint evenShorterHash = ShortHash(HashMyString(hashBase));
+    
+    std::string uniqueName = StripNonAsciiAlnum(material->Name).substr(0, 16) + "_" + HexString(evenShorterHash);
+
+    auto findV = m_uniqueNames.find(uniqueName);
+    if (findV == m_uniqueNames.end())
+    {
+        m_uniqueNames.insert({uniqueName, material});
+    }
+    else
+    {
+        assert( false ); // hash collision? name collision?
+        static int errorNumber = 0;
+        uniqueName = "hasherror_" + std::to_string(errorNumber); errorNumber++;
+        m_uniqueNames.insert({uniqueName, material});
+    }
+    material->UniqueName = uniqueName;
 }
 
 void MaterialsBaker::Clear() 
@@ -581,6 +642,7 @@ void MaterialsBaker::Clear()
     m_mediaPath = std::filesystem::path();
     m_materialsPath = std::filesystem::path();
     m_materialsSceneSpecializedPath = std::filesystem::path();
+    m_uniqueNames.clear();
 }
 
 MaterialsBaker::~MaterialsBaker()
@@ -635,14 +697,6 @@ std::shared_ptr<PTMaterial> MaterialsBaker::ImportFromDonut(donut::engine::Mater
     //materialPT->IoR = material.ior;
     materialPT->UseSpecularGlossModel = material.useSpecularGlossModel;
     materialPT->MetalnessInRedChannel = material.metalnessInRedChannel;
-    //materialPT->ThinSurface = material.thinSurface;
-    //materialPT->ExcludeFromNEE = material.excludeFromNEE;
-    //materialPT->PSDExclude = material.psdExclude;
-    //materialPT->PSDDominantDeltaLobe = material.psdDominantDeltaLobe;
-    //materialPT->NestedPriority = material.nestedPriority;
-    //materialPT->VolumeAttenuationDistance = material.volumeAttenuationDistance;
-    //materialPT->VolumeAttenuationColor = material.volumeAttenuationColor;
-    //materialPT->ShadowNoLFadeout = material.shadowNoLFadeout;
 
     materialPT->EnableAlphaTesting = (material.domain == MaterialDomain::AlphaTested || material.domain == MaterialDomain::TransmissiveAlphaTested);
     materialPT->EnableTransmission = (material.domain == MaterialDomain::Transmissive || material.domain == MaterialDomain::TransmissiveAlphaBlended || material.domain == MaterialDomain::TransmissiveAlphaTested);
@@ -679,7 +733,7 @@ std::shared_ptr<PTMaterial> MaterialsBaker::Load(const std::string & modelFileNa
     }
     if (actualLoadedFileName=="")
     {
-        donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", actualLoadedFileName.c_str()); 
+        donut::log::warning("No RTXPT material definition file found '%s' - consider doing Scene->Materials->Advanced->Save All", (modelName + "." + name + c_MaterialsExtension).c_str()); 
         return nullptr;
     }
 
@@ -717,6 +771,68 @@ void MaterialsBaker::CompleteDeferredTexturesLoad(nvrhi::ICommandList* commandLi
         {
             commandList->open();
         }
+    }
+}
+
+static std::string MacrosToString( const std::vector<donut::engine::ShaderMacro> & macros )
+{
+    std::string result;
+    result.reserve(macros.size() * 16); // optional optimization guess
+    bool first = true;
+    for (const auto& p : macros) 
+    {
+        if (!first)
+            result += ',';
+        first = false;
+        result += '{' + p.name + ',' + p.definition + '}';
+    }
+    return result;
+}
+
+// MaterialShaderPermutation::MaterialShaderPermutation(const std::string & shaderFilePath, const std::string & closestHitName, const std::string & anyHitName, const std::vector<std::pair<std::string, std::string>> & macros )
+
+
+MaterialShaderPermutationKey::MaterialShaderPermutationKey( const MaterialShaderPermutation & msp )
+    : FullKey( msp.ShaderFilePath + ", " + /*msp.ClosestHitName + ", " + msp.AnyHitName + ", " +*/ MacrosToString(msp.Macros) )
+{
+    Hash = ShortHash(HashMyString(FullKey));
+}
+
+void MaterialsBaker::BakeShaderPermutations()
+{
+    // first generate ubershader variant - that will likely go away in the future
+    std::vector<donut::engine::ShaderMacro> macros;
+    macros.push_back({ "RTXPT_MATERIAL_PERMUTATIONS_ENABLED", "0" });
+    m_ubershader = std::make_shared<MaterialShaderPermutation>(MaterialShaderPermutation{ .ShaderFilePath = m_relativeShaderSourcePath, .Macros = macros } );
+    m_ubershader->UniqueMaterialName = "Ubershader";
+
+    // now generate per-material permutations (some materials will automatically share same permutation)
+    m_shaderPermutations.clear();
+    m_shaderPermutationTable.clear();
+    for (auto& materialPT : m_materials)
+    {
+        MaterialShaderPermutation variant = materialPT->ComputeShaderPermutation(m_relativeShaderSourcePath);
+        MaterialShaderPermutationKey key(variant);
+        std::shared_ptr<MaterialShaderPermutation> ptVariant;
+        auto findV = m_shaderPermutations.find(variant);
+        if (findV == m_shaderPermutations.end())
+        {
+            ptVariant = std::make_shared<MaterialShaderPermutation>(variant);
+            m_shaderPermutations.insert(std::make_pair(key, ptVariant));
+            ptVariant->IndexInTable = (int)m_shaderPermutationTable.size();
+            m_shaderPermutationTable.push_back(ptVariant);
+        }
+        else
+        {
+            ptVariant = findV->second;
+            assert( ptVariant->Macros == variant.Macros );
+        }
+
+        std::string proposedName = materialPT->UniqueFullName();
+        if (ptVariant->UniqueMaterialName == "" || (ptVariant->UniqueMaterialName.compare(proposedName)>0) )  // keep the "smallest" name out of all - still not deterministic between different scenes but goodenough!
+            ptVariant->UniqueMaterialName = proposedName;
+
+        materialPT->BakedShaderPermutation = ptVariant;
     }
 }
 
@@ -825,6 +941,8 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
         else
             m_textures.insert( std::make_pair(texture.LocalPath.generic_string(), texture) );
     };
+
+    m_uniqueNames.clear(); // must be done before InitializeUniqueDeterministicName
     for (auto& materialPT : m_materials)
     {
         recordTexture(materialPT->BaseTexture);
@@ -832,54 +950,71 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
         recordTexture(materialPT->NormalTexture);
         recordTexture(materialPT->EmissiveTexture);
         recordTexture(materialPT->TransmissionTexture);
+
+        InitializeUniqueDeterministicName(materialPT);
     }
+    BakeShaderPermutations();
 }
 
-void UpdateSubInstanceData(SubInstanceData & ret, const donut::engine::MeshInstance& meshInstance, const donut::engine::MeshGeometry& geometry, uint meshGeometryIndex, const PTMaterial& material)
+// NOTE: this also handles some of the geometry data and mixed geometry&material stuff - it might be a good idea to rethink whether it needs to live outside of material baker
+void UpdateSubInstanceData(SubInstanceData & ret, const std::shared_ptr<ExtendedScene> & scene, const donut::engine::MeshInstance& meshInstance, const donut::engine::MeshGeometry& geometry, uint meshGeometryIndex, const PTMaterial& material)
 {
-    MaterialShadingProperties props = MaterialShadingProperties::Compute(material);
-
-    bool alphaTest = props.AlphaTest;
+    bool alphaTest = material.HasAlphaTest();
 
     // we need alpha texture for alpha testing to work - disable otherwise
     if (alphaTest && (!material.EnableBaseTexture || material.BaseTexture.Loaded == nullptr))
         alphaTest = false;
 
-    bool hasTransmission = props.HasTransmission;
-    bool notMiss = true; // because miss defaults to 0 :)
-
-    bool hasEmissive = material.IsEmissive();
-    bool noTextures = props.NoTextures;
-    bool hasNonDeltaLobes = !props.OnlyDeltaLobes;
-
-    ret.FlagsAndAlphaCutoff = 0;
 
     float alphaCutoff = 0.0;
 
     const std::shared_ptr<MeshInfo>& mesh = meshInstance.GetMesh();
+    ret.FlagsAndAlphaInfo = 0;
     if (alphaTest)
     {
-        ret.FlagsAndAlphaCutoff |= SubInstanceData::Flags_AlphaTested;
+        ret.FlagsAndAlphaInfo |= SubInstanceData::Flags_AlphaTested;
 
         assert(mesh->buffers->hasAttribute(VertexAttribute::TexCoord1));
         assert(material.EnableBaseTexture && material.BaseTexture.Loaded != nullptr); // disable alpha testing if this happens to be possible
-        ret.AlphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
         // ret.AlphaCutoff = material.alphaCutoff;
         alphaCutoff = material.AlphaCutoff;
+
+        uint alphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
+        assert(alphaTextureIndex < 0xFFFF);
+        // ret.AlphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
+
+        ret.FlagsAndAlphaInfo |= alphaTextureIndex & 0xFFFF;
     }
     ret.EmissiveLightMappingOffset = 0xFFFFFFFF;
 
     uint quantizedAlphaCutoff = (uint)(dm::clamp(alphaCutoff, 0.0f, 1.0f) * 255.0f + 0.5f); assert(quantizedAlphaCutoff < 256);
-    ret.FlagsAndAlphaCutoff |= (quantizedAlphaCutoff << SubInstanceData::Flags_AlphaOffsetOffset);
+    ret.FlagsAndAlphaInfo |= (quantizedAlphaCutoff << SubInstanceData::Flags_AlphaOffsetOffset);
 
     if (material.ExcludeFromNEE)
-        ret.FlagsAndAlphaCutoff |= SubInstanceData::Flags_ExcludeFromNEE;
+        ret.FlagsAndAlphaInfo |= SubInstanceData::Flags_ExcludeFromNEE;
 
     uint globalGeometryIndex = mesh->geometries[0]->globalGeometryIndex + meshGeometryIndex;
     uint globalMaterialIndex = material.GPUDataIndex;
     ret.GlobalGeometryIndex_PTMaterialDataIndex = (globalGeometryIndex << 16) | globalMaterialIndex;
-}
 
+#if SUBINSTANCEDATA_EXTENDED
+    GeometryData * gdata = scene->GetGeometryData(geometry);
+    if( gdata != nullptr )
+    {
+        GeometryData & geometryData = *gdata;
+        assert( geometryData.indexBufferIndex < 0xFFFF );
+        assert( geometryData.vertexBufferIndex < 0xFFFF );
+        ret.IndexBufferIndex_VertexBufferIndex = (geometryData.indexBufferIndex << 16) | geometryData.vertexBufferIndex;
+        ret.IndexOffset = geometryData.indexOffset;
+        ret.TexCoord1Offset = geometryData.texCoord1Offset;
+    }
+    else
+    {
+        assert( false );
+    }
+#endif
+
+}
 
 void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<ExtendedScene>& scene, std::vector<SubInstanceData>& subInstanceData)
 {
@@ -910,6 +1045,7 @@ void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_
         m_materialDataWasReset = false;
     }
 
+    // NOTE: this also handles some of the geometry data and mixed geometry&material stuff - it might be a good idea to rethink whether it needs to live outside of material baker
     uint subInstanceIndex = 0;
     const auto& instances = scene->GetSceneGraph()->GetMeshInstances();
     for (const auto& instance : instances)
@@ -920,10 +1056,10 @@ void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_
         {
             const auto& geometry = mesh->geometries[geometryIndex];
             assert( geometry->material != nullptr && "No handling for null materials!" );
-            std::shared_ptr<PTMaterial> materialPT = PTMaterial::FromDonut(geometry->material);
+            std::shared_ptr<PTMaterial> materialPT = PTMaterial::SafeCast(geometry->material);
             assert(materialPT != nullptr && "Unknown error - should never have happened" );
 
-            UpdateSubInstanceData(subInstanceData[subInstanceIndex], *instance, *geometry, geometryIndex, *materialPT);
+            UpdateSubInstanceData(subInstanceData[subInstanceIndex], scene, *instance, *geometry, geometryIndex, *materialPT);
         }
     }
 }
@@ -1051,6 +1187,7 @@ bool MaterialsBaker::DebugGUI(float indent)
 
     ImGui::Text("Scene material count: %d", (int)m_materials.size());
     ImGui::Text("Material texture use count: %d", (int)m_textures.size());
+    ImGui::Text("Material shader count: %d", (int)m_shaderPermutationTable.size());
 
     // ImGui::Separator();
     // if (ImGui::CollapsingHeader("Debugging", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1087,19 +1224,71 @@ bool MaterialsBaker::DebugGUI(float indent)
     return resetAccumulation;
 }
 
-MaterialShadingProperties MaterialShadingProperties::Compute(const PTMaterial& material)
+MaterialShaderPermutation PTMaterial::ComputeShaderPermutation(const std::string& defaultShaderPath)
 {
-    MaterialShadingProperties props;
-    props.AlphaTest = material.EnableAlphaTesting;
-    props.HasTransmission = material.EnableTransmission;
-    props.NoTransmission = !props.HasTransmission;
-    props.NoTextures = (!material.EnableBaseTexture || material.BaseTexture.Loaded == nullptr)
-        && (!material.EnableEmissiveTexture || material.EmissiveTexture.Loaded == nullptr)
-        && (!material.EnableNormalTexture || material.NormalTexture.Loaded == nullptr)
-        && (!material.EnableOcclusionRoughnessMetallicTexture || material.OcclusionRoughnessMetallicTexture.Loaded == nullptr)
-        && (!material.EnableTransmissionTexture || material.TransmissionTexture.Loaded == nullptr);
-    static const float kMinGGXRoughness = 0.08f; // see BxDF.hlsli, kMinGGXAlpha constant: kMinGGXRoughness must match sqrt(kMinGGXAlpha)!
-    props.OnlyDeltaLobes = ((props.HasTransmission && material.TransmissionFactor == 1.0) || (material.Metalness == 1)) && (material.Roughness < kMinGGXRoughness) && !(material.EnableOcclusionRoughnessMetallicTexture && material.OcclusionRoughnessMetallicTexture.Loaded != nullptr);
-    props.ExcludeFromNEE = material.ExcludeFromNEE;
-    return props;
+    std::vector<donut::engine::ShaderMacro> macros;
+    macros.push_back({ "RTXPT_MATERIAL_PERMUTATIONS_ENABLED", "1" });
+
+    PTMaterialData data; FillData(data);
+
+    // props.AlphaTest = material.EnableAlphaTesting;
+    bool hasTransmission = this->EnableTransmission;
+    bool isEmissive = this->IsEmissive();
+    bool isAnalyticProxy = this->EnableAsAnalyticLightProxy;
+    bool effectiveIsThinSurface = (data.Flags & PTMaterialFlags_ThinSurface) != 0; // this includes non-transmission too which forces thin surface!
+    // props.NoTransmission = !props.HasTransmission;
+    // props.NoTextures = (!material.EnableBaseTexture || material.BaseTexture.Loaded == nullptr)
+    //     && (!material.EnableEmissiveTexture || material.EmissiveTexture.Loaded == nullptr)
+    //     && (!material.EnableNormalTexture || material.NormalTexture.Loaded == nullptr)
+    //     && (!material.EnableOcclusionRoughnessMetallicTexture || material.OcclusionRoughnessMetallicTexture.Loaded == nullptr)
+    //     && (!material.EnableTransmissionTexture || material.TransmissionTexture.Loaded == nullptr);
+    
+    // macros.push_back( {"RTXPT_MATERIAL_EXCLUDE_FROM_NEE",   ExcludeFromNEE?"1":"0" } );
+
+
+    // //why is it slower with this instead of faster?
+    // macros.push_back( {"RTXPT_MATERIAL_USE_NORMAL_TEXTURE", ((data.Flags & PTMaterialFlags_UseNormalTexture) != 0)?"1":"0" } );
+
+    // there's something wrong here
+    // static const float kMinGGXRoughness = 0.08f; // see BxDF.hlsli, kMinGGXAlpha constant: kMinGGXRoughness must match sqrt(kMinGGXAlpha)!
+    // bool onlyDeltaLobes = ((hasTransmission && this->TransmissionFactor == 1.0) || (this->Metalness == 1)) && (this->Roughness < kMinGGXRoughness) && (data.Flags & PTMaterialFlags_UseMetalRoughOrSpecularTexture) == 0;
+    // macros.push_back({ "RTXPT_MATERIAL_ONLY_DELTA_LOBES", onlyDeltaLobes ? "1" : "0" });
+
+#if 0 // more variants, more divergence - perf impact is largely scene dependent, sometimes it's better to specialize and sometimes not
+    macros.push_back({ "RTXPT_MATERIAL_THIN_SURFACE", effectiveIsThinSurface ? "1" : "0" });
+
+    macros.push_back({ "RTXPT_MATERIAL_HAS_TRANSMISSION", EnableTransmission ? "1" : "0" });
+#endif
+
+#if 0
+    macros.push_back({ "RTXPT_MATERIAL_IS_EMISSIVE", isEmissive ? "1" : "0" });
+    macros.push_back({ "RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY", isAnalyticProxy ? "1" : "0" });
+#else // bunch them together and only use them disable emissive & analytic paths together
+    if (!isEmissive && !isAnalyticProxy)
+    {
+        macros.push_back({ "RTXPT_MATERIAL_IS_EMISSIVE", "0" });
+        macros.push_back({ "RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY", "0" });
+    }
+#endif 
+
+#if 0 // NUCLEAR OPTION: make every material have its own shader - can be useful for tracking down weird perf issues
+    macros.push_back({ "RTXPT_MATERIAL_UNIQUE_NAME", this->UniqueFullName() });
+#endif
+
+    // next:
+    //     - RTXPT_MATERIAL_NO_ANALYTIC_LIGHT_PROXY
+    //     - RTXPT_MATERIAL_NO_EMISSIVE             : - no need for emissive MIS code at all and a bunch of that stuff
+    //     - thin surface
+
+
+    return MaterialShaderPermutation{ .ShaderFilePath = defaultShaderPath, /*.ClosestHitName = "ClosestHit", .AnyHitName = "AnyHit",*/ .Macros = macros };
+}
+
+std::shared_ptr<PTMaterial> MaterialsBaker::FindByUniqueID(const std::string & name)
+{
+    for( int i = 0; i < m_materials.size(); i++)
+        if (EqualsIgnoreCase(name, m_materials[i]->UniqueFullName()))
+            return m_materials[i];
+
+    return nullptr;
 }

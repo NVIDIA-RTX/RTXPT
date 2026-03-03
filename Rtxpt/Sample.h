@@ -11,15 +11,16 @@
 #pragma once
 
 #include "Shaders/PathTracer/Config.h"
-#include "SampleCommon.h"
+#include "SampleCommon/SampleCommon.h"
 
-#include "Misc/CommandLine.h"
+#include "SampleCommon/CommandLine.h"
 #include "SampleUI.h"
 
 #include <donut/app/ApplicationBase.h>
 #include <donut/core/vfs/VFS.h>
 #include <donut/render/BloomPass.h>
 #include <donut/app/Camera.h>
+#include <donut/engine/CommonRenderPasses.h>
 
 #include "RTXDI/RtxdiPass.h"
 #include "NRD/NrdIntegration.h"
@@ -28,18 +29,23 @@
 #include <donut/app/StreamlineInterface.h>
 #endif
 
-#include "RenderTargets.h"
-#include "PostProcess.h"
+#include "SampleCommon/RenderTargets.h"
+#include "ProcessingPasses/PostProcess.h"
 #include "Shaders/SampleConstantBuffer.h"
-#include "AccumulationPass.h"
-#include "ExtendedScene.h"
+#include "ProcessingPasses/AccumulationPass.h"
+#include "SampleCommon/ExtendedScene.h"
 
 #include "Lighting/Distant/EnvMapBaker.h"
 #include "Lighting/LightsBaker.h"
 
-#include "ShaderDebug.h"
+#include "Misc/ShaderDebug.h"
 
 #include <map>
+
+class DenoisingGuidesBaker;
+class CaptureScriptManager;
+class ComputePipelineBaker;
+class ComputeShaderVariant;
 
 class Sample : public donut::app::ApplicationBase
 {
@@ -48,11 +54,13 @@ class Sample : public donut::app::ApplicationBase
 public:
     using ApplicationBase::ApplicationBase;
 
-    Sample(donut::app::DeviceManager* deviceManager, CommandLineOptions& cmdLine, SampleUIData& ui);
+    Sample(donut::app::DeviceManager& deviceManager,
+        const CommandLineOptions& cmdLine);
     virtual ~Sample();
 
     //std::shared_ptr<donut::vfs::IFileSystem> GetRootFs() const                      { return m_RootFS; }
     std::shared_ptr<donut::engine::ShaderFactory> GetShaderFactory() const          { return m_shaderFactory; }
+    std::shared_ptr<donut::engine::CommonRenderPasses> GetCommonPasses() const      { return m_CommonPasses; }
     std::shared_ptr<donut::engine::Scene>   GetScene() const                        { return m_scene; }
     std::vector<std::string> const &        GetAvailableScenes() const              { return m_sceneFilesAvailable; }
     std::string                             GetCurrentSceneName() const             { return m_currentSceneName; }
@@ -71,15 +79,17 @@ public:
     
     void                                    CollectUncompressedTextures();
     auto &                                  GetUncompressedTextures()               { return m_uncompressedTextures; }
-    void                                    SaveCurrentCamera();
+    void                                    SaveCurrentCamera() const;
     void                                    LoadCurrentCamera();
+    std::string                             GetCurrentCameraPosDirUp() const;
+    bool                                    SetCurrentCameraPosDirUp(const std::string & val);
 
     float                                   GetCameraVerticalFOV() const            { return m_cameraVerticalFOV; }
     void                                    SetCameraVerticalFOV(float cameraFOV)   { m_cameraVerticalFOV = cameraFOV; }
 
     float                                   GetAvgTimePerFrame() const;
 
-    bool                                    Init(const std::string& preferredScene);
+    void                                    Init(const std::string& preferredScene, const std::shared_ptr<donut::engine::ShaderFactory>& shaderFactory);
     void                                    SetCurrentScene(const std::string& sceneName, bool forceReload = false);
 
     virtual void                            SceneUnloading() override;
@@ -110,9 +120,17 @@ public:
     void                                    UpdatePathTracerConstants( PathTracerConstants & constants, const PathTracerCameraData & cameraData );
     void                                    RtxdiSetupFrame(nvrhi::IFramebuffer* framebuffer, PathTracerCameraData cameraData, uint2 renderDims);
 
+    // Extendable sample interface
+    virtual bool                            NeedsIntroPathTracerBuffers() { return false; } // TODO: do this in a nicer way, no time now
+    virtual bool                            NeedsRasterPrecompute() { return false; } // TODO: do this in a nicer way, no time now
+    virtual void                            SampleRenderCode(nvrhi::IFramebuffer* framebuffer, nvrhi::CommandListHandle commandList, const SampleConstants& constants) = 0; // TODO: Rename this
+    virtual void                            CreateRTPipelines() = 0;
+    virtual void                            DestroyRTPipelines() = 0;
+    virtual std::string                     GetMaterialSpecializationShader() const = 0;
+
     void                                    Denoise(nvrhi::IFramebuffer* framebuffer);
     void                                    PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants & constants);
-    void                                    PreRenderScripts();
+    void                                    PreRender();
     void                                    StreamlinePreRender();
     void                                    Render(nvrhi::IFramebuffer* framebuffer) override;
     void                                    PostProcessAA(nvrhi::IFramebuffer* framebuffer, bool reset);
@@ -129,7 +147,8 @@ public:
     const donut::app::FirstPersonCamera &   GetCurrentCamera( ) const { return m_camera; }
     const auto &                            GetCurrentView( ) const { return m_view; }
 
-    void                                    ResetSceneTime( );
+    void                                    SetSceneTime( double sceneTime );
+    double                                  GetSceneTime( );
 
     bool                                    IsEnvMapLoaded() const      { return true; } // with the new EnvMapBaker it's always present (just black)
     const std::string &                     GetEnvMapLocalPath()        { return m_envMapLocalPath; }
@@ -142,6 +161,7 @@ public:
     const std::shared_ptr<MaterialsBaker> & GetMaterialsBaker() const { return m_materialsBaker; }
     const std::shared_ptr<class OmmBaker> & GetOMMBaker() const { return m_ommBaker; }
     const std::unique_ptr<class ZoomTool> & GetZoomTool() const { return m_zoomTool; }
+    donut::engine::BindingCache &           GetBindingCache() { return *m_bindingCache; }
 
     GLFWwindow *                            GetGLFWWindow() const { return GetDeviceManager()->GetWindow(); }
 
@@ -149,6 +169,50 @@ public:
 
     uint2                                   GetRenderSize() const               { return m_renderSize;  } // native render resolution
     uint2                                   GetDisplaySize() const              { return m_displaySize; } // final output resolution
+
+    const std::unique_ptr<CaptureScriptManager> & GetCaptureScriptManager() const { return m_captureScriptManager; }
+
+    bool                                    HasAsyncLoadingInProgress() const   { return m_asyncLoadingInProgress || m_ui.ShaderAndACRefreshDelayedRequest > 0; }
+
+    bool                                    AccumulationCompleted() const       { return m_accumulationCompleted; }
+
+protected:
+    // Called when render targets have been recreated (e.g. after window resize)
+    virtual void OnRenderTargetsRecreated() { }
+
+    // Called during binding set creation to allow derived classes to add custom bindings
+    // The reflection texture slots (t80-t83, b3) have null placeholders by default
+    virtual void AddCustomBindings(nvrhi::BindingSetDesc& bindingSetDesc) { }
+    
+    // Invalidates the binding set, forcing recreation on next frame
+    // Call this from derived classes when custom bindings need to be updated
+    void InvalidateBindingSet() { m_bindingSet = nullptr; }
+    void RecreateBindingSet();
+    
+    // all UI-tweakable settings are here
+    SampleUIData& m_ui;
+    std::unique_ptr<RtxdiPass>                  m_rtxdiPass;
+    std::unique_ptr<RenderTargets>              m_renderTargets;
+    nvrhi::BindingLayoutHandle                  m_bindingLayout;
+    nvrhi::BindingLayoutHandle                  m_bindlessLayout;
+    nvrhi::BindingSetHandle                     m_bindingSet;
+
+    std::shared_ptr<donut::engine::DescriptorTableManager> m_DescriptorTable;
+
+    // QoL accessors for derived samples
+    const donut::engine::PlanarView& GetView() const { return *m_view; }
+    std::shared_ptr<class PTPipelineBaker>  GetRTPipelineBaker() const { return m_ptPipelineBaker; }
+    std::shared_ptr<ComputePipelineBaker>   GetComputePipelineBaker() const { return m_computePipelineBaker; }
+
+    // TODO: These are specific to the advanced sample. Should move them there
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineReference;
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineBuildStablePlanes;
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineFillStablePlanes;
+
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineTestRaygenPPHDR;
+    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineEdgeDetection;
+
+    std::unique_ptr<CaptureScriptManager>       m_captureScriptManager;
 
 private:
     void                                    UpdateCameraFromScene( const std::shared_ptr<donut::engine::PerspectiveCamera> & sceneCamera );
@@ -171,17 +235,13 @@ private:
 
     // device setup
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
-    std::shared_ptr<donut::engine::DescriptorTableManager> m_DescriptorTable;
+    std::shared_ptr<donut::engine::CommonRenderPasses> m_CommonPasses;
     std::unique_ptr<donut::engine::BindingCache> m_bindingCache;
     nvrhi::CommandListHandle                    m_commandList;
-    nvrhi::BindingLayoutHandle                  m_bindingLayout;
-    nvrhi::BindingSetHandle                     m_bindingSet;
-    nvrhi::BindingLayoutHandle                  m_bindlessLayout;
 
     std::unique_ptr<donut::render::TemporalAntiAliasingPass> m_temporalAntiAliasingPass;
 
     // rendering
-    std::unique_ptr<RenderTargets>              m_renderTargets;
     std::vector <std::shared_ptr<donut::engine::Light>> m_lights;
     std::unique_ptr<donut::render::BloomPass>   m_bloomPass;
     std::unique_ptr<ToneMappingPass>            m_toneMappingPass;
@@ -205,14 +265,7 @@ private:
     std::shared_ptr<class MaterialsBaker>       m_materialsBaker;
     std::shared_ptr<class OmmBaker>             m_ommBaker;
     std::shared_ptr<class PTPipelineBaker>      m_ptPipelineBaker;
-
-    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineReference;
-    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineBuildStablePlanes;
-    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineFillStablePlanes;
-    
-    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineTestRaygenPPHDR;
-    std::shared_ptr<class PTPipelineVariant>    m_ptPipelineEdgeDetection;
-
+    std::shared_ptr<ComputePipelineBaker>       m_computePipelineBaker;
 
     // utility
     std::shared_ptr<class GPUSort>              m_gpuSort;
@@ -261,11 +314,8 @@ private:
     nvrhi::BufferHandle                         m_debugDeltaPathTree_Cpu;
     nvrhi::BufferHandle                         m_debugDeltaPathTreeSearchStack;
 
-    // all UI-tweakable settings are here
-    SampleUIData& m_ui;
-
     // The command line settings are here
-    CommandLineOptions                          m_cmdLine;
+    const CommandLineOptions&                   m_cmdLine;
 
     // path tracing
     int                                         m_accumulationSampleIndex = 0;  // accumulated so far in the past, so if 0 this is the first.
@@ -275,9 +325,10 @@ private:
     SampleConstants                             m_currentConstants = {};
 
     std::unique_ptr<NrdIntegration>             m_nrd[cStablePlaneCount];       // reminder: when switching between ReLAX/ReBLUR, change settings, reset these to 0 and they'll get re-created in CreateRenderPasses!
-    std::unique_ptr<RtxdiPass>                  m_rtxdiPass;
     std::unique_ptr<AccumulationPass>           m_accumulationPass;
     std::shared_ptr<ShaderDebug>                m_shaderDebug;
+
+    std::shared_ptr<DenoisingGuidesBaker>       m_denoisingGuidesBaker;
 
     nvrhi::ShaderHandle                         m_exportVBufferCS;
     nvrhi::ComputePipelineHandle                m_exportVBufferPSO;
@@ -296,13 +347,14 @@ private:
     std::string                                 m_fpsInfo;
     bool                                        m_windowIsInFocus = true;
 
-    std::unique_ptr<class GameScene>           m_sampleGame;
+    std::unique_ptr<class GameScene>            m_sampleGame;
 
     ProgressBar                                 m_progressLoading;
     ProgressBar                                 m_progressInitializingRenderer;
 
     std::unique_ptr<class ZoomTool>             m_zoomTool;
 
-
+    bool                                        m_asyncLoadingInProgress = false;
+    bool                                        m_accumulationCompleted = false;
 };
 

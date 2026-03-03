@@ -17,7 +17,7 @@
 #include <donut/app/Camera.h>
 #include <cmath>
 
-#include "../ExtendedScene.h"
+#include "../SampleCommon/ExtendedScene.h"
 
 #include "../Misc/Korgi.h"
 

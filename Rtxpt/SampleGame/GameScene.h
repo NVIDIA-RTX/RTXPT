@@ -11,10 +11,8 @@
 #pragma once
 
 #include "../Shaders/PathTracer/Config.h"
-#include "../SampleCommon.h"
-#include "../SampleUI.h"
+//#include "../SampleUI.h"
 
-// #include <donut/core/vfs/VFS.h>
 #include <donut/app/Camera.h>
 
 #include "GameModel.h"
@@ -28,7 +26,7 @@
 class GameScene
 {
 public:
-    GameScene(class Sample & sample);
+    GameScene(class Sample & sample, const CommandLineOptions& cmdLine);
 
     void                    SceneLoaded( const std::shared_ptr<class ExtendedScene> & scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path & mediaPath );
     void                    SceneUnloading( );
@@ -70,6 +68,7 @@ public:
 
     const std::vector<game::Pose> & GetCamRecAnimation() const { return m_recordedCameraPoses; }
 
+    const CommandLineOptions & GetCmdLine() const           { return m_cmdLine; }
 
 private:
     std::shared_ptr<game::PropBase> CreatePropFromFile(const std::string& name, const std::filesystem::path& storagePath, const Json::Value& jsonRoot);
@@ -115,5 +114,7 @@ private:
     float3                          m_sceneCameraLastPos;
     float3                          m_sceneCameraLastDir;
     float3                          m_sceneCameraLastUp;
+
+    const CommandLineOptions &      m_cmdLine;
 };
 

@@ -17,6 +17,14 @@
 // TODO: remove these from here and include directly, only where needed
 #include "Packing.hlsli"
 
+// PTPipelineBaker will assign names to entry points to add more info for debugging/profiling - see BAKER_ENABLE_VERBOSE_FUNCTION_NAMING to disable and make naming uniform
+#define ENTRY_NAME_CONCAT(a, b) a##b
+#define ENTRY_NAME(a, b)    ENTRY_NAME_CONCAT(a, b)
+#define RAYGEN_ENTRY        ENTRY_NAME(RayGen_,RTXPT_PIPELINE_PERMUTATION_NAME)
+#define MISS_ENTRY          ENTRY_NAME(Miss_,RTXPT_PIPELINE_PERMUTATION_NAME)
+#define CLOSESTHIT_ENTRY    ENTRY_NAME(ClosestHit_,RTXPT_MATERIAL_PERMUTATION_NAME)
+#define ANYHIT_ENTRY        ENTRY_NAME(AnyHit_,RTXPT_MATERIAL_PERMUTATION_NAME)
+
 #if (RTXPT_LP_TYPES_USE_16BIT_PRECISION != 0)
     typedef float16_t       lpfloat; 
     typedef float16_t2      lpfloat2;
@@ -74,6 +82,13 @@ float3 Reinhard(float3 color)
     return color * (reinhard / luminance);
 }
 
+float3 ReinhardMax(float3 color)
+{
+    float luminance = max( 1e-7, max(max(color.x, color.y), color.z) ); // instead of luminance, use max - this ensures output is always [0, 1]
+    float reinhard = luminance / (luminance + 1);
+    return color * (reinhard / luminance);
+}
+
 // used for debugging, from https://www.shadertoy.com/view/llKGWG - Heat map, Created by joshliebe in 2016-Oct-15
 float3 GradientHeatMap( float greyValue )
 {
@@ -93,7 +108,7 @@ float3 GradientHeatMap( float greyValue )
 
 float3 ColorFromHash( uint hash )
 {
-    return Unpack_R11G11B10_FLOAT(hash);
+    return saturate(Unpack_R11G11B10_FLOAT(hash));
 }
 
 // *************************************************************************************************************************************

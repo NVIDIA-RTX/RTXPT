@@ -21,8 +21,8 @@
 
 using namespace donut::math;
 
-#include "../../Shaders/PathTracer/Lighting/LightingTypes.h"
-
+#include "../../Shaders/PathTracer/Lighting/LightingTypes.hlsli"
+#include "../../Shaders/PathTracer/Lighting/EnvMap.hlsli"
 #include "EnvMapImportanceSamplingBaker.hlsl"
 
 namespace donut::engine
@@ -51,7 +51,7 @@ class EnvMapImportanceSamplingBaker
 public:
 
 public:
-    EnvMapImportanceSamplingBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses );
+    EnvMapImportanceSamplingBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory );
     ~EnvMapImportanceSamplingBaker();
 
     void                            CreateRenderPasses();
@@ -83,11 +83,7 @@ private:
 
 private:
     nvrhi::DeviceHandle             m_device;
-    std::shared_ptr<donut::engine::TextureCache> m_textureCache;
-    std::shared_ptr<donut::engine::CommonRenderPasses> m_commonPasses;
-    std::shared_ptr<donut::engine::FramebufferFactory> m_framebufferFactory;
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
-    donut::engine::BindingCache     m_bindingCache;
 
     nvrhi::SamplerHandle            m_pointClampSampler;
     nvrhi::SamplerHandle            m_linearWrapSampler;

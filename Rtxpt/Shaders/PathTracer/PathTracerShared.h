@@ -9,7 +9,7 @@
 */
 
 #include "Config.h"
-#include "Lighting/LightingTypes.h"
+#include "Lighting/LightingTypes.hlsli"
 
 #ifndef __PATH_TRACER_SHARED_H__
 #define __PATH_TRACER_SHARED_H__
@@ -70,9 +70,9 @@ struct PathTracerConstants
     float   stablePlanesSuppressPrimaryIndirectSpecularK;
 
     float   denoiserRadianceClampK;
-    uint    _padding0;
+    float   DLSSRRBrightnessClampK;
     float   stablePlanesAntiAliasingFallthrough;
-    uint    activeStablePlaneCount;
+    uint    _activeStablePlaneCount;
 
     uint    maxStablePlaneVertexDepth;
     uint    allowPrimarySurfaceReplacement;
@@ -91,7 +91,19 @@ struct PathTracerConstants
 
     PathTracerCameraData camera;
     PathTracerCameraData prevCamera;
+
+
+    uint    GetActiveStablePlaneCount()
+    {
+#if defined(RTXPT_ACTIVE_STABLE_PLANE_COUNT)
+        return RTXPT_ACTIVE_STABLE_PLANE_COUNT;
+#else
+        return _activeStablePlaneCount;
+#endif
+    }
 };
+
+
 
 #ifdef __cplusplus
 inline PathTracerCameraData BridgeCamera( uint viewportWidth, uint viewportHeight, float aspectRatio, float3 camPos, float3 camDir, float3 camUp, float fovY, float nearZ, float farZ, 

@@ -57,31 +57,14 @@
 // Note: this will turn 0 into 0! if that's a problem do Hash32( x+constant ) - HashCombine does something similar already
 inline uint Hash32( uint x )
 {
-// This little gem is from https://nullprogram.com/blog/2018/07/31/, "Prospecting for Hash Functions" by Chris Wellons
-// There's also the inverse for the lowbias32, and a 64bit version.
-// exact bias: 0.17353355999581582
-// uint32_t lowbias32(uint32_t x)
+    // This little gem is from https://nullprogram.com/blog/2018/07/31/, "Prospecting for Hash Functions" by Chris Wellons
+    // Latest update: https://github.com/skeeto/hash-prospector/issues/19
+    // score: 0.10734781817103507
     x ^= x >> 16;
-    x *= 0x7feb352du;
+    x *= 0x21f0aaad;
     x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-//
-inline uint Hash32Better( uint x )
-{
-// This little gem is from https://nullprogram.com/blog/2018/07/31/, "Prospecting for Hash Functions" by Chris Wellons
-// slower, lower bias
-// exact bias: 0.020888578919738908
-// uint32_t triple32(uint32_t x)
-    x ^= x >> 17;
-    x *= uint(0xed5ad4bb);
-    x ^= x >> 11;
-    x *= uint(0xac4c1b51);
+    x *= 0xf35a2d97;
     x ^= x >> 15;
-    x *= uint(0x31848bab);
-    x ^= x >> 14;
     return x;
 }
 // popular hash_combine (boost, etc.)

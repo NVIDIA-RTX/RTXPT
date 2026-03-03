@@ -18,7 +18,7 @@
 
 #include <donut/app/imgui_renderer.h>
 
-#include "../../SampleCommon.h"
+#include "../../SampleCommon/SampleCommon.h"
 
 using namespace donut;
 using namespace donut::math;
@@ -123,7 +123,7 @@ bool SampleProceduralSky::Update( double sceneTime, ProceduralSkyConstants & out
         }
         assert( timeOfDayTarget != -FLT_MAX );
 
-        float lerpK = TimeIndependentLerpF(deltaTime, 0.5f);
+        float lerpK = TimeIndependentLerpF(deltaTime, 0.1f);
 
         if (forceInstantUpdate)
             lerpK = 1.0f;

@@ -30,6 +30,19 @@
 #include "Bindings/LightingBindings.hlsli"
 #include "Bindings/SamplerBindings.hlsli"
 
+#include "Libraries\MicroRng.hlsli"
+
+
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // build
+#if PT_USE_RESTIR_GI || PT_USE_RESTIR_DI
+#define EXPORT_GBUFFER 1
+#endif
+#endif
+
+#if EXPORT_GBUFFER
+#include "Misc/GBufferHelpers.hlsli"
+#endif
+
 enum DonutGeometryAttributes
 {
     GeomAttr_Position       = 0x01,
@@ -44,7 +57,11 @@ enum DonutGeometryAttributes
 struct DonutGeometrySample
 {
     InstanceData instance;
+
+    // this should be removed
     GeometryData geometry;
+
+    // this should be under a macro
     GeometryDebugData geometryDebug;
 
     float3 vertexPositions[3];      //< object space vertex positions, for world pos do "mul(instance.transform, float4(positions[0], 1)).xyz"
@@ -58,6 +75,7 @@ struct DonutGeometrySample
     float3 geometryNormal;
     float4 tangent;
     bool frontFacing;
+    float curvatureWS;                //< rough, approx world space relative curvature metric
 };
 
 float3 SafeNormalize(float3 input)
@@ -69,6 +87,66 @@ float3 SafeNormalize(float3 input)
 float3 FlipIfOpposite(float3 normal, float3 referenceNormal)
 {
     return (dot(normal, referenceNormal)>=0)?(normal):(-normal);
+}
+
+// Returns a rough curvature proxy for a single triangle, in ~1/length units.
+// Based on fitting a linear normal field over the triangle in a local 2D basis.
+// Inputs:
+//   vertexPositions[3] : triangle positions in the same space/units you care about (world or object).
+//   vertexNormals[3]   : per-vertex normals (need not be normalized; we normalize them).
+//
+// Output:
+//   curvature : higher => normals vary rapidly over short distances (more "curved").
+//
+// Notes:
+// - Degenerate triangles return 0.
+// - If your vertex normals are not consistently oriented / smoothed, curvature will be noisy by design.
+float TriangleCurvatureApprox_GradN(float3 vertexPositions[3], float3 vertexNormals[3], float3x4 transform)
+{
+    const float eps = 1e-8f;
+
+    // Build orthonormal basis on the triangle plane.
+    float3 e10 = mul((float3x3)transform, vertexPositions[1] - vertexPositions[0]);
+    float  e10Len = length(e10);
+    if (e10Len < eps)
+    {
+        return 0.0f;
+    }
+
+    float3 e1 = e10 / e10Len;
+
+    float3 e20 = mul((float3x3)transform, vertexPositions[2] - vertexPositions[0]);
+    float  u2  = dot(e20, e1);
+
+    float3 t   = e20 - e1 * u2;
+    float  tLen = length(t);
+    if (tLen < eps)
+    {
+        // Nearly colinear triangle; no stable 2D basis.
+        return 0.0f;
+    }
+
+    float3 e2 = t / tLen;
+
+    // 2D coordinates in this basis:
+    // p1 is at (u1, v1) = (e10Len, 0)
+    float u1 = e10Len;
+    float v2 = dot(e20, e2); // should be ~= tLen (signed)
+
+    // Fit N(u,v) = n0 + a*u + b*v.
+    float3 dn1 = vertexNormals[1] - vertexNormals[0];
+    float3 dn2 = vertexNormals[2] - vertexNormals[0];
+
+    // a = dN/du
+    float3 a = dn1 / max(u1, eps);
+
+    // b = dN/dv
+    float denomV = abs(v2) < eps ? (v2 >= 0.0f ? eps : -eps) : v2;
+    float3 b = (dn2 - a * u2) / denomV;
+
+    // Scalar curvature proxy: RMS magnitude of the normal gradient. // Units: 1 / position_units.
+    float curvature = sqrt(dot(a, a) + dot(b, b));
+    return curvature;
 }
 
 DonutGeometrySample getGeometryFromHit(
@@ -128,26 +206,34 @@ DonutGeometrySample getGeometryFromHit(
         gs.texcoord = interpolate(gs.vertexTexcoords, barycentrics);
     }
 
-    float3 objectSpaceFlatNormal = SafeNormalize(cross(
-        gs.vertexPositions[1] - gs.vertexPositions[0],
-        gs.vertexPositions[2] - gs.vertexPositions[0]));
+
+    float3 vBA = gs.vertexPositions[1] - gs.vertexPositions[0];
+    float3 vCA = gs.vertexPositions[2] - gs.vertexPositions[0];
+
+    float3 objectSpaceFlatNormal = SafeNormalize(cross(vBA, vCA));
+
 
     if ((attributes & GeomAttr_Normal) && gs.geometry.normalOffset != ~0u)
     {
         float3 normals[3];
-        normals[0] = Unpack_RGB8_SNORM(vertexBuffer.Load(gs.geometry.normalOffset + indices[0] * c_SizeOfNormal));
-        normals[1] = Unpack_RGB8_SNORM(vertexBuffer.Load(gs.geometry.normalOffset + indices[1] * c_SizeOfNormal));
-        normals[2] = Unpack_RGB8_SNORM(vertexBuffer.Load(gs.geometry.normalOffset + indices[2] * c_SizeOfNormal));
+        normals[0] = normalize(Unpack_RGB8_SNORM(vertexBuffer.Load(gs.geometry.normalOffset + indices[0] * c_SizeOfNormal)));
+        normals[1] = normalize(Unpack_RGB8_SNORM(vertexBuffer.Load(gs.geometry.normalOffset + indices[1] * c_SizeOfNormal)));
+        normals[2] = normalize(Unpack_RGB8_SNORM(vertexBuffer.Load(gs.geometry.normalOffset + indices[2] * c_SizeOfNormal)));
 
 		// we want the geometry normal to be on the same hemisphere as the triangle normal (should be guaranteed on tools side, but isn't always)
         normals[0] = FlipIfOpposite(normals[0], objectSpaceFlatNormal);
         normals[1] = FlipIfOpposite(normals[1], objectSpaceFlatNormal);
         normals[2] = FlipIfOpposite(normals[2], objectSpaceFlatNormal);
 
+        gs.curvatureWS = TriangleCurvatureApprox_GradN(gs.vertexPositions, normals, gs.instance.transform);
+
         gs.geometryNormal = interpolate(normals, barycentrics);
+
         gs.geometryNormal = mul(gs.instance.transform, float4(gs.geometryNormal, 0.0)).xyz;
         gs.geometryNormal = SafeNormalize(gs.geometryNormal);
     }
+    else
+        gs.curvatureWS = 0;
 
     if ((attributes & GeomAttr_Tangents) && gs.geometry.tangentOffset != ~0u)
     {
@@ -257,7 +343,7 @@ MaterialProperties EvaluateSceneMaterialRTXPT(float3 normal, float4 tangent, PTM
 
         // Compute the BRDF inputs for the metal-rough model
         // https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#metal-brdf-and-dielectric-brdf
-        result.diffuseAlbedo = lpfloat3( lerp(result.baseColor * (1.0 - c_DielectricSpecular), 0.0, result.metalness) );
+        result.diffuseAlbedo = result.baseColor * (1.0 - result.metalness); // Don't compensate for specular energy here. Energy compensation is built into Frostbite's diffuse, so this would be double dipping.
         result.specularF0 = lpfloat3( lerp(c_DielectricSpecular, result.baseColor.rgb, result.metalness) );
     }
 
@@ -275,6 +361,7 @@ MaterialProperties EvaluateSceneMaterialRTXPT(float3 normal, float4 tangent, PTM
         result.opacity *= lpfloat( textures.baseOrDiffuse.a );
     result.opacity = saturate(result.opacity);
 
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
     result.transmission = lpfloat( material.TransmissionFactor );
     result.diffuseTransmission = lpfloat( material.DiffuseTransmissionFactor );
     if ((material.Flags & PTMaterialFlags_UseTransmissionTexture) != 0)
@@ -282,6 +369,7 @@ MaterialProperties EvaluateSceneMaterialRTXPT(float3 normal, float4 tangent, PTM
         result.transmission *= lpfloat( textures.transmission.r );
         result.diffuseTransmission *= lpfloat( textures.transmission.r );
     }
+#endif
     
     result.emissiveColor = lpfloat3( material.EmissiveColor );
     if ((material.Flags & PTMaterialFlags_UseEmissiveTexture) != 0)
@@ -291,19 +379,25 @@ MaterialProperties EvaluateSceneMaterialRTXPT(float3 normal, float4 tangent, PTM
     
     result.shadowNoLFadeout = lpfloat( material.ShadowNoLFadeout );
     
-    if ((material.Flags & PTMaterialFlags_UseNormalTexture) != 0)
-        ApplyNormalMapRTXPT(result, tangent, textures.normal, material.NormalTextureScale);  // there's an incorrect "error X3508: 'ApplyNormalMap': output parameter 'result' not completely initialized" if this line happens before result is fully initialized
+    #if defined(RTXPT_MATERIAL_USE_NORMAL_TEXTURE)
+        #if RTXPT_MATERIAL_USE_NORMAL_TEXTURE
+            ApplyNormalMapRTXPT(result, tangent, textures.normal, material.NormalTextureScale);  // there's an incorrect "error X3508: 'ApplyNormalMap': output parameter 'result' not completely initialized" if this line happens before result is fully initialized
+        #endif
+    #else
+        if ((material.Flags & PTMaterialFlags_UseNormalTexture) != 0)
+            ApplyNormalMapRTXPT(result, tangent, textures.normal, material.NormalTextureScale);  // there's an incorrect "error X3508: 'ApplyNormalMap': output parameter 'result' not completely initialized" if this line happens before result is fully initialized
+    #endif
 
     return result;
 }
 
-MaterialProperties sampleGeometryMaterialRTXPT(uniform PathTracer::OptimizationHints optimizationHints, const DonutGeometrySample gs, uint materialIndex, const MaterialAttributes attributes, const SamplerState materialSampler, const ActiveTextureSampler textureSampler)
+MaterialProperties sampleGeometryMaterialRTXPT(const DonutGeometrySample gs, uint materialIndex, const MaterialAttributes attributes, const SamplerState materialSampler, const ActiveTextureSampler textureSampler)
 {
     MaterialTextureSample textures = DefaultMaterialTextures();
 
     PTMaterialData material = t_PTMaterialData[materialIndex];
 
-    if( !optimizationHints.NoTextures )
+    //if( !optimizationHints.NoTextures )
     {
         if ((attributes & MatAttr_BaseColor) && (material.Flags & PTMaterialFlags_UseBaseOrDiffuseTexture) != 0)
             textures.baseOrDiffuse = sampleTexture(material.BaseOrDiffuseTextureIndex, materialSampler, textureSampler, gs.texcoord);
@@ -311,23 +405,29 @@ MaterialProperties sampleGeometryMaterialRTXPT(uniform PathTracer::OptimizationH
         if ((attributes & MatAttr_Emissive) && (material.Flags & PTMaterialFlags_UseEmissiveTexture) != 0)
             textures.emissive = sampleTexture(material.EmissiveTextureIndex, materialSampler, textureSampler, gs.texcoord);
     
-        if ((attributes & MatAttr_Normal) && (material.Flags & PTMaterialFlags_UseNormalTexture) != 0)
-            textures.normal = sampleTexture(material.NormalTextureIndex, materialSampler, textureSampler, gs.texcoord);
+        #if defined(RTXPT_MATERIAL_USE_NORMAL_TEXTURE)
+            #if RTXPT_MATERIAL_USE_NORMAL_TEXTURE
+                if (attributes & MatAttr_Normal)
+                    textures.normal = sampleTexture(material.NormalTextureIndex, materialSampler, textureSampler, gs.texcoord);
+            #endif
+        #else
+            if ((attributes & MatAttr_Normal) && (material.Flags & PTMaterialFlags_UseNormalTexture) != 0)
+                textures.normal = sampleTexture(material.NormalTextureIndex, materialSampler, textureSampler, gs.texcoord);
+        #endif
 
         if ((attributes & MatAttr_MetalRough) && (material.Flags & PTMaterialFlags_UseMetalRoughOrSpecularTexture) != 0)
             textures.metalRoughOrSpecular = sampleTexture(material.MetalRoughOrSpecularTextureIndex, materialSampler, textureSampler, gs.texcoord);
 
-        if( !optimizationHints.NoTransmission )
-        {
-            if ((attributes & MatAttr_Transmission) && (material.Flags & PTMaterialFlags_UseTransmissionTexture) != 0)
-                textures.transmission = sampleTexture(material.TransmissionTextureIndex, materialSampler, textureSampler, gs.texcoord);
-        }
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
+        if ((attributes & MatAttr_Transmission) && (material.Flags & PTMaterialFlags_UseTransmissionTexture) != 0)
+            textures.transmission = sampleTexture(material.TransmissionTextureIndex, materialSampler, textureSampler, gs.texcoord);
+#endif
     }
 
     return EvaluateSceneMaterialRTXPT(gs.geometryNormal, gs.tangent, material, textures);
 }
 
-static OpacityMicroMapDebugInfo loadOmmDebugInfo(const DonutGeometrySample donutGS, const uint triangleIndex, const TriangleHit triangleHit)
+static OpacityMicroMapDebugInfo loadOmmDebugInfo(const DonutGeometrySample donutGS, const uint triangleIndex, float2 barycentrics)
 {
     OpacityMicroMapDebugInfo ommDebug = OpacityMicroMapDebugInfo::initDefault();
 
@@ -344,7 +444,7 @@ static OpacityMicroMapDebugInfo loadOmmDebugInfo(const DonutGeometrySample donut
             ommDescArrayBuffer, donutGS.geometryDebug.ommDescArrayBufferOffset,
             ommArrayDataBuffer, donutGS.geometryDebug.ommArrayDataBufferOffset,
             triangleIndex,
-            triangleHit.barycentrics.xy
+            barycentrics
         );
 
         ommDebug.hasOmmAttachment = true;
@@ -355,7 +455,7 @@ static OpacityMicroMapDebugInfo loadOmmDebugInfo(const DonutGeometrySample donut
     return ommDebug;
 }
 
-static void surfaceDebugViz(uint2 pixelPos, const uniform PathTracer::OptimizationHints optimizationHints, const PathTracer::SurfaceData surfaceData, const TriangleHit triangleHit, const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const OpacityMicroMapDebugInfo ommDebug, DebugContext debug)
+static void surfaceDebugViz(uint2 pixelPos, const PathTracer::SurfaceData surfaceData, const float2 barycentrics, const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const OpacityMicroMapDebugInfo ommDebug, uint materialID, DebugContext debug)
 {
 #if ENABLE_DEBUG_VIZUALISATIONS && !NON_PATH_TRACING_PASS && ENABLE_DEBUG_SURFACE_VIZ
     if (g_Const.debug.debugViewType == (int)DebugViewType::Disabled || pathVertexIndex != 1)
@@ -381,21 +481,27 @@ static void surfaceDebugViz(uint2 pixelPos, const uniform PathTracer::Optimizati
     // these work only when ActiveBSDF is StandardBSDF - make an #ifdef if/when this becomes a problem
     StandardBSDFData bsdfData = bsdf.data;
 
+    uint shaderID = 0xFFFFFFFF;
+    #ifdef RTXPT_SHADER_ID
+    shaderID = RTXPT_SHADER_ID+1;   // 0 will result in black, so start from 1 and leave 0 to represent ubershader
+    #endif
+
     switch (g_Const.debug.debugViewType)
     {
-    case ((int)DebugViewType::FirstHitBarycentrics):                debug.DrawDebugViz(pixelPos, float4(triangleHit.barycentrics, 0.0, 1.0)); break;
-    case ((int)DebugViewType::FirstHitFaceNormal):                  debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.faceNCorrected), 1.0)); break;
-    case ((int)DebugViewType::FirstHitGeometryNormal):              debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.vertexN), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShadingNormal):               debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.N), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShadingTangent):              debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.T), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShadingBitangent):            debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.B), 1.0)); break;
-    case ((int)DebugViewType::FirstHitFrontFacing):                 debug.DrawDebugViz(pixelPos, float4(saturate(float3(0.15, 0.1 + shadingData.frontFacing, 0.15)), 1.0)); break;
-    case ((int)DebugViewType::FirstHitThinSurface):                 debug.DrawDebugViz(pixelPos, float4(saturate(float3(0.15, 0.1 + shadingData.mtl.isThinSurface(), 0.15)), 1.0)); break;
-    case ((int)DebugViewType::FirstHitShaderPermutation):           debug.DrawDebugViz(pixelPos, float4(optimizationHints.NoTextures, optimizationHints.NoTransmission, optimizationHints.OnlyDeltaLobes, 1.0)); break;
-    case ((int)DebugViewType::FirstHitDiffuse):                     debug.DrawDebugViz(pixelPos, float4(bsdfData.Diffuse().xyz, 1.0)); break;
-    case ((int)DebugViewType::FirstHitSpecular):                    debug.DrawDebugViz(pixelPos, float4(bsdfData.Specular().xyz, 1.0)); break;
-    case ((int)DebugViewType::FirstHitRoughness):                   debug.DrawDebugViz(pixelPos, float4(bsdfData.Roughness().xxx, 1.0)); break;
-    case ((int)DebugViewType::FirstHitMetallic):                    debug.DrawDebugViz(pixelPos, float4(bsdfData.Metallic().xxx, 1.0)); break;
+    case ((int)DebugViewType::FirstHit_Barycentrics):                debug.DrawDebugViz(pixelPos, float4(barycentrics, 0.0, 1.0)); break;
+    case ((int)DebugViewType::FirstHit_FaceNormal):                  debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.faceNCorrected), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_GeometryNormal):              debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.vertexN), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_ShadingNormal):               debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.N), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_ShadingTangent):              debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.T), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_ShadingBitangent):            debug.DrawDebugViz(pixelPos, float4(DbgShowNormalSRGB(shadingData.B), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_FrontFacing):                 debug.DrawDebugViz(pixelPos, float4(saturate(float3(0.15, 0.1 + shadingData.frontFacing, 0.15)), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_ThinSurface):                 debug.DrawDebugViz(pixelPos, float4(saturate(float3(0.15, 0.1 + shadingData.mtl.isThinSurface(), 0.15)), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_Diffuse):                     debug.DrawDebugViz(pixelPos, float4(bsdfData.Diffuse().xyz, 1.0)); break;
+    case ((int)DebugViewType::FirstHit_Specular):                    debug.DrawDebugViz(pixelPos, float4(bsdfData.Specular().xyz, 1.0)); break;
+    case ((int)DebugViewType::FirstHit_Roughness):                   debug.DrawDebugViz(pixelPos, float4(bsdfData.Roughness().xxx, 1.0)); break;
+    case ((int)DebugViewType::FirstHit_Metallic):                    debug.DrawDebugViz(pixelPos, float4(bsdfData.Metallic().xxx, 1.0)); break;
+    case ((int)DebugViewType::FirstHit_ShaderID):                    debug.DrawDebugViz(pixelPos, float4( ColorFromHash(Hash32(shaderID)), 1.0)); break;
+    case ((int)DebugViewType::FirstHit_MaterialID):                  debug.DrawDebugViz(pixelPos, float4( ColorFromHash(Hash32(materialID)), 1.0)); break;
     default: break;
     }
 #endif
@@ -493,40 +599,37 @@ ActiveTextureSampler Bridge::createTextureSampler(
 #endif  // ACTIVE_LOD_TEXTURE_SAMPLER
 }
 
-void Bridge::loadSurfacePosNormOnly(out float3 posW, out float3 faceN, const TriangleHit triangleHit, DebugContext debug)
+PathTracer::SurfaceData Bridge::loadSurface( const TriangleHit triangleHit, 
+    const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug)
 {
     const uint instanceIndex    = triangleHit.instanceID.getInstanceIndex();
     const uint geometryIndex    = triangleHit.instanceID.getGeometryIndex();
     const uint triangleIndex    = triangleHit.primitiveIndex;
-    DonutGeometrySample donutGS = getGeometryFromHit(instanceIndex, geometryIndex, triangleIndex, triangleHit.barycentrics, GeomAttr_Position,
-        t_InstanceData, t_GeometryData, t_GeometryDebugData, float3(0,0,0), debug);
-    posW    = mul(donutGS.instance.transform, float4(donutGS.objectSpacePosition, 1.0)).xyz;
-    faceN   = donutGS.flatNormal;
+    const float2 barycentrics   = triangleHit.barycentrics;
+    return Bridge::loadSurface( instanceIndex, geometryIndex, triangleIndex, barycentrics, rayDir, rayCone, pathVertexIndex, pixelPos, debug );
 }
 
-PathTracer::SurfaceData Bridge::loadSurface(
-    const uniform PathTracer::OptimizationHints optimizationHints, 
-    const TriangleHit triangleHit, 
-    const float3 rayDir, 
-    const RayCone rayCone, 
-    const int pathVertexIndex,
-    const uint2 pixelPos,
-    DebugContext debug)
+static PathTracer::SurfaceData Bridge::loadSurface( const uint instanceIndex, const uint geometryIndex, const uint triangleIndex, const float2 barycentrics,
+    const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug )
 {
     const bool isPrimaryHit     = pathVertexIndex == 1;
-    const uint instanceIndex    = triangleHit.instanceID.getInstanceIndex();
-    const uint geometryIndex    = triangleHit.instanceID.getGeometryIndex();
-    const uint triangleIndex    = triangleHit.primitiveIndex;
 
-    DonutGeometrySample donutGS = getGeometryFromHit( instanceIndex, geometryIndex, triangleIndex,  triangleHit.barycentrics, 
-        GeomAttr_TexCoord | GeomAttr_Position | GeomAttr_Normal | GeomAttr_Tangents | GeomAttr_PrevPosition,
-        t_InstanceData, t_GeometryData, t_GeometryDebugData, rayDir, debug );
+    DonutGeometryAttributes attributes = GeomAttr_TexCoord | GeomAttr_Position | GeomAttr_Normal | GeomAttr_Tangents;
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
+    attributes |= GeomAttr_PrevPosition;
+#endif
+
+    DonutGeometrySample donutGS = getGeometryFromHit( instanceIndex, geometryIndex, triangleIndex, barycentrics, 
+        attributes, t_InstanceData, t_GeometryData, t_GeometryDebugData, rayDir, debug );
 
     // Convert Donut to RTXPT data! 
 
     // World pos and prev world pos
     float3 posW     = mul(donutGS.instance.transform, float4(donutGS.objectSpacePosition, 1.0)).xyz;
+
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
     float3 prevPosW = mul(donutGS.instance.prevTransform, float4(donutGS.prevObjectSpacePosition, 1.0)).xyz;
+#endif
 
     // transpose is to go from Donut row_major to Falcor column_major; it is likely unnecessary here since both should work the same for this specific function, but leaving in for correctness
     float coneTexLODValue = computeRayConeTriangleLODValue( donutGS.vertexPositions, donutGS.vertexTexcoords, transpose((float3x3)donutGS.instance.transform) );
@@ -564,7 +667,7 @@ PathTracer::SurfaceData Bridge::loadSurface(
     ShadingData ptShadingData = ShadingData::make();
 
     ptShadingData.posW = posW;
-    ptShadingData.uv   = lpfloat2(donutGS.texcoord);
+    //ptShadingData.uv   = lpfloat2(donutGS.texcoord);
     ptShadingData.V    = -rayDir;
     ptShadingData.N    = donutGS.geometryNormal;
 
@@ -573,7 +676,7 @@ PathTracer::SurfaceData Bridge::loadSurface(
     uint materialIndex = t_SubInstanceData[subInstanceDataIndex].GlobalGeometryIndex_PTMaterialDataIndex & 0xFFFF;
 
     // Get donut material (normal map is evaluated here)
-    MaterialProperties donutMaterial = sampleGeometryMaterialRTXPT(optimizationHints, donutGS, materialIndex, MatAttr_All, s_MaterialSampler, textureSampler);
+    MaterialProperties donutMaterial = sampleGeometryMaterialRTXPT(donutGS, materialIndex, MatAttr_All, s_MaterialSampler, textureSampler);
 
     bool ignoreTangent = (donutMaterial.flags & PTMaterialFlags_IgnoreMeshTangentSpace) != 0;
 
@@ -596,12 +699,31 @@ PathTracer::SurfaceData Bridge::loadSurface(
     ptShadingData.mtl.setPSDExclude( (donutMaterial.flags & PTMaterialFlags_PSDExclude) != 0 );
     ptShadingData.mtl.setPSDDominantDeltaLobeP1( (donutMaterial.flags & PTMaterialFlags_PSDDominantDeltaLobeP1Mask) >> PTMaterialFlags_PSDDominantDeltaLobeP1Shift );
 
+
+    // stopping motion vectors from being calculated behind/beyond this surface
+    {
+        // types are 0 - Off; 1 - AutoLow; 2 - AutoHigh; 3 - Full
+        const int blockType = ((donutMaterial.flags & PTMaterialFlags_PSDBlockMVsAtSurfaceTypeB0) != 0) + ((donutMaterial.flags & PTMaterialFlags_PSDBlockMVsAtSurfaceTypeB1) != 0) * 2;
+        bool blockMVs = (blockType) == 3;
+
+        if (blockType == 1 || blockType == 2)
+        {
+            float projectionTerm = abs(dot(rayDir, -ptShadingData.N/*-ptShadingData.vertexN*//*-ptShadingData.faceNCorrected*/));
+            float pixelCurvature = (donutGS.curvatureWS * rayCone.getWidth()) / max(projectionTerm, 1e-6f);
+            const float threshold = (blockType==1)?(0.03):(0.0005);
+            MicroRng rng = MicroRng::make(pixelPos, pathVertexIndex, Bridge::getSampleIndex());
+            blockMVs |= pixelCurvature > ((rng.NextFloat()*0.9+0.3)*threshold);
+        }
+        // if (blockMVs && pathVertexIndex == 1) DebugPixel(pixelPos, float4(1,0,0,1));
+        ptShadingData.mtl.setPSDBlockMotionVectorsAtSurface( blockMVs );
+    }
+
     // Helper function to adjust the shading normal to reduce black pixels due to back-facing view direction. Note: This breaks the reciprocity of the BSDF!
     // This also reorthonormalizes the frame based on the normal map, which is necessary (see `ptShadingData.N = donutMaterial.shadingNormal;` line above)
     adjustShadingNormal( ptShadingData, donutGS.tangent, true, ignoreTangent );
     // ^^ this should be part of material processing code
 
-    ptShadingData.opacity = donutMaterial.opacity;
+    // ptShadingData.opacity = donutMaterial.opacity;
 
     ptShadingData.shadowNoLFadeout = donutMaterial.shadowNoLFadeout;
 
@@ -611,37 +733,29 @@ PathTracer::SurfaceData Bridge::loadSurface(
     lpfloat     bsdfDataRoughness            = 0;
     lpfloat3    bsdfDataSpecular             = 0;
     lpfloat     bsdfDataMetallic             = 0;
-    lpfloat3    bsdfDataTransmission         = 0;
     lpfloat     bsdfDataEta                  = 0;
-    lpfloat     bsdfDataDiffuseTransmission  = 0;
-    lpfloat     bsdfDataSpecularTransmission = 0;
+
 
     // A.k.a. interiorIoR
     lpfloat matIoR = donutMaterial.ior;
 
+#if !defined(RTXPT_MATERIAL_HAS_TRANSMISSION) || RTXPT_MATERIAL_HAS_TRANSMISSION
     // from https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_transmission/README.md#refraction
     // "This microfacet lobe is exactly the same as the specular lobe except sampled along the line of sight through the surface."
-    bsdfDataSpecularTransmission = donutMaterial.transmission * (1 - donutMaterial.metalness);    // (1 - donutMaterial.metalness) is from https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_transmission/README.md#transparent-metals
-    bsdfDataDiffuseTransmission = donutMaterial.diffuseTransmission * (1 - donutMaterial.metalness);    // (1 - donutMaterial.metalness) is from https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_transmission/README.md#transparent-metals
-    bsdfDataTransmission = donutMaterial.baseColor;
+    lpfloat     bsdfDataSpecularTransmission = donutMaterial.transmission * (1 - donutMaterial.metalness);    // (1 - donutMaterial.metalness) is from https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_transmission/README.md#transparent-metals
+    lpfloat     bsdfDataDiffuseTransmission = donutMaterial.diffuseTransmission * (1 - donutMaterial.metalness);    // (1 - donutMaterial.metalness) is from https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_transmission/README.md#transparent-metals
+    lpfloat3    bsdfDataTransmission = donutMaterial.baseColor;
+#else
+    lpfloat     bsdfDataDiffuseTransmission  = 0;
+    lpfloat     bsdfDataSpecularTransmission = 0;    
+    lpfloat3    bsdfDataTransmission         = 0;
+#endif
 
     /*LobeType*/ uint lobeType = (uint)LobeType::All;
 
-    if (optimizationHints.NoTransmission)
-    {
-        bsdfDataSpecularTransmission = 0;
-        bsdfDataDiffuseTransmission = 0;
-        bsdfDataTransmission = lpfloat3(0,0,0);
-        lobeType &= ~(uint)LobeType::Transmission;//~((uint)LobeType::DiffuseReflection | (uint)LobeType::SpecularReflection | (uint)LobeType::DeltaReflection);
-    }
-    //if (optimizationHints.OnlyTransmission)
-    //{
-    //    lobeType &= (uint)LobeType::Transmission; //~(uint)LobeType::Reflection;
-    //}
-    if (optimizationHints.OnlyDeltaLobes)
-    {
-        lobeType &= ~(uint)LobeType::NonDelta;
-    }
+#if defined(RTXPT_MATERIAL_HAS_TRANSMISSION) && !RTXPT_MATERIAL_HAS_TRANSMISSION
+    lobeType &= ~(uint)LobeType::Transmission;//~((uint)LobeType::DiffuseReflection | (uint)LobeType::SpecularReflection | (uint)LobeType::DeltaReflection);
+#endif
 
     ptShadingData.mtl.setActiveLobes( lobeType );
 
@@ -649,7 +763,7 @@ PathTracer::SurfaceData Bridge::loadSurface(
     lpfloat3 baseColor = donutMaterial.baseColor;
 
     // OMM Debug evaluates the OMM state at a given triangle + hit BC color codes the result for the corresonding state.
-    OpacityMicroMapDebugInfo ommDebug = loadOmmDebugInfo(donutGS, triangleIndex, triangleHit);
+    OpacityMicroMapDebugInfo ommDebug = loadOmmDebugInfo(donutGS, triangleIndex, barycentrics);
 #if OMM_DEBUG_VIEW_IN_WORLD && !NON_PATH_TRACING_PASS && ENABLE_DEBUG_VIZUALISATIONS
     if (ommDebug.hasOmmAttachment)
         baseColor = (lpfloat3)ommDebug.opacityStateDebugColor;
@@ -681,17 +795,19 @@ PathTracer::SurfaceData Bridge::loadSurface(
     // The standard material supports uniform emission over the hemisphere.
     // Note: we only support single sided emissives at the moment; If upgrading, make sure to upgrade NEE codepath as well (i.e. PolymorphicLight.hlsli)
 
-    float3 bsdfDataEmission = 0;
-    uint neeTriangleLightIndex = 0xFFFFFFFF;
-    uint neeAnalyticLightIndex = 0xFFFFFFFF;
+    uint neeTriangleLightIndex = RTXPT_INVALID_LIGHT_INDEX;
+    uint neeAnalyticLightIndex = RTXPT_INVALID_LIGHT_INDEX;
 
+#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
     if (ptShadingData.frontFacing && any(donutMaterial.emissiveColor>0))
     {
-        bsdfDataEmission = donutMaterial.emissiveColor;
+        ptShadingData.emission = donutMaterial.emissiveColor;
 
+#if !RTXPT_USE_APPROXIMATE_MIS
         uint baseIndex = t_SubInstanceData[subInstanceDataIndex].EmissiveLightMappingOffset;
-        neeTriangleLightIndex = baseIndex + triangleIndex;
-
+        if (baseIndex != 0xFFFFFFFF)
+            neeTriangleLightIndex = baseIndex + triangleIndex;
+#endif
         //if( debug.IsDebugPixel() )
         //{
         //    DebugPrint( "a {0}; b {1}, c {2}", geometryIndex, baseIndex, neeTriangleLightIndex );
@@ -706,23 +822,29 @@ PathTracer::SurfaceData Bridge::loadSurface(
         debug.DrawDebugViz( float4(1-OK, OK, 0, 1) );
 #endif
     }
+#endif
 
+#if !defined(RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY) || RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY
     if ( (donutMaterial.flags & PTMaterialFlags_EnableAsAnalyticLightProxy) != 0 )
         neeAnalyticLightIndex = t_SubInstanceData[subInstanceDataIndex].AnalyticProxyLightIndex;
+#endif
 
     StandardBSDF bsdf = StandardBSDF::make(
-        StandardBSDFData::make( bsdfDataDiffuse, bsdfDataSpecular, bsdfDataRoughness, bsdfDataMetallic, bsdfDataEta, bsdfDataTransmission, bsdfDataDiffuseTransmission, bsdfDataSpecularTransmission ),
-        bsdfDataEmission );
+        StandardBSDFData::make( bsdfDataDiffuse, bsdfDataSpecular, bsdfDataRoughness, bsdfDataMetallic, bsdfDataEta, bsdfDataTransmission, bsdfDataDiffuseTransmission, bsdfDataSpecularTransmission ) );
 
     // if you think tangent space is broken, test with this (won't make it correctly oriented)
     //ConstructONB( ptShadingData.N, ptShadingData.T, ptShadingData.B );
 
-    PathTracer::SurfaceData ret = PathTracer::SurfaceData::make(/*ptVertex, */ptShadingData, bsdf, prevPosW, matIoR, neeTriangleLightIndex, neeAnalyticLightIndex);
+    PathTracer::SurfaceData ret = PathTracer::SurfaceData::make(/*ptVertex, */ptShadingData, bsdf, 
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
+                                    prevPosW, 
+#endif
+                                    matIoR, neeTriangleLightIndex, neeAnalyticLightIndex);
 
 #if ENABLE_DEBUG_VIZUALISATIONS && !NON_PATH_TRACING_PASS
     if( debug.IsDebugPixel(pixelPos) && pathVertexIndex==1 && !debug.constants.exploreDeltaTree )
         debug.SetPickedMaterial( materialIndex );
-    surfaceDebugViz( pixelPos, optimizationHints, ret, triangleHit, rayDir, rayCone, pathVertexIndex, ommDebug, debug );
+    surfaceDebugViz( pixelPos, ret, barycentrics, rayDir, rayCone, pathVertexIndex, ommDebug, materialIndex, debug );
 #if OMM_DEBUG_VIEW_OVERLAY
     debug.DrawDebugViz(float4(ommDebug.opacityStateDebugColor, 1.0));
 #endif
@@ -761,8 +883,7 @@ HomogeneousVolumeData Bridge::loadHomogeneousVolumeData(const uint materialDataI
     // these should be precomputed on the C++ side!!
     ptVolume.sigmaS = float3(0,0,0); // no scattering yet
     ptVolume.sigmaA = -log( clamp( volumeInfo.AttenuationColor, 1e-7, 1 ) ) / max( 1e-30, volumeInfo.AttenuationDistance.xxx );
-
-    return ptVolume;        
+    return ptVolume;
 }
 
 // 2.5D motion vectors
@@ -807,21 +928,18 @@ float3 Bridge::computeSkyMotionVector( const uint2 pixelPos )
 
 bool AlphaTestImpl(SubInstanceData subInstanceData, uint triangleIndex, float2 rayBarycentrics)
 {
-    bool alphaTested = (subInstanceData.FlagsAndAlphaCutoff & SubInstanceData::Flags_AlphaTested) != 0;
+    bool alphaTested = (subInstanceData.FlagsAndAlphaInfo & SubInstanceData::Flags_AlphaTested) != 0;
     if( !alphaTested ) // note: with correct use of D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE this is unnecessary, but there are cases (such as disabling texture but leaving alpha tested state) in which this isn't handled correctly
         return true;
         
     // have to do all this to figure out UVs!
     float2 texcoord;
     {
-        GeometryData geometry = t_GeometryData[NonUniformResourceIndex(subInstanceData.GlobalGeometryIndex_PTMaterialDataIndex>>16)];
+#if !SUBINSTANCEDATA_EXTENDED
+        GeometryData geometry = t_GeometryData[subInstanceData.GlobalGeometryIndex_PTMaterialDataIndex>>16];
 
         ByteAddressBuffer indexBuffer = t_BindlessBuffers[NonUniformResourceIndex(geometry.indexBufferIndex)];
         ByteAddressBuffer vertexBuffer = t_BindlessBuffers[NonUniformResourceIndex(geometry.vertexBufferIndex)];
-
-        float3 barycentrics;
-        barycentrics.yz = rayBarycentrics;
-        barycentrics.x = 1.0 - (barycentrics.y + barycentrics.z);
 
         uint3 indices = indexBuffer.Load3(geometry.indexOffset + triangleIndex * c_SizeOfTriangleIndices);
 
@@ -829,10 +947,25 @@ bool AlphaTestImpl(SubInstanceData subInstanceData, uint triangleIndex, float2 r
         vertexTexcoords[0] = asfloat(vertexBuffer.Load2(geometry.texCoord1Offset + indices[0] * c_SizeOfTexcoord));
         vertexTexcoords[1] = asfloat(vertexBuffer.Load2(geometry.texCoord1Offset + indices[1] * c_SizeOfTexcoord));
         vertexTexcoords[2] = asfloat(vertexBuffer.Load2(geometry.texCoord1Offset + indices[2] * c_SizeOfTexcoord));
+#else
+        ByteAddressBuffer indexBuffer = t_BindlessBuffers[NonUniformResourceIndex( subInstanceData.IndexBufferIndex_VertexBufferIndex >> 16 /*geometry.indexBufferIndex*/ )];
+        ByteAddressBuffer vertexBuffer = t_BindlessBuffers[NonUniformResourceIndex(subInstanceData.IndexBufferIndex_VertexBufferIndex & 0xFFFF /*geometry.vertexBufferIndex*/ )];
+
+        uint3 indices = indexBuffer.Load3(subInstanceData.IndexOffset + triangleIndex * c_SizeOfTriangleIndices);
+
+        float2 vertexTexcoords[3];
+        vertexTexcoords[0] = asfloat(vertexBuffer.Load2(subInstanceData.TexCoord1Offset + indices[0] * c_SizeOfTexcoord));
+        vertexTexcoords[1] = asfloat(vertexBuffer.Load2(subInstanceData.TexCoord1Offset + indices[1] * c_SizeOfTexcoord));
+        vertexTexcoords[2] = asfloat(vertexBuffer.Load2(subInstanceData.TexCoord1Offset + indices[2] * c_SizeOfTexcoord));
+#endif
+
+        float3 barycentrics;
+        barycentrics.yz = rayBarycentrics;
+        barycentrics.x = 1.0 - (barycentrics.y + barycentrics.z);
         texcoord = interpolate(vertexTexcoords, barycentrics);
     }
     // sample the alpha (opacity) texture and test vs the threshold
-    Texture2D diffuseTexture = t_BindlessTextures[NonUniformResourceIndex(subInstanceData.AlphaTextureIndex)];
+    Texture2D diffuseTexture = t_BindlessTextures[NonUniformResourceIndex(subInstanceData.AlphaTextureIndex())];
     float opacityValue = diffuseTexture.SampleLevel(s_MaterialSampler, texcoord, 0).a; // <- hard coded to .a channel but we might want a separate alpha only texture, maybe in .g of BC1
     return opacityValue >= subInstanceData.AlphaCutoff();
 }
@@ -848,7 +981,7 @@ bool Bridge::AlphaTestVisibilityRay(uint instanceID, uint instanceIndex, uint ge
 {
     SubInstanceData subInstanceData = t_SubInstanceData[(instanceID + geometryIndex)];
 
-    bool excludeFromNEE = (subInstanceData.FlagsAndAlphaCutoff & SubInstanceData::Flags_ExcludeFromNEE) != 0;
+    bool excludeFromNEE = (subInstanceData.FlagsAndAlphaInfo & SubInstanceData::Flags_ExcludeFromNEE) != 0;
     if (excludeFromNEE)
         return false;
 
@@ -873,11 +1006,10 @@ bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pa
                 rayQuery.CandidatePrimitiveIndex(),
                 rayQuery.CandidateTriangleBarycentrics()
                 //, debug
-                )
-            )
+                ) )
             {
                 rayQuery.CommitNonOpaqueTriangleHit();
-                // break; <- TODO: revisit - not needed when using RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH?
+                //break; // <- TODO: revisit - not needed when using RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH?
             }
         }
     }
@@ -894,9 +1026,11 @@ bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pa
     return !rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
-void Bridge::traceScatterRay(const PathState path, inout RayDesc ray, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, inout PackedHitInfo packedHitInfo, DebugContext debug)
+void Bridge::traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug)
 {
-    ray = path.getScatterRay().toRayDesc();
+    RayDesc ray = path.getScatterRay().toRayDesc();
+    ray.TMin = tMinMax.x;
+    ray.TMax = tMinMax.y;
     rayQuery.TraceRayInline(SceneBVH, RAY_FLAG_NONE, 0xff, ray);
 
     while (rayQuery.Proceed())
@@ -917,21 +1051,6 @@ void Bridge::traceScatterRay(const PathState path, inout RayDesc ray, inout RayQ
                 rayQuery.CommitNonOpaqueTriangleHit();
             }
         }
-    }
-
-    if (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
-    {
-        ray.TMax = rayQuery.CommittedRayT();    // <- this gets passed via NvMakeHitWithRecordIndex/NvInvokeHitObject as RayTCurrent() or similar in ubershader path
-
-        TriangleHit triangleHit;
-        triangleHit.instanceID      = GeometryInstanceID::make( rayQuery.CommittedInstanceIndex(), rayQuery.CommittedGeometryIndex() );
-        triangleHit.primitiveIndex  = rayQuery.CommittedPrimitiveIndex();
-        triangleHit.barycentrics    = rayQuery.CommittedTriangleBarycentrics(); // attrib.barycentrics;
-        packedHitInfo = triangleHit.pack();
-    }
-    else
-    {
-        packedHitInfo = PACKED_HIT_INFO_ZERO; // this invokes miss shader a.k.a. sky!
     }
 }
 
@@ -955,21 +1074,13 @@ EnvMapSampler Bridge::CreateEnvMapImportanceSampler()
 
 LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, float rayConeWidth, float totalPathLength )
 {
-    bool isIndirect = LightSampler::IsIndirectHeuristic( t_LightsCB, rayConeWidth, totalPathLength );
-#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
-    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeightAntiLag, u_LightFeedbackCandidatesAntiLag, pixelPos, isIndirect );
-#else
-    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeight, u_LightFeedbackCandidates, pixelPos, isIndirect );
-#endif
+    bool isScreenSpaceCoherent = LightSampler::IsScreenSpaceCoherentHeuristic( t_LightsCB, rayConeWidth, totalPathLength );
+    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeight, u_LightFeedbackCandidates, pixelPos, isScreenSpaceCoherent );
 }
 
-LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, bool isIndirect )
+LightSampler Bridge::CreateLightSampler( const uint2 pixelPos, bool isScreenSpaceCoherent )
 {
-#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
-    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeightAntiLag, u_LightFeedbackCandidatesAntiLag, pixelPos, isIndirect );
-#else
-    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeight, u_LightFeedbackCandidates, pixelPos, isIndirect );
-#endif
+    return LightSampler::make( t_LightsCB, t_Lights, t_LightsEx, t_LightProxyCounters, t_LightProxyIndices, t_LightLocalSamplingBuffer, t_EnvLookupMap, u_LightFeedbackTotalWeight, u_LightFeedbackCandidates, pixelPos, isScreenSpaceCoherent );
 }
 
 bool Bridge::HasEnvMap()
@@ -981,5 +1092,98 @@ float Bridge::DiffuseEnvironmentMapMIPOffset( )
 {
     return g_Const.ptConsts.EnvironmentMapDiffuseSampleMIPLevel;
 }
+
+void Bridge::ExportSurfaceInit(uint2 pixelPos)
+{
+    u_Depth[pixelPos] = 0;                  // this is a signal that data is invalid - there's (rare) cases where neither ExportSurface or ExportNonSurface get called
+    u_SpecularHitT[pixelPos] = 0;           // it is common for this to be missing
+    
+    // u_MotionVectors[pixelPos] = float4( 0, 0, 0, 0 );   // this should not be strictly necessary as we already know from u_Depth[] that the signal is invalid
+    // DebugPixel( pixelPos.xy, float4( 0.0.xxx, 1 ) ); 
+}
+
+void Bridge::ExportSurface(const PathState path, PathTracer::SurfaceData surfaceData, float sceneLength, float3 motionVectors )
+{
+    uint2 pixelPos = path.GetPixelPos();
+
+    u_MotionVectors[pixelPos]   = float4(motionVectors, 0);
+
+    const Ray cameraRay = Bridge::computeCameraRay( pixelPos );
+
+    float3 virtualWorldPos = cameraRay.origin + cameraRay.dir * sceneLength;
+    float4 clipPos = mul(float4(/*bridgedData.shadingData.posW*/virtualWorldPos, 1), g_Const.view.matWorldToClip);
+    u_Depth[pixelPos] = clipPos.z / clipPos.w;
+    u_Throughput[pixelPos] = Pack_R11G11B10_FLOAT(saturate(path.GetThp()));
+    
+#if EXPORT_GBUFFER
+    if (g_Const.ptConsts.useReSTIRDI || g_Const.ptConsts.useReSTIRGI)
+    {
+        // compute address for current output - it ping pongs based on frameIndex!
+        const uint idxPingPong = (g_Const.ptConsts.frameIndex % 2) == (uint)0;
+        const uint idx = GenericTSPixelToAddress(pixelPos, idxPingPong, g_Const.ptConsts.genericTSLineStride, g_Const.ptConsts.genericTSPlaneStride);
+
+        u_SurfaceData[idx] = RunCompress( CollectGBufferSurface(path, surfaceData, cameraRay) ); //ExtractPackedGbufferSurfaceData(pixelPos, sp, dominantStablePlaneIndex, stableBranchID);
+    }
+#endif
+    // DebugPixel( pixelPos.xy, float4( 0, 0.2, 0, 1 ) );
+}
+
+void Bridge::ExportNonSurface(const PathState path, float3 virtualWorldPos, float3 motionVectors )
+{
+    uint2 pixelPos = path.GetPixelPos();
+
+    u_MotionVectors[pixelPos]   = float4(motionVectors, 0);
+
+    float4 clipPos = mul(float4( /*bridgedData.shadingData.posW*/virtualWorldPos, 1), g_Const.view.matWorldToClip);
+    u_Depth[pixelPos] = clipPos.z / clipPos.w;
+    u_Throughput[pixelPos] = 0;
+
+    //DebugPixel( pixelPos.xy, float4( 0, 0, 0.2, 1 ) );
+
+#if EXPORT_GBUFFER
+    if (g_Const.ptConsts.useReSTIRDI || g_Const.ptConsts.useReSTIRGI)
+    {
+        // compute address for current output - it ping pongs based on frameIndex!
+        const uint idxPingPong = (g_Const.ptConsts.frameIndex % 2) == (uint)0;
+        const uint idx = GenericTSPixelToAddress(pixelPos, idxPingPong, g_Const.ptConsts.genericTSLineStride, g_Const.ptConsts.genericTSPlaneStride);
+
+        u_SurfaceData[idx] = RunCompress(PathTracerCollectedSurfaceData::makeEmpty()); 
+    }
+#endif
+}
+
+void Bridge::ExportSpecHitTStart(const PathState path)
+{
+    u_SpecularHitT[path.GetPixelPos()] = -path.GetSceneLength();
+}
+
+void Bridge::ExportSpecHitTStop(const PathState path)
+{
+    uint2 pixelPos = path.GetPixelPos();
+
+    float denoisingSceneLength = u_SpecularHitT[pixelPos];
+    if (denoisingSceneLength < 0)  // 0 means not initialized - nothing to do here (shouldn't happen really!); >0 means we've already filled it up in previous pass when using multiple samples per pixel - again, nothing to do here
+    {
+        // if (denoisingSceneLength > 0)  
+        //      DebugPixel( pixelPos.xy, float4( 1.0, 0, 0.0, 1 ) ); // bug!
+    
+        float specHitT = max( 0, path.GetSceneLength() + denoisingSceneLength );
+        u_SpecularHitT[pixelPos] = specHitT;
+    }
+//     if (specHitT > 0.0)
+//         //DebugPixel( pixelPos.xy, float4( 0.0, saturate(specHitT/10.0), 1.0, 1 ) );
+//        DebugPixel( pixelPos.xy, float4( saturate(specHitT/10.0).xxx, 1 ) );
+}
+
+PathTracer::WorkingContext GetWorkingContext()
+{
+    PathTracer::WorkingContext ret;
+    ret.PtConsts = g_Const.ptConsts;
+    ret.Debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack );
+    ret.StablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+    ret.OutputColor = u_OutputColor;
+    return ret;
+}
+
 
 #endif // __PATH_TRACER_BRIDGE_DONUT_HLSLI__

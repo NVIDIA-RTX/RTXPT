@@ -19,8 +19,8 @@
 
 #include <nvrhi/utils.h>
 
-#include "../SampleCommon.h"
-#include "../ShaderDebug.h"
+#include "../SampleCommon/SampleCommon.h"
+#include "../Misc/ShaderDebug.h"
 
 #define FFX_CPP
 #include "FFX_ParallelSort.h"
