@@ -214,7 +214,7 @@ DWORD WINAPI SplashScreen::ThreadProc(void* param)
 
     // Create window: borderless, no taskbar button, optionally topmost.
     HWND hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST,
+        WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         kClassName,
         L"",
         WS_POPUP,
@@ -236,6 +236,7 @@ DWORD WINAPI SplashScreen::ThreadProc(void* param)
         PremultiplyIfNeeded(bgra);
 
         ShowWindow(hwnd, SW_SHOWNORMAL);
+        SetForegroundWindow(hwnd);
         UpdateWindow(hwnd);
 
         SetLayeredWindowBitmap(hwnd, bgra.data(), w, h);
