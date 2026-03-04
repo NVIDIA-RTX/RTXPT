@@ -510,7 +510,7 @@ static void GetBindlessTextureIndex(const std::shared_ptr<LoadedTexture>& textur
 
 bool PTMaterial::IsEmissive() const
 {
-    return (EmissiveIntensity > 0) && (donut::math::any(EmissiveColor>0.0f));
+    return (EmissiveIntensity > 0) && (donut::math::any(EmissiveColor>0.0f)) || UseDonutEmissiveIntensity;  // UseDonutEmissiveIntensity can animate on/off so just assume we're emissive and pay the cost
 }
 
 void PTMaterial::FillData(PTMaterialData & data)
