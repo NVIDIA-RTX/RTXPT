@@ -106,7 +106,7 @@ SampleBaseApp::InitReturnCodes SampleBaseApp::Init(int argc, const char* const* 
         assert(SUCCEEDED(hr));
         if (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_9)
         {
-            donut::log::fatal("Shader Model 6.9 is required, but unsupported on the current device. Please check for newer graphics drivers.");
+            donut::log::fatal("Shader Model 6.9 is required when compiled with Agility SDK 1.619 or newer, but is unsupported on the current device. Please check for newer graphics drivers, or recompile without Agility SDK");
             return InitReturnCodes::FailToCreateDevice;
         }
     }
