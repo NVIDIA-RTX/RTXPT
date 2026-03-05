@@ -125,7 +125,7 @@ float ImportanceBooster( const PolymorphicLightInfoFull packedLightInfo, const u
         PolymorphicLightType lightType = PolymorphicLight::DecodeType(packedLightInfo);
         if ( lightType == kEnvironmentQuad || lightType == kEnvironment || lightType == kDirectional )
         {
-            boostK = 0;
+            boostK = 0.5; // half-boost the environment - since we don't have any other estimate, that's the best we can do
         }
         else
         {
