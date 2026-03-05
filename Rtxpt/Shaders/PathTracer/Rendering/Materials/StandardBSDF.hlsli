@@ -40,13 +40,13 @@ struct StandardBSDF // : IBSDF
 #endif
 
     StandardBSDFData data;      ///< BSDF parameters.
-    float3 emission;            ///< Radiance emitted in the incident direction (wi).
+    // float3 emission;            ///< Radiance emitted in the incident direction (wi).
 
-    static StandardBSDF make( StandardBSDFData data, float3 emission ) 
+    static StandardBSDF make( StandardBSDFData data ) 
     { 
         StandardBSDF d;
         d.data = data;
-        d.emission = emission;
+        //d.emission = emission;
         return d;
     }
 
@@ -90,11 +90,43 @@ struct StandardBSDF // : IBSDF
         return bsdf.evalPdf(wiLocal, woLocal);
     }
 
+    void estimateSpecDiffBSDF( out float3 outDiffEstimate, out float3 outSpecEstimate, const float3 normal, const float3 viewVector )
+    {
+    #if 1
+        lpfloat dataRoughness = data.Roughness();
+        float alpha = dataRoughness * dataRoughness;
+        float roughness = alpha < kMinGGXAlpha ? 0.f : dataRoughness;
+
+        // Compute approximation of the albedos.
+        // For now use the blend weights and colors, but this should be improved to better numerically approximate the integrals.
+        lpfloat dataDiffuseTransmission = data.DiffuseTransmission();
+        lpfloat dataSpecularTransmission = data.SpecularTransmission();
+        lpfloat3 dataTransmission = data.Transmission();
+        lpfloat3 dataSpecular = data.Specular();
+        lpfloat3 diffuseReflectionAlbedo = (lpfloat(1.f) - dataDiffuseTransmission) * (lpfloat(1.f) - dataSpecularTransmission) * data.Diffuse();
+        lpfloat3 diffuseTransmissionAlbedo = dataDiffuseTransmission * dataTransmission * (lpfloat(1.f) - dataSpecularTransmission); // used to have  "* (1.f - dataSpecularTransmission)" too
+        lpfloat3 specularReflectionAlbedo = (lpfloat(1.f) - dataSpecularTransmission) * dataSpecular;
+        lpfloat3 specularTransmissionAlbedo = dataSpecularTransmission * dataTransmission;
+
+        // Note - not clamping estimate here - it can be zero; clamp it at use location
+        outDiffEstimate = diffuseReflectionAlbedo+diffuseTransmissionAlbedo; // note, also adding base path throughput to modulation here!
+        const float NdotV = saturate(dot(normal, viewVector));
+        const float ggxAlpha = roughness * roughness;
+        float3 specularReflectance = approxSpecularIntegralGGX(specularReflectionAlbedo, ggxAlpha, NdotV); // note, also adding base path throughput to modulation here!
+        specularReflectance += specularTransmissionAlbedo; // best approximation for now
+        outSpecEstimate = specularReflectance;
+     #else
+        outDiffEstimate = float3(1,1,1);
+        outSpecEstimate = float3(1,1,1);
+     #endif
+    }
+
+    #if 0
     BSDFProperties getProperties(const ShadingData shadingData)
     {
         BSDFProperties p; p.flags = 0; // = {};
 
-        p.emission = emission;
+        // p.emission = emission;
 
         // Clamp roughness so it's representable of what is actually used in FalcorBSDF.
         // Roughness^2 below kMinGGXAlpha is used to indicate perfectly smooth surfaces.
@@ -121,6 +153,7 @@ struct StandardBSDF // : IBSDF
 
         return p;
     }
+    #endif
 
     uint getLobes(const ShadingData shadingData)
     {

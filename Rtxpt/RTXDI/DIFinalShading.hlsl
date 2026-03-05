@@ -69,7 +69,7 @@ bool ReSTIRDIFinalContribution(const uint2 reservoirPos, const uint2 pixelPos, c
     newRadianceAndSpecAvg = 0.0;
     newSpecHitT = 0.0;
 
-    PathTracer::PathLightSample ls = PathTracer::PathLightSample::make();
+    LightSample ls = LightSample::make();
 
     if (getFinalSample(reservoirPos, surface, ls.Li, ls.Direction, ls.Distance))
     {
@@ -93,7 +93,7 @@ bool ReSTIRDIFinalContribution(const uint2 reservoirPos, const uint2 pixelPos, c
  
     // useful for debugging!
     DebugContext debug;
-    debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
+    debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack);
 
     switch (g_Const.debug.debugViewType)
     {
@@ -129,8 +129,6 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
         {
             uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
             float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
-            float specHitDist   = u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist;
-            u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist = AccumulateHitT( radiance.a, specHitDist, newRadianceAndSpecAvg.a, newSpecHitT );
             u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16(radiance.rgba+newRadianceAndSpecAvg.rgba);
         }
         else

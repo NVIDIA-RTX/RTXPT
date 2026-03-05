@@ -16,7 +16,7 @@
 #include <donut/app/Camera.h>
 #include <cmath>
 
-#include "../ExtendedScene.h"
+#include "../SampleCommon/ExtendedScene.h"
 
 #include "../Sample.h"
 
@@ -35,8 +35,8 @@ using namespace donut::render;
 #include <thread>
 
 
-GameScene::GameScene(Sample & sample)
-    : m_sample(sample) // NOTE: at this point, Sample is being constructed - beware of accessing incompletely constructed object
+GameScene::GameScene(Sample & sample, const CommandLineOptions& cmdLine)
+    : m_sample(sample), m_cmdLine(cmdLine) // NOTE: at this point, Sample is being constructed - beware of accessing incompletely constructed object
 {
 }
 
@@ -168,6 +168,14 @@ void GameScene::SceneLoaded(const std::shared_ptr<ExtendedScene>& scene, const s
             m_props.push_back( newProp );
     }
 
+    if( m_cmdLine.PropCameraAttach != "" )
+    {
+        auto it = std::find_if(m_props.begin(), m_props.end(), [this]( const std::shared_ptr<game::PropBase> & prop ) { return EqualsIgnoreCase(prop->GetName(), m_cmdLine.PropCameraAttach); } );
+        if (it != m_props.end())
+            AttachCamera(*it);
+    }
+
+
     // std::srand(0);
     // for (int i = 0; i < (int)m_modelInstances.size(); i++)
     // {
@@ -242,7 +250,7 @@ bool GameScene::DebugGUI(float indent)
 
         ImGui::Text("Time %05.2f, play speed %.2fx", m_gameTime, playSpeedK);
         ImGui::SameLine();
-        if (ImGui::Button("Reset"))
+        if (ImGui::Button("Reset##Timer"))
             m_gameTime = 0.0f;
 
         ImGui::Checkbox("Loop", &m_timeLoopEnable);

@@ -39,9 +39,6 @@ SamplerState s_MaterialSampler                                  : register(s0);
 SamplerState s_EnvironmentMapSampler                            : register(s1);
 SamplerState s_EnvironmentMapImportanceSampler                  : register(s2);
 
-// this is for debugging viz
-RWTexture2D<float4>                     u_DebugVizOutput        : register(u50);
-
 VK_BINDING(0, 1) ByteAddressBuffer t_BindlessBuffers[]          : register(t0, space1);
 VK_BINDING(1, 1) Texture2D t_BindlessTextures[]                 : register(t0, space2);
 

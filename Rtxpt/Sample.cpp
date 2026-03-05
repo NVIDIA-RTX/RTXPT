@@ -26,22 +26,26 @@
 #include <nvrhi/common/misc.h>
 #include <cmath>
 
-#include "PTPipelineBaker.h"
+#include "SampleCommon/PTPipelineBaker.h"
+#include "SampleCommon/ComputePipelineBaker.h"
 
-#include "AccelerationStructureUtil.h"
+#include "SampleCommon/AccelerationStructureUtil.h"
 
 #include "Lighting/Distant/EnvMapImportanceSamplingBaker.h"
 #include "Materials/MaterialsBaker.h"
 
 #include "OpacityMicroMap/OmmBaker.h"
 
-#include "LocalConfig.h"
-#include "Misc/CommandLine.h"
+#include "SampleCommon/LocalConfig.h"
+#include "SampleCommon/SampleBaseApp.h"
+#include "SampleCommon/CaptureScriptManager.h"
 #include "Misc/Korgi.h"
 
 #include "GPUSort/GPUSort.h"
 
-#include "ZoomTool.h"
+#include "Misc/ZoomTool.h"
+
+#include "ProcessingPasses/DenoisingGuidesBaker.h"
 
 #include "SampleGame/GameScene.h"
 
@@ -79,76 +83,29 @@ extern "C"
 }
 #endif
 
-static const int c_swapchainCount = 3;
-
-static const char* g_windowTitle = "RTX Path Tracing v1.7.1";
+const char* g_windowTitle = "RTX Path Tracing v1.8.1";
 
 const float c_envMapRadianceScale = 1.0f / 4.0f; // used to make input 32bit float radiance fit into 16bit float range that baker supports; going lower than 1/4 causes issues with current BC6U compression algorithm when used
 
 static FPSLimiter g_FPSLimiter;
 
-static donut::log::Callback g_DonutDefaultCallback = nullptr;
-
-static void SampleLogCallback(donut::log::Severity severity, const char* message)
+Sample::Sample(donut::app::DeviceManager& deviceManager,
+    const CommandLineOptions& cmdLine)
+    : app::ApplicationBase(&deviceManager )
+    , m_cmdLine(cmdLine)
+    , m_ui(g_sampleUIData)
 {
-    // This lets us demote some of Streamline errors that aren't errors into warnings
-    if (severity == donut::log::Severity::Error)
-    {
-        std::string msg(message);
-        if (msg.find("Don't know the size") != std::string::npos)
-            severity = donut::log::Severity::Warning;
-        if (msg.find("dlss_gEntry.cpp") != std::string::npos)
-        {
-            if (    msg.find("Unable to find DRS context") != std::string::npos 
-                ||  msg.find("NGX indicates DLSS-G is not available") != std::string::npos)
-                severity = donut::log::Severity::Warning;
-        }
-        if( msg.find( "Missing NGX context" ) != std::string::npos
-            || msg.find( "Unable to find NGX " ) != std::string::npos 
-            || msg.find( "NvAPI_D3D_Sleep" ) != std::string::npos )
-            severity = donut::log::Severity::Warning;
-    }
-    // if (std::string(message).find(std::string("PFunPresentBefore failed The application made a call that is invalid")) != std::string::npos)
-    // {
-    //     int dbg = 0; dbg++;
-    // }
-
-    g_DonutDefaultCallback(severity, message);
-}
-
-Sample::Sample( donut::app::DeviceManager * deviceManager, CommandLineOptions& cmdLine, SampleUIData & ui )
-    : app::ApplicationBase( deviceManager ), m_cmdLine(cmdLine), m_ui( ui )
-{
-    deviceManager->SetFrameTimeUpdateInterval(1.0f);
-
     m_progressLoading.Start("Initializing...");
     m_progressLoading.Set(50);
-
-    std::filesystem::path frameworkShaderPath = app::GetDirectoryWithExecutable( ) / "ShaderPrecompiled/framework" / app::GetShaderTypeName( GetDevice( )->getGraphicsAPI( ) );
-    std::filesystem::path appShaderPath = app::GetDirectoryWithExecutable() / "ShaderPrecompiled/Rtxpt" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-    std::filesystem::path nrdShaderPath = app::GetDirectoryWithExecutable() / "ShaderPrecompiled/nrd" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-    std::filesystem::path ommShaderPath = app::GetDirectoryWithExecutable( ) / "ShaderPrecompiled/omm" / app::GetShaderTypeName( GetDevice( )->getGraphicsAPI( ) );
-
-    m_RootFS = std::make_shared<vfs::RootFileSystem>( );
-    m_RootFS->mount( "/ShaderPrecompiled/donut", frameworkShaderPath );
-    m_RootFS->mount( "/ShaderPrecompiled/app", appShaderPath);
-    m_RootFS->mount("/ShaderPrecompiled/nrd", nrdShaderPath);
-    m_RootFS->mount( "/ShaderPrecompiled/omm", ommShaderPath);
-
-    m_shaderFactory = std::make_shared<engine::ShaderFactory>( GetDevice( ), m_RootFS, "/ShaderPrecompiled" );
-    m_CommonPasses = std::make_shared<engine::CommonRenderPasses>( GetDevice( ), m_shaderFactory );
-    m_bindingCache = std::make_unique<engine::BindingCache>( GetDevice( ) );
 
     m_camera.SetRotateSpeed(.003f);
 
 #if DONUT_WITH_STREAMLINE
     m_ui.IsDLSSSuported = GetDeviceManager()->GetStreamline().IsDLSSAvailable();
-    m_ui.IsDLSSGSupported = GetDeviceManager()->GetStreamline().IsDLSSGAvailable();
+    m_ui.IsDLSSFGSupported = GetDeviceManager()->GetStreamline().IsDLSSGAvailable();
     m_ui.IsReflexSupported = GetDeviceManager()->GetStreamline().IsReflexAvailable();
     m_ui.IsDLSSRRSupported = GetDeviceManager()->GetStreamline().IsDLSSRRAvailable();
 #endif
-
-    korgi::Init();
 
     // Enumerate all environment maps in the media folder
     m_envMapMediaList.clear();
@@ -160,13 +117,11 @@ Sample::Sample( donut::app::DeviceManager * deviceManager, CommandLineOptions& c
             m_envMapMediaList.push_back(file.path());
     }
 
-    m_sampleGame = std::make_unique<GameScene>(*this);
-    m_progressLoading.Set(95);
+    m_captureScriptManager = std::make_unique<CaptureScriptManager>(*this, m_ui, m_cmdLine);
 }
 
 Sample::~Sample()
 {
-    korgi::Shutdown();
 }
 
 void Sample::DebugDrawLine( float3 start, float3 stop, float4 col1, float4 col2 )
@@ -178,8 +133,17 @@ void Sample::DebugDrawLine( float3 start, float3 stop, float4 col1, float4 col2 
     m_cpuSideDebugLines.push_back(dle);
 }
 
-bool Sample::Init(const std::string& preferredScene)
+void Sample::Init(const std::string& preferredScene,
+    const std::shared_ptr<donut::engine::ShaderFactory>& shaderFactory)
 {
+    m_shaderFactory = shaderFactory;
+
+    m_CommonPasses = std::make_shared<engine::CommonRenderPasses>(GetDevice(), m_shaderFactory);
+    m_bindingCache = std::make_unique<engine::BindingCache>(GetDevice());
+    
+    m_sampleGame = std::make_unique<GameScene>(*this, m_cmdLine);
+    m_progressLoading.Set(95);
+
     nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
     bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
     bindlessLayoutDesc.firstSlot = 0;
@@ -210,16 +174,10 @@ bool Sample::Init(const std::string& preferredScene)
         nvrhi::BindingLayoutItem::StructuredBuffer_SRV(14),     // t_LightsEx
         nvrhi::BindingLayoutItem::TypedBuffer_SRV(15),          // t_LightProxyCounters
         nvrhi::BindingLayoutItem::TypedBuffer_SRV(16),          // t_LightProxyIndices
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-        nvrhi::BindingLayoutItem::Texture_SRV(17),              // t_LightLocalSamplingBuffer
-#else
         nvrhi::BindingLayoutItem::TypedBuffer_SRV(17),          // t_LightLocalSamplingBuffer
-#endif
         nvrhi::BindingLayoutItem::Texture_SRV(18),              // t_EnvLookupMap
         nvrhi::BindingLayoutItem::Texture_UAV(20),              // u_LightFeedbackTotalWeight
         nvrhi::BindingLayoutItem::Texture_UAV(21),              // u_LightFeedbackCandidates
-        nvrhi::BindingLayoutItem::Texture_UAV(22),              // u_LightFeedbackTotalWeightAntiLag
-        nvrhi::BindingLayoutItem::Texture_UAV(23),              // u_LightFeedbackCandidatesAntiLag 
         nvrhi::BindingLayoutItem::Sampler(0),
         nvrhi::BindingLayoutItem::Sampler(1),
         nvrhi::BindingLayoutItem::Sampler(2),
@@ -229,6 +187,8 @@ bool Sample::Init(const std::string& preferredScene)
         nvrhi::BindingLayoutItem::Texture_UAV(4),           // u_Throughput
         nvrhi::BindingLayoutItem::Texture_UAV(5),           // u_MotionVectors
         nvrhi::BindingLayoutItem::Texture_UAV(6),           // u_Depth
+        nvrhi::BindingLayoutItem::Texture_UAV(7),           // u_SpecularHitT
+        nvrhi::BindingLayoutItem::Texture_UAV(8),           // u_ScratchFloat1
         // denoising slots go from 30-39
         //nvrhi::BindingLayoutItem::StructuredBuffer_UAV(30), // denoiser 'control buffer' (might be removed, might be reused)
         nvrhi::BindingLayoutItem::Texture_UAV(31),          // RWTexture2D<float>  u_DenoiserViewspaceZ
@@ -239,7 +199,6 @@ bool Sample::Init(const std::string& preferredScene)
         nvrhi::BindingLayoutItem::Texture_UAV(36),          // RWTexture2D<float4> u_DenoiserDisocclusionThresholdMix
         nvrhi::BindingLayoutItem::Texture_UAV(37),          // RWTexture2D<float4> u_CombinedHistoryClampRelax
         // debugging slots go from 50-59
-        nvrhi::BindingLayoutItem::Texture_UAV(50),
         nvrhi::BindingLayoutItem::StructuredBuffer_UAV(51),
         nvrhi::BindingLayoutItem::StructuredBuffer_UAV(52),
         nvrhi::BindingLayoutItem::StructuredBuffer_UAV(53),
@@ -249,11 +208,14 @@ bool Sample::Init(const std::string& preferredScene)
         nvrhi::BindingLayoutItem::Texture_UAV(61),          // u_SecondarySurfaceRadiance
 
         nvrhi::BindingLayoutItem::Texture_UAV(70),          // u_RRDiffuseAlbedo
-        nvrhi::BindingLayoutItem::Texture_UAV(71),          // u_RRSpecAlbedo   
+        nvrhi::BindingLayoutItem::Texture_UAV(71),          // u_RRSpecAlbedo
         nvrhi::BindingLayoutItem::Texture_UAV(72),          // u_RRNormalsAndRoughness
         nvrhi::BindingLayoutItem::Texture_UAV(73),          // u_RRSpecMotionVectors
+        nvrhi::BindingLayoutItem::Texture_UAV(74),          // u_RRTransparencyLayer
+        nvrhi::BindingLayoutItem::Texture_UAV(75),          // u_DenoisingAvgLayerRadiance
 
-        nvrhi::BindingLayoutItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX)
+        nvrhi::BindingLayoutItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX),
+        nvrhi::BindingLayoutItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX)
     };
 
     // NV HLSL extensions - DX12 only - we should probably expose some form of GetNvapiIsInitialized instead
@@ -269,6 +231,32 @@ bool Sample::Init(const std::string& preferredScene)
     globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(44));
     globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(45));
 
+    // GBuffer
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(100));
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(101));
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(102));
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(103));
+    
+    // Local cubemap UAV (for RT pass)
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(10));   // u_LocalCubemap
+
+    // Reflection system textures (used by IntroSample for improved reflections)
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(80));   // t_LocalCubemapGGX
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(81));   // t_DiffuseIrradianceCube
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(82));   // t_SSRBlurChain
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(83));   // t_BRDFLUT
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(84));   // t_DepthHierarchy
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::ConstantBuffer(10)); // ReflectionConstants
+    // SSRConstants removed - SSR now uses push constants instead of constant buffer
+    
+    // SSR result UAV (depth hierarchy UAVs u80-84 are in a dedicated binding set)
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_UAV(85));   // u_SSRResult
+
+    // GTAO output (written by GTAORenderer, read by deferred lighting)
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(86));   // t_GTAOOutput
+    // Previous frame depth (for temporal reprojection / disocclusion detection)
+    globalBindingLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Texture_SRV(87));   // t_PrevDepth
+
     m_bindingLayout = device->createBindingLayout(globalBindingLayoutDesc);
 
     m_DescriptorTable = std::make_shared<engine::DescriptorTableManager>(device, m_bindlessLayout);
@@ -279,11 +267,11 @@ bool Sample::Init(const std::string& preferredScene)
     memset( &m_feedbackData, 0, sizeof(DebugFeedbackStruct) * 1 );
     memset( &m_debugDeltaPathTree, 0, sizeof(DeltaTreeVizPathVertex) * cDeltaTreeVizMaxVertices );
 
-    //Draw lines from the feedback buffer
+    //Draw lines from the feedback buffer - this is old and should all be replaced by ShaderDebug
     {
-        std::vector<ShaderMacro> drawLinesMacro = { ShaderMacro("DRAW_LINES_SHADERS", "1") };
-        m_linesVertexShader = m_shaderFactory->CreateShader("app/DebugLines.hlsl", "main_vs", &drawLinesMacro, nvrhi::ShaderType::Vertex);
-        m_linesPixelShader = m_shaderFactory->CreateShader("app/DebugLines.hlsl", "main_ps", &drawLinesMacro, nvrhi::ShaderType::Pixel);
+        std::vector<ShaderMacro> drawLinesMacro = { ShaderMacro("DRAW_LINES_SHADERS_OLD", "1") };
+        m_linesVertexShader = m_shaderFactory->CreateShader("app/Misc/DebugLines.hlsl", "main_vs", &drawLinesMacro, nvrhi::ShaderType::Vertex);
+        m_linesPixelShader = m_shaderFactory->CreateShader("app/Misc/DebugLines.hlsl", "main_ps", &drawLinesMacro, nvrhi::ShaderType::Pixel);
 
         nvrhi::VertexAttributeDesc attributes[] = {
             nvrhi::VertexAttributeDesc()
@@ -405,8 +393,6 @@ bool Sample::Init(const std::string& preferredScene)
 
     // Select initial scene
     SetCurrentScene(scene);
-
-    return true;
 }
 
 void Sample::SetCurrentScene( const std::string & sceneName, bool forceReload )
@@ -446,12 +432,14 @@ void Sample::SceneUnloading( )
     m_materialsBaker = nullptr;
     m_gpuSort = nullptr;
     m_uncompressedTextures.clear();
-	m_rtxdiPass->Reset();
+    if (m_rtxdiPass != nullptr) 
+	    m_rtxdiPass->Reset();
     if (m_ommBaker != nullptr)
         m_ommBaker->SceneUnloading();
 
-    m_ptPipelineReference = m_ptPipelineBuildStablePlanes = m_ptPipelineFillStablePlanes = m_ptPipelineTestRaygenPPHDR = m_ptPipelineEdgeDetection = nullptr;
+    DestroyRTPipelines();
     m_ptPipelineBaker = nullptr;
+    m_computePipelineBaker = nullptr;
 
     if (m_sampleGame!=nullptr) m_sampleGame->SceneUnloading();
 }
@@ -621,18 +609,12 @@ void Sample::SceneLoaded( )
     m_ui.ShaderReloadRequested = true;  // we have to re-create shader hit table
     m_ui.EnableAnimations = false;
     m_ui.RealtimeMode = false;
-    m_ui.UseReSTIRDI = false;
-    m_ui.UseReSTIRGI = false;
 
     std::shared_ptr<SampleSettings> settings = m_scene->GetSampleSettingsNode();
     if (settings != nullptr)
     {
         m_ui.RealtimeMode = settings->realtimeMode.value_or(m_ui.RealtimeMode);
         m_ui.EnableAnimations = settings->enableAnimations.value_or(m_ui.EnableAnimations);
-        if (settings->enableReSTIRDI.value_or(false))
-            m_ui.UseReSTIRDI = true;
-        if (settings->enableReSTIRGI.value_or(false))
-            m_ui.UseReSTIRGI = true;
         if (settings->startingCamera.has_value())
             m_selectedCameraIndex = settings->startingCamera.value()+1; // slot 0 reserved for free flight camera
         if (settings->realtimeFireflyFilter.has_value())
@@ -641,10 +623,12 @@ void Sample::SceneLoaded( )
             m_ui.RealtimeFireflyFilterEnabled = true;
         }
         m_ui.BounceCount = settings->maxBounces.value_or(m_ui.BounceCount);
-        m_ui.RealtimeDiffuseBounceCount = settings->realtimeMaxDiffuseBounces.value_or(m_ui.RealtimeDiffuseBounceCount);
-        m_ui.ReferenceDiffuseBounceCount = settings->referenceMaxDiffuseBounces.value_or(m_ui.ReferenceDiffuseBounceCount);
+        m_ui.DiffuseBounceCount = settings->maxDiffuseBounces.value_or(m_ui.DiffuseBounceCount);
         m_ui.TexLODBias = settings->textureMIPBias.value_or(m_ui.TexLODBias);
     }
+
+    if (m_cmdLine.stopAnimations)
+        m_ui.EnableAnimations = false;
 
     m_progressLoading.Set(70);
 
@@ -658,6 +642,34 @@ void Sample::SceneLoaded( )
     if (m_ommBaker!=nullptr) m_ommBaker->SceneLoaded(*m_scene);
 
     m_progressLoading.Set(100);
+
+    if (m_cmdLine.OverrideToRealtimeMode)
+        m_ui.RealtimeMode = true;
+    if (m_cmdLine.OverrideToReferenceMode)
+        m_ui.RealtimeMode = false;
+    
+    if (m_cmdLine.OverrideAutoexposureOff)
+    {
+        m_ui.ToneMappingParams.autoExposure = false;
+        m_ui.ToneMappingParams.exposureValue = 0.0f;
+    }
+    if (m_cmdLine.OverrideExposureOffset != FLT_MAX)
+        m_ui.ToneMappingParams.exposureCompensation = m_cmdLine.OverrideExposureOffset;
+    if (m_cmdLine.DisableFireflyFilters)
+    {
+        m_ui.RealtimeFireflyFilterEnabled = false;
+        m_ui.ReferenceFireflyFilterEnabled = false;
+    }
+    if (m_cmdLine.DisablePostProcessFilters)
+    {
+        m_ui.EnableBloom = false;
+    }
+    if (m_cmdLine.cameraPosDirUp != "")
+        SetCurrentCameraPosDirUp(m_cmdLine.cameraPosDirUp);
+
+    m_ui.MaterialVariantIndex = 0;
+
+    m_asyncLoadingInProgress = true;
 }
 
 bool Sample::KeyboardUpdate(int key, int scancode, int action, int mods)
@@ -750,8 +762,10 @@ bool Sample::MouseScrollUpdate(double xoffset, double yoffset)
 
 void Sample::Animate(float fElapsedTimeSeconds)
 {
-    if (m_ui.FPSLimiter>0)    // essential for stable video recording
-        fElapsedTimeSeconds = 1.0f / (float)m_ui.FPSLimiter;
+    if (m_ui.ActualFPSLimiter()>0)    // essential for stable video recording
+        fElapsedTimeSeconds = 1.0f / (float)m_ui.ActualFPSLimiter();
+
+    m_captureScriptManager->PreAnim(fElapsedTimeSeconds);
 
     m_lastDeltaTime = fElapsedTimeSeconds;
 
@@ -835,12 +849,15 @@ void Sample::Animate(float fElapsedTimeSeconds)
             m_ui.ResetAccumulation = true;
     }
 
+    m_captureScriptManager->PostAnim();
+
+
     double frameTime = GetDeviceManager()->GetAverageFrameTimeSeconds();
     if (frameTime > 0.0)
     {
 #if DONUT_WITH_STREAMLINE
-        if (m_ui.DLSSGMultiplier != 1)
-            m_fpsInfo = StringFormat("%.3f ms/%d-frames* (%.1f FPS*) *DLSS-G", frameTime * 1e3, m_ui.DLSSGMultiplier, m_ui.DLSSGMultiplier / frameTime);
+        if (m_ui.DLSSFGMultiplier != 1)
+            m_fpsInfo = StringFormat("%.3f ms/%d-frames* (%.1f FPS*) *DLSS-G", frameTime * 1e3, m_ui.DLSSFGMultiplier, m_ui.DLSSFGMultiplier / frameTime);
         else
 #endif
             m_fpsInfo = StringFormat("%.3f ms/frame (%.1f FPS)", frameTime * 1e3, 1.0 / frameTime);
@@ -878,7 +895,28 @@ float Sample::GetAvgTimePerFrame() const
     return float(elapsed.count() / m_benchFrames);
 }
 
-void Sample::SaveCurrentCamera()
+std::string Sample::GetCurrentCameraPosDirUp() const
+{
+    auto toString = [](const float3 & val)    { return std::to_string(val.x) + "," + std::to_string(val.y) + "," + std::to_string(val.z); };
+    return toString(m_camera.GetPosition()) + "," + toString(m_camera.GetDir()) + "," + toString(m_camera.GetUp());
+}
+
+bool Sample::SetCurrentCameraPosDirUp(const std::string & val)
+{
+	if (val=="") 
+        return false;
+    bool ok = true;
+    float3 worldPos, worldDir, worldUp;
+    std::string temp = val;
+    ok &= ParseFloat3Consume( temp, worldPos );
+    ok &= ParseFloat3Consume( temp, worldDir );
+    ok &= ParseFloat3Consume( temp, worldUp );
+    if (ok)
+        m_camera.LookAt( worldPos, worldPos + worldDir, worldUp );
+    return ok;
+}
+
+void Sample::SaveCurrentCamera() const
 {
     float3 worldPos = m_camera.GetPosition();
     float3 worldDir = m_camera.GetDir();
@@ -964,16 +1002,7 @@ void Sample::FillPTPipelineGlobalMacros(std::vector<donut::engine::ShaderMacro> 
 
     macros.push_back({ "PT_ENABLE_RUSSIAN_ROULETTE", (m_ui.EnableRussianRoulette) ? ("1") : ("0") });
 
-    macros.push_back({ "FIREFLY_FILTER_RELAX_ON_NON_NOISY", (m_ui.RealtimeFireflyFilterRelaxOnNonNoisy) ? ("1") : ("0") });
-
     macros.push_back({ "PT_NEE_ENABLED", (m_ui.UseNEE)?("1"):("0") });
-
-    bool antiLagNeeded = m_ui.NEEAT_AntiLagPass && m_ui.NEEType == 2 && m_ui.NEEAT_LocalTemporalFeedbackEnabled;
-    macros.push_back({ "PT_NEE_ANTI_LAG_PASS", (antiLagNeeded)?("1"):("0") });
-
-    macros.push_back({ "PT_NEE_CANDIDATE_SAMPLES", std::to_string(m_ui.NEECandidateSamples) });
-    
-    macros.push_back({ "PT_NEE_BOOST_SAMPLING_ON_DOMINANT_PLANE", std::to_string(m_ui.NEEBoostSamplingOnDominantPlane) });
 
     macros.push_back({ "PT_USE_RESTIR_DI", (m_ui.ActualUseReSTIRDI()) ? ("1") : ("0") });   // these will match constants.useReSTIRDI but constants are used in other passes too
     macros.push_back({ "PT_USE_RESTIR_GI", (m_ui.ActualUseReSTIRGI()) ? ("1") : ("0") });   // these will match constants.useReSTIRGI but constants are used in other passes too
@@ -982,6 +1011,30 @@ void Sample::FillPTPipelineGlobalMacros(std::vector<donut::engine::ShaderMacro> 
     // minor perf gains but recompile time every time value changed is too annoying 
     // macros.push_back({ "PT_BOUNCE_COUNT", std::to_string(m_ui.BounceCount) });
     // macros.push_back({ "PT_DIFFUSE_BOUNCE_COUNT", std::to_string((m_ui.RealtimeMode) ? (m_ui.RealtimeDiffuseBounceCount) : (m_ui.ReferenceDiffuseBounceCount)) });
+
+    macros.push_back({ "RTXPT_USE_APPROXIMATE_MIS", (m_ui.ActualUseApproximateMIS()) ? ("1") : ("0") });
+
+    // It helps performance a lot when these are baked in
+    macros.push_back({ "RTXPT_NEE_FULL_SAMPLE_COUNT", std::to_string(m_ui.NEEFullSamples) });
+    uint localCandidateSamples = ComputeCandidateSampleLocalCount(m_ui.ActualNEEAT_LocalToGlobalSampleRatio(), m_ui.NEECandidateSamples);
+    uint globalCandidateSamples = ComputeCandidateSampleGlobalCount(m_ui.ActualNEEAT_LocalToGlobalSampleRatio(), m_ui.NEECandidateSamples);
+    macros.push_back({ "RTXPT_NEE_LOCAL_CANDIDATE_SAMPLE_COUNT", std::to_string(localCandidateSamples) });
+    macros.push_back({ "RTXPT_NEE_GLOBAL_CANDIDATE_SAMPLE_COUNT", std::to_string(globalCandidateSamples) });
+    macros.push_back({ "RTXPT_NEE_TOTAL_CANDIDATE_SAMPLE_COUNT", std::to_string(m_ui.NEECandidateSamples) });
+
+    macros.push_back({ "RTXPT_DISABLE_SER_TERMINATION_HINT", (m_ui.DbgDisableSERTerminationHint)?("1"):("0") });
+    macros.push_back({ "RTXPT_DISCARD_NON_NEE_LIGHTING", (m_ui.DbgDiscardNonNEELighting) ? ("1") : ("0") });
+    macros.push_back({ "RTXPT_DISCARD_NEE_LIGHTING", (m_ui.DbgDiscardNEELighting) ? ("1") : ("0") });
+    
+    macros.push_back({ "RTXPT_FIREFLY_FILTER", (m_ui.ActualFireflyFilterEnabled()) ? ("1") : ("0") });
+
+    macros.push_back({ "RTXPT_ACTIVE_STABLE_PLANE_COUNT", std::to_string(m_ui.StablePlanesActiveCount) });
+
+    macros.push_back({ "RTXPT_NESTED_DIELECTRICS_QUALITY", std::to_string(m_ui.NestedDielectricsQuality) });
+
+    macros.push_back({ "RTXPT_LP_TYPES_USE_16BIT_PRECISION", (m_ui.UseFp16Types) ? ("1") : ("0") });
+
+    macros.push_back({ "RTXPT_ENABLE_LOW_DISCREPANCY_SAMPLER_FOR_BSDF", (m_ui.EnableLDSamplerForBSDF) ? ("1") : ("0") });
 
     m_lightsBaker->SetGlobalShaderMacros(macros);
     if (m_ommBaker != nullptr)
@@ -995,7 +1048,7 @@ bool Sample::CreatePTPipeline(engine::ShaderFactory& shaderFactory)
     {
         std::vector<donut::engine::ShaderMacro> shaderMacros;
 		// shaderMacros.push_back(donut::engine::ShaderMacro({ "USE_RTXDI", "0" }));
-        m_exportVBufferCS = m_shaderFactory->CreateShader("app/ExportVisibilityBuffer.hlsl", "main", &shaderMacros, nvrhi::ShaderType::Compute);
+        m_exportVBufferCS = m_shaderFactory->CreateShader("app/ProcessingPasses/ExportVisibilityBuffer.hlsl", "main", &shaderMacros, nvrhi::ShaderType::Compute);
         nvrhi::ComputePipelineDesc pipelineDesc;
 		pipelineDesc.bindingLayouts = { m_bindingLayout, m_bindlessLayout };
 		pipelineDesc.CS = m_exportVBufferCS;
@@ -1203,7 +1256,7 @@ void Sample::BackBufferResizing()
 
 // NOTE: we're not yet sure if this is necessary to avoid crash with going in/out of fullscreen and FG
 #if DONUT_WITH_STREAMLINE
-    if (m_ui.DLSSGOptions.mode == StreamlineInterface::DLSSGMode::eOn || m_ui.ActualDLSSGMode() == StreamlineInterface::DLSSGMode::eOn) 
+    if (m_ui.DLSSFGOptions.mode == StreamlineInterface::DLSSGMode::eOn || m_ui.ActualDLSSFGMode() == StreamlineInterface::DLSSGMode::eOn) 
     {
         GetDeviceManager()->GetStreamline().CleanupDLSS(false);
         GetDeviceManager()->GetStreamline().CleanupDLSSG(false);
@@ -1213,11 +1266,11 @@ void Sample::BackBufferResizing()
             auto dlssgOptions = StreamlineInterface::DLSSGOptions{};
             StreamlineInterface::DLSSGState state;
             GetDeviceManager()->GetStreamline().GetDLSSGState(state, dlssgOptions);
-            m_ui.DLSSGMultiplier = state.numFramesActuallyPresented;
-            m_ui.DLSSGMaxNumFramesToGenerate = state.numFramesToGenerateMax;
+            m_ui.DLSSFGMultiplier = state.numFramesActuallyPresented;
+            m_ui.DLSSFGMaxNumFramesToGenerate = state.numFramesToGenerateMax;
 
             GetDeviceManager()->GetStreamline().SetDLSSGOptions(dlssgOptions);
-            m_ui.DLSSGOptions = dlssgOptions;
+            m_ui.DLSSFGOptions = dlssgOptions;
         }
     }
 #endif
@@ -1225,11 +1278,16 @@ void Sample::BackBufferResizing()
 
 void Sample::CreateRenderPasses( bool& exposureResetRequired, nvrhi::CommandListHandle initializeCommandList )
 {
+    m_bindingCache->Clear();
+
     const uint2 screenResolution = {m_renderTargets->OutputColor->getDesc().width, m_renderTargets->OutputColor->getDesc().height};
 
     m_shaderDebug = std::make_shared<ShaderDebug>(GetDevice(), initializeCommandList, m_shaderFactory, m_CommonPasses);
 
-    m_rtxdiPass = std::make_unique<RtxdiPass>(GetDevice(), m_shaderFactory, m_CommonPasses, m_bindlessLayout);
+    if (m_ui.ActualUseRTXDIPasses())
+        m_rtxdiPass = std::make_unique<RtxdiPass>(GetDevice(), m_shaderFactory, m_CommonPasses, m_bindlessLayout);
+    else
+        m_rtxdiPass = nullptr;
 
     m_accumulationPass = std::make_unique<AccumulationPass>(GetDevice(), m_shaderFactory);
     m_accumulationPass->CreatePipeline();
@@ -1258,19 +1316,21 @@ void Sample::CreateRenderPasses( bool& exposureResetRequired, nvrhi::CommandList
     if (!CreatePTPipeline(*m_shaderFactory))
         { assert(false); }
 
-    if (m_envMapBaker == nullptr || m_lightsBaker == nullptr)
-    {
-        m_envMapBaker = std::make_shared<EnvMapBaker>(GetDevice(), m_TextureCache, m_shaderFactory, m_CommonPasses);
-        m_lightsBaker = std::make_shared<LightsBaker>(GetDevice(), m_TextureCache, m_shaderFactory, m_envMapBaker);
-    }
-    m_envMapBaker->CreateRenderPasses(m_shaderDebug);
-    m_lightsBaker->CreateRenderPasses(m_bindlessLayout, m_CommonPasses, m_shaderDebug, screenResolution);
+    if (m_envMapBaker == nullptr)
+        m_envMapBaker = std::make_shared<EnvMapBaker>(GetDevice(), m_TextureCache, NeedsRasterPrecompute());
+    if (m_lightsBaker == nullptr)
+        m_lightsBaker = std::make_shared<LightsBaker>(GetDevice());
+    m_envMapBaker->CreateRenderPasses(m_shaderDebug, m_shaderFactory, m_computePipelineBaker);
+    m_envMapBaker->GenerateBRDFLUT(initializeCommandList.Get(), *m_bindingCache);  // One-time BRDF LUT generation
+    m_lightsBaker->CreateRenderPasses(m_shaderFactory, m_bindlessLayout, m_CommonPasses, m_shaderDebug, screenResolution, m_envMapBaker->GetImportanceSampling()->GetImportanceMapResolution());
 
 #if 0 // enable if needed
     if (m_gpuSort == nullptr)
         m_gpuSort = std::make_shared<GPUSort>(GetDevice(), m_shaderFactory);
     m_gpuSort->CreateRenderPasses(m_CommonPasses, m_shaderDebug);
 #endif
+
+    m_denoisingGuidesBaker = std::make_shared<DenoisingGuidesBaker>(GetDevice(), m_shaderFactory, m_renderTargets, m_shaderDebug, m_bindingLayout);
 }
 
 void Sample::SetEnvMapOverrideSource(const std::string& envMapOverride) 
@@ -1291,7 +1351,7 @@ void Sample::PreUpdateLighting(nvrhi::CommandListHandle commandList, bool& needN
     if (m_envMapOverride != "" && m_envMapOverride != c_EnvMapSceneDefault)
         envMapActualPath = (IsProceduralSky(m_envMapOverride.c_str()))?(m_envMapOverride):(std::string(c_EnvMapSubFolder) + "/" + m_envMapOverride);
     
-    m_envMapBaker->PreUpdate(commandList, envMapActualPath);
+    m_envMapBaker->PreUpdate(commandList, m_CommonPasses, envMapActualPath);
 
     if (preUpdateCube != m_envMapBaker->GetEnvMapCube())
         needNewBindings = true;
@@ -1325,7 +1385,7 @@ void Sample::UpdateLighting(nvrhi::CommandListHandle commandList)
         }
     }
 
-    if (m_envMapBaker->Update(commandList, EnvMapBaker::BakeSettings { .EnvMapRadianceScale = c_envMapRadianceScale }, m_sceneTime, dirLights, dirLightCount, !m_ui.RealtimeMode || !m_ui.EnableAnimations) )
+    if (m_envMapBaker->Update(commandList, *m_bindingCache, m_CommonPasses, EnvMapBaker::BakeSettings { .EnvMapRadianceScale = c_envMapRadianceScale }, m_sceneTime, dirLights, dirLightCount, !m_ui.RealtimeMode || !m_ui.EnableAnimations) )
         m_ui.ResetAccumulation = true;
 
     {
@@ -1335,23 +1395,21 @@ void Sample::UpdateLighting(nvrhi::CommandListHandle commandList)
         settings.CameraDirection = m_camera.GetDir();
         settings.ViewProjMatrix = m_view->GetViewProjectionMatrix();
         settings.MouseCursorPos = m_ui.MousePos;
-        settings.GlobalTemporalFeedbackEnabled  = m_ui.NEEAT_GlobalTemporalFeedbackEnabled;
-        settings.GlobalTemporalFeedbackRatio    = m_ui.NEEAT_GlobalTemporalFeedbackRatio;
-        settings.LocalTemporalFeedbackEnabled   = m_ui.NEEAT_LocalTemporalFeedbackEnabled;
-        settings.LocalTemporalFeedbackRatio     = m_ui.NEEAT_LocalTemporalFeedbackRatio;
-        settings.LightSampling_MIS_Boost        = m_ui.NEEAT_MIS_Boost;
+        settings.GlobalTemporalFeedbackWeight   = m_ui.NEEAT_GlobalTemporalFeedbackWeight;
+        settings.LocalToGlobalSampleRatio       = m_ui.ActualNEEAT_LocalToGlobalSampleRatio();
+        settings.UseApproximateMIS              = m_ui.ActualUseApproximateMIS();
         settings.DistantVsLocalImportanceScale  = m_ui.NEEAT_Distant_vs_Local_Importance;
         settings.ResetFeedback = m_ui.ResetAccumulation && !m_ui.RealtimeMode 
 #if 1
             || m_ui.ResetRealtimeCaches
 #endif
         ;
-        settings.EnableAntiLag = m_ui.NEEAT_AntiLagPass;
         settings.PrevViewportSize = float2( (float)m_viewPrevious->GetViewExtent().width(), (float)m_viewPrevious->GetViewExtent().height() );
         settings.ViewportSize = float2( (float)m_view->GetViewExtent().width(), (float)m_view->GetViewExtent().height() );
-        settings.EnvMapParams = m_envMapSceneParams;
+        settings.EnvMapParams = LightsBakerEnvMapParams{ .Transform = m_envMapSceneParams.Transform, .InvTransform = m_envMapSceneParams.InvTransform, .ColorMultiplier = m_envMapSceneParams.ColorMultiplier, .Enabled = m_envMapSceneParams.Enabled };
+        settings.FrameIndex = m_frameIndex;
 
-        m_lightsBaker->UpdateFrame(commandList, settings, m_sceneTime, m_scene, m_materialsBaker, m_ommBaker, m_subInstanceBuffer, m_subInstanceData);
+        m_lightsBaker->UpdateBegin(commandList, *m_bindingCache, settings, m_sceneTime, m_scene, m_materialsBaker, m_ommBaker, m_subInstanceBuffer, m_subInstanceData, m_envMapBaker->GetImportanceSampling()->GetRadianceAndImportanceMap());
     }
 }
 
@@ -1380,12 +1438,15 @@ void Sample::PreUpdatePathTracing( bool resetAccum, nvrhi::CommandListHandle com
         m_benchFrames++;
         m_benchLast = std::chrono::high_resolution_clock::now( );
     }
-
+    m_accumulationCompleted = false;
     // 'min' in non-realtime path here is to keep looping the last sample for debugging purposes!
     if( !m_ui.RealtimeMode )
+    {
         m_sampleIndex = (m_accumulationSampleIndex<0)?(m_accumulationSampleIndex+4096):(min(m_accumulationSampleIndex, m_ui.AccumulationTarget - 1));
+        m_accumulationCompleted |= m_accumulationSampleIndex == m_ui.AccumulationTarget - 1;
+    }
     else
-        m_sampleIndex = (m_ui.RealtimeNoise)?( m_frameIndex % 8192 ):0;     // actual sample index
+        m_sampleIndex = (!m_ui.DbgFreezeRealtimeNoiseSeed)?( m_frameIndex % 8192 ):0;     // actual sample index
 }
 
 void Sample::PostUpdatePathTracing( )
@@ -1436,9 +1497,13 @@ void Sample::UpdatePathTracerConstants( PathTracerConstants & constants, const P
     constants.camera = cameraData;
 
     constants.bounceCount = m_ui.BounceCount;
-    constants.diffuseBounceCount = (m_ui.RealtimeMode)?(m_ui.RealtimeDiffuseBounceCount):(m_ui.ReferenceDiffuseBounceCount);
+    constants.diffuseBounceCount = m_ui.DiffuseBounceCount;
     constants.perPixelJitterAAScale = (m_ui.RealtimeMode == false && m_ui.AccumulationAA)?(1):( (m_ui.RealtimeMode && m_ui.RealtimeAA == 3)?(m_ui.DLSSRRMicroJitter):(0.0f) );
-    constants.texLODBias = m_ui.TexLODBias;
+
+    // needed to allow super-resolution to work best
+    float dlssBias = -donut::math::log2f(sqrtf((m_displaySize.x * m_displaySize.y) / float(m_renderSize.x * m_renderSize.y)));
+
+    constants.texLODBias = m_ui.TexLODBias + dlssBias;
     constants.sampleBaseIndex = m_sampleIndex * m_ui.ActualSamplesPerPixel();
 
     //constants.subSampleCount = m_ui.ActualSamplesPerPixel();
@@ -1458,11 +1523,12 @@ void Sample::UpdatePathTracerConstants( PathTracerConstants & constants, const P
     constants.useReSTIRDI = m_ui.ActualUseReSTIRDI();
     constants.useReSTIRGI = m_ui.ActualUseReSTIRGI();
     constants.denoiserRadianceClampK = m_ui.DenoiserRadianceClampK;
+    constants.DLSSRRBrightnessClampK = (m_ui.DLSSRRBrightnessClampK>0)?(m_ui.DLSSRRBrightnessClampK * constants.preExposedGrayLuminance):(0.0f);
 
     // no stable planes by default
     constants.denoisingEnabled = m_ui.ActualUseStandaloneDenoiser() || m_ui.RealtimeAA == 3;
 
-    constants.activeStablePlaneCount            = m_ui.StablePlanesActiveCount;
+    constants._activeStablePlaneCount           = m_ui.StablePlanesActiveCount;
     constants.maxStablePlaneVertexDepth         = std::min( std::min( (uint)m_ui.StablePlanesMaxVertexDepth, cStablePlaneMaxVertexIndex ), (uint)m_ui.BounceCount );
     constants.allowPrimarySurfaceReplacement    = m_ui.AllowPrimarySurfaceReplacement;
     constants.stablePlanesSplitStopThreshold    = m_ui.StablePlanesSplitStopThreshold;
@@ -1513,7 +1579,7 @@ void Sample::RtxdiSetupFrame(nvrhi::IFramebuffer* framebuffer, PathTracerCameraD
 
 bool Sample::ShouldRenderUnfocused()
 {
-    if (m_frameIndex < 16 || m_ui.ResetAccumulation || m_ui.ResetRealtimeCaches)
+    if (m_frameIndex < 16 || m_ui.ResetAccumulation || m_ui.ResetRealtimeCaches || m_captureScriptManager->IsDoingWork() )
     {
         // Make sure we at least run one render frame to allow expensive resource creation to happen in background, and to allow at least somewhat decent convergence so when user alt-tabs they get a nice image
         return true;
@@ -1580,25 +1646,25 @@ void Sample::StreamlinePreRender()
     // DLSS-G Setup
     {
         // If DLSS-G has been turned off, then we tell tell SL to clean it up expressly
-        if (m_ui.DLSSGOptions.mode == StreamlineInterface::DLSSGMode::eOn && m_ui.ActualDLSSGMode() == StreamlineInterface::DLSSGMode::eOff) {
+        if (m_ui.DLSSFGOptions.mode == StreamlineInterface::DLSSGMode::eOn && m_ui.ActualDLSSFGMode() == StreamlineInterface::DLSSGMode::eOff) {
             GetDeviceManager()->GetStreamline().CleanupDLSSG(true);
         }
 
         // This is where DLSS-G is toggled On and Off (using dlssgOptions.mode) and where we set DLSS-G parameters.
         auto dlssgOptions = StreamlineInterface::DLSSGOptions{};
-        dlssgOptions.mode = m_ui.ActualDLSSGMode();
-        dlssgOptions.numFramesToGenerate = m_ui.DLSSGNumFramesToGenerate;
+        dlssgOptions.mode = m_ui.ActualDLSSFGMode();
+        dlssgOptions.numFramesToGenerate = m_ui.DLSSFGNumFramesToGenerate;
 
         // This is where we query DLSS-G minimum swapchain size
         if (GetDeviceManager()->GetStreamline().IsDLSSGAvailable())
         {
             StreamlineInterface::DLSSGState state;
             GetDeviceManager()->GetStreamline().GetDLSSGState(state, dlssgOptions);
-            m_ui.DLSSGMultiplier = state.numFramesActuallyPresented;
-            m_ui.DLSSGMaxNumFramesToGenerate = state.numFramesToGenerateMax;
+            m_ui.DLSSFGMultiplier = state.numFramesActuallyPresented;
+            m_ui.DLSSFGMaxNumFramesToGenerate = state.numFramesToGenerateMax;
 
             GetDeviceManager()->GetStreamline().SetDLSSGOptions(dlssgOptions);
-            m_ui.DLSSGOptions = dlssgOptions;
+            m_ui.DLSSFGOptions = dlssgOptions;
         }
     }
 
@@ -1657,10 +1723,11 @@ void Sample::StreamlinePreRender()
                     // Only quality, target width and height matter here
                     GetDeviceManager()->GetStreamline().QueryDLSSOptimalSettings(dlssOptions, m_recommendedDLSSSettings);
 
-                    if (dlssOptions.mode == SI::DLSSMode::eBalanced)
+                    // this is an example on how to override defaults - overriding default 2/3 to higher res 3/4
+                    if (dlssOptions.mode == SI::DLSSMode::eMaxQuality)
                     {
-                        m_recommendedDLSSSettings.optimalRenderSize.x = dm::clamp((int)(dlssOptions.outputWidth * 3 / 5 + 0.5f), m_recommendedDLSSSettings.minRenderSize.x, m_recommendedDLSSSettings.maxRenderSize.x);
-                        m_recommendedDLSSSettings.optimalRenderSize.y = dm::clamp((int)(dlssOptions.outputHeight * 3 / 5 + 0.5f), m_recommendedDLSSSettings.minRenderSize.y, m_recommendedDLSSSettings.maxRenderSize.y);
+                        m_recommendedDLSSSettings.optimalRenderSize.x = dm::clamp((int)(dlssOptions.outputWidth * 3 / 4 + 0.5f), m_recommendedDLSSSettings.minRenderSize.x, m_recommendedDLSSSettings.maxRenderSize.x);
+                        m_recommendedDLSSSettings.optimalRenderSize.y = dm::clamp((int)(dlssOptions.outputHeight * 3 / 4 + 0.5f), m_recommendedDLSSSettings.minRenderSize.y, m_recommendedDLSSSettings.maxRenderSize.y);
                     }
 
                     if (m_recommendedDLSSSettings.optimalRenderSize.x <= 0 || m_recommendedDLSSSettings.optimalRenderSize.y <= 0)
@@ -1714,35 +1781,32 @@ void Sample::StreamlinePreRender()
 #endif // #if DONUT_WITH_STREAMLINE
 }
 
-void Sample::ResetSceneTime( ) 
+void Sample::SetSceneTime( double sceneTime ) 
 { 
     if (m_sampleGame->IsInitialized())
-        m_sampleGame->SetGameTime(0.);
-    m_sceneTime = 0.; 
+        m_sampleGame->SetGameTime(sceneTime);
+    m_sceneTime = sceneTime; 
 }
 
-void Sample::PreRenderScripts()
+double Sample::GetSceneTime()
 {
-    if( m_ui.FPSLimiter > 0 )
-        g_FPSLimiter.FramerateLimit( m_ui.FPSLimiter );
+    if (m_sampleGame->IsInitialized())
+        return m_sampleGame->GetGameTime();
+    return m_sceneTime;
+}
+
+
+void Sample::PreRender()
+{
+    // Limit FPS
+    if (m_ui.ActualFPSLimiter() > 0)
+        g_FPSLimiter.FramerateLimit(m_ui.ActualFPSLimiter());
 
     korgi::Update();
 
-    if (m_ui.ScreenshotMiniSequenceCounter == -1)
-    {
-        if (!m_ui.ScreenshotFileName.empty() && m_ui.ScreenshotResetAndDelay) 
-        {
-            if (m_ui.ScreenshotResetAndDelayCounter == -1) // we just started with delay, set it up
-            {
-                m_ui.ScreenshotResetAndDelayCounter = m_ui.ScreenshotResetAndDelayFrames+1;
-                m_ui.ResetRealtimeCaches = true;
-            }
-            m_ui.ScreenshotResetAndDelayCounter--;
-            assert(m_ui.ScreenshotResetAndDelayCounter >= 0);
-        }
-    }
-
+    m_captureScriptManager->PreRender();
 }
+
 SimpleViewConstants FromPlanarViewConstants(PlanarViewConstants & view)
 {
     SimpleViewConstants ret;
@@ -1836,14 +1900,13 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         return;
     }
     m_progressLoading.Stop();
+    m_asyncLoadingInProgress = false; // can be changed back to 'true' during the frame below, for example by OMMs
 
-    PreRenderScripts();
-
-    bool needNewPasses = false;
-    bool needNewBindings = false;
+    PreRender();
 
     StreamlinePreRender();
 
+ 
     m_displayAspectRatio = m_displaySize.x/(float)m_displaySize.y;
 
     if (m_view == nullptr)
@@ -1854,6 +1917,7 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         m_view->SetViewport(nvrhi::Viewport(float(m_renderSize.x), float(m_renderSize.y)));
     }
 
+    bool needNewPasses = false;
     if( m_renderTargets == nullptr || m_renderTargets->IsUpdateRequired( m_renderSize, m_displaySize ) )
     {
         GetDevice()->waitForIdle();
@@ -1863,9 +1927,10 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         m_renderTargets = nullptr;
         m_bindingCache->Clear( );
         m_renderTargets = std::make_unique<RenderTargets>( );
-        m_renderTargets->Init(GetDevice( ), m_renderSize, m_displaySize, true, true, c_swapchainCount);
+        m_renderTargets->Init(GetDevice( ), m_renderSize, m_displaySize, true, true, c_SwapchainCount, NeedsIntroPathTracerBuffers());
 
         needNewPasses = true;
+        OnRenderTargetsRecreated();
     }
 
     // Environment map settings
@@ -1896,9 +1961,14 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 
     bool exposureResetRequired = false;
 
-    if (m_ui.NRDModeChanged)
+    if (m_ui.NRDModeChanged) // if changing between ReLAX and ReBLUR
     {
         needNewPasses = true;
+        for (int i = 0; i < std::size(m_nrd); i++)
+            m_nrd[i] = nullptr;
+    }
+    if (!m_ui.ActualUseStandaloneDenoiser()) // clean up the memory if not used
+    {
         for (int i = 0; i < std::size(m_nrd); i++)
             m_nrd[i] = nullptr;
     }
@@ -1910,17 +1980,18 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 
         if (m_materialsBaker == nullptr)
         {
-            m_materialsBaker = std::make_shared<MaterialsBaker>(GetDevice(), m_TextureCache, m_shaderFactory);
+            m_materialsBaker = std::make_shared<MaterialsBaker>(GetMaterialSpecializationShader(), GetDevice(), m_TextureCache, m_shaderFactory);
             assert( m_ptPipelineBaker == nullptr ); // there should be no cases where materials baker is null but ptPipelineBaker isn't
             
             m_ptPipelineBaker = std::make_shared<PTPipelineBaker>(GetDevice(), m_materialsBaker, m_bindingLayout, m_bindlessLayout);
             
-            typedef donut::engine::ShaderMacro SM;
-            m_ptPipelineReference           = m_ptPipelineBaker->CreateVariant( "PathTracerSample.hlsl", { SM( "PATH_TRACER_MODE", "PATH_TRACER_MODE_REFERENCE" )            } );
-            m_ptPipelineBuildStablePlanes   = m_ptPipelineBaker->CreateVariant( "PathTracerSample.hlsl", { SM( "PATH_TRACER_MODE", "PATH_TRACER_MODE_BUILD_STABLE_PLANES" )  } );
-            m_ptPipelineFillStablePlanes    = m_ptPipelineBaker->CreateVariant( "PathTracerSample.hlsl", { SM( "PATH_TRACER_MODE", "PATH_TRACER_MODE_FILL_STABLE_PLANES" )   } );
-            m_ptPipelineTestRaygenPPHDR     = m_ptPipelineBaker->CreateVariant( "TestRaygenPP.hlsl", { SM( "PP_TEST_HDR", "1" ) } );
-            m_ptPipelineEdgeDetection       = m_ptPipelineBaker->CreateVariant( "TestRaygenPP.hlsl", { SM( "PP_EDGE_DETECTION", "1" ) } );
+            // Additional paths to monitor for compute shader hot reload (besides the default Shaders path)
+            std::vector<std::filesystem::path> additionalShaderPaths = {
+                GetDirectoryWithExecutable() / "../Rtxpt/Lighting"  // For shaders outside the main Shaders folder
+            };
+            m_computePipelineBaker = std::make_shared<ComputePipelineBaker>(GetDevice(), additionalShaderPaths);
+            
+            CreateRTPipelines();
         }
 
         m_materialsBaker->CreateRenderPassesAndLoadMaterials(m_bindlessLayout, m_CommonPasses, m_scene, m_currentScenePath, GetLocalPath(c_AssetsFolder));
@@ -1936,6 +2007,11 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
     // Changes to material properties and settings can require a BLAS/TLAS or subInstanceBuffer rebuild (alpha tested/exclusion flags etc); otherwise this is a no-op.
     RecreateAccelStructs(m_commandList);
 
+    if (m_ui.ActualUseRTXDIPasses() && m_rtxdiPass == nullptr )
+        needNewPasses = true; // this will initialize rtxdi passes
+    if (!m_ui.ActualUseRTXDIPasses())
+        m_rtxdiPass = nullptr;
+
     // this will also create or update materials which can trigger the need to update acceleration structures
     if (needNewPasses)
     {
@@ -1950,10 +2026,16 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 
     // this is the point where main ray tracing pipelines will actually get compiled
     m_ptPipelineBaker->Update(m_scene, (unsigned int)m_subInstanceData.size(), [this](std::vector<donut::engine::ShaderMacro> & macros){ this->FillPTPipelineGlobalMacros(macros); }, needNewPasses);
+    
+    // Update compute shaders (compile if needed)
+    if (m_computePipelineBaker)
+        m_computePipelineBaker->Update(needNewPasses);
+    
     m_progressInitializingRenderer.Set(90);
 
     m_commandList->open();
 
+    bool needNewBindings = false;
     PathTracerCameraData cameraData;
     {
         // Update camera data used by the path tracer & other systems
@@ -1979,13 +2061,19 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
             m_shaderDebug->BeginFrame(m_commandList, viewProj);
         }
 
+        // NOTE: this refreshes geometry buffers and updates stuff needed by m_ommBaker and m_materialsBaker and others below!
         m_scene->Refresh(m_commandList, GetFrameIndex());
+
         if(m_ommBaker) m_ommBaker->BuildOpacityMicromaps(*m_commandList, *m_scene);
         UpdateSkinnedBLASs(m_commandList, GetFrameIndex());
         m_commandList->compactBottomLevelAccelStructs(); // Compact acceleration structures that are tagged for compaction and have finished executing the original build
         BuildTLAS(m_commandList);
         TransitionMeshBuffersToReadOnly(m_commandList);
-        if (m_ommBaker) m_ommBaker->Update(*m_commandList, *m_scene);
+        if (m_ommBaker) 
+        {
+            m_asyncLoadingInProgress |= m_ommBaker->Update(*m_commandList, *m_scene);
+            m_asyncLoadingInProgress |= m_ommBaker->UIData().BuildsLeftInQueue > 0;
+        }
 
         m_materialsBaker->Update(m_commandList, m_scene, m_subInstanceData);
         UploadSubInstanceData(m_commandList); // this is now partial subInstance data, but lights baker update requires it to find materials and create emissive triangle lights
@@ -1994,9 +2082,12 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         PreUpdateLighting(m_commandList, needNewBindings);
 
         // Early init for RTXDI
-        if (needNewPasses || needNewBindings || m_bindingSet == nullptr)
-            m_rtxdiPass->Reset();
-        RtxdiSetupFrame(framebuffer, cameraData, m_renderSize);
+        if (m_rtxdiPass != nullptr) 
+        {
+            if (needNewPasses || needNewBindings || m_bindingSet == nullptr)
+                m_rtxdiPass->Reset();
+            RtxdiSetupFrame(framebuffer, cameraData, m_renderSize);
+        }
     }
 
 	if( needNewPasses || needNewBindings || m_bindingSet == nullptr )
@@ -2004,89 +2095,7 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         m_progressInitializingRenderer.Set(95);
         RAII_SCOPE( m_commandList->close(); GetDevice()->executeCommandList(m_commandList);, m_commandList->open(););
 
-        // WARNING: this must match the layout of the m_bindingLayout (or switch to CreateBindingSetAndLayout)
-        // Fixed resources that do not change between binding sets
-        nvrhi::BindingSetDesc bindingSetDescBase;
-        bindingSetDescBase.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
-            nvrhi::BindingSetItem::PushConstants(1, sizeof(SampleMiniConstants)),
-            //nvrhi::BindingSetItem::ConstantBuffer(2, m_lightsBaker->GetLightingConstants()),
-            nvrhi::BindingSetItem::RayTracingAccelStruct(0, m_topLevelAS),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_subInstanceBuffer),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(2, m_scene->GetInstanceBuffer()),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(3, m_scene->GetGeometryBuffer()),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(4, (m_ommBaker)?(m_ommBaker->GetGeometryDebugBuffer()):(m_materialsBaker->GetMaterialDataBuffer().Get()) ),   // YUCK
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(5, m_materialsBaker->GetMaterialDataBuffer()),
-            nvrhi::BindingSetItem::Texture_SRV(6,  m_renderTargets->LdrColorScratch, nvrhi::Format::SRGBA8_UNORM),
-            nvrhi::BindingSetItem::Texture_SRV(10, m_envMapBaker->GetEnvMapCube()), //m_EnvironmentMap->IsEnvMapLoaded() ? m_EnvironmentMap->GetEnvironmentMap() : m_CommonPasses->m_BlackTexture),
-            nvrhi::BindingSetItem::Texture_SRV(11, m_envMapBaker->GetImportanceSampling()->GetImportanceMapOnly()), //m_EnvironmentMap->IsImportanceMapLoaded() ? m_EnvironmentMap->GetImportanceMap() : m_CommonPasses->m_BlackTexture),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(12, m_lightsBaker->GetControlBuffer()),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(13, m_lightsBaker->GetLightBuffer()),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(14, m_lightsBaker->GetLightExBuffer()),
-            nvrhi::BindingSetItem::TypedBuffer_SRV(15, m_lightsBaker->GetLightProxyCounters()),     // t_tightProxyCounters
-            nvrhi::BindingSetItem::TypedBuffer_SRV(16, m_lightsBaker->GetLightSamplingProxies()),   // t_LightProxyIndices
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-            nvrhi::BindingSetItem::Texture_SRV(17, m_lightsBaker->GetLocalSamplingBuffer()),        // t_LightLocalSamplingBuffer
-#else
-            nvrhi::BindingSetItem::TypedBuffer_SRV(17, m_lightsBaker->GetLocalSamplingBuffer()),    // t_LightLocalSamplingBuffer
-#endif
-
-            nvrhi::BindingSetItem::Texture_SRV(18, m_lightsBaker->GetEnvLightLookupMap()),          // t_EnvLookupMap
-            //nvrhi::BindingSetItem::TypedBuffer_SRV(19, ),
-            nvrhi::BindingSetItem::Texture_UAV(20, m_lightsBaker->GetFeedbackTotalWeight()),        // u_LightFeedbackTotalWeight
-            nvrhi::BindingSetItem::Texture_UAV(21, m_lightsBaker->GetFeedbackCandidates()),         // u_LightFeedbackCandidates
-            nvrhi::BindingSetItem::Texture_UAV(22, m_lightsBaker->GetFeedbackTotalWeightAntiLagPass()),    // u_LightFeedbackTotalWeightAntiLag
-            nvrhi::BindingSetItem::Texture_UAV(23, m_lightsBaker->GetFeedbackCandidatesAntiLagPass()),     // u_LightFeedbackCandidatesAntiLag
-            nvrhi::BindingSetItem::Sampler(0, m_CommonPasses->m_AnisotropicWrapSampler),
-            nvrhi::BindingSetItem::Sampler(1, m_envMapBaker->GetEnvMapCubeSampler()),
-            nvrhi::BindingSetItem::Sampler(2, m_envMapBaker->GetImportanceSampling()->GetImportanceMapSampler()),
-            nvrhi::BindingSetItem::Texture_UAV(0, m_renderTargets->OutputColor),
-            nvrhi::BindingSetItem::Texture_UAV(1, m_renderTargets->ProcessedOutputColor),
-            nvrhi::BindingSetItem::Texture_UAV(2, m_renderTargets->LdrColor, nvrhi::Format::RGBA8_UNORM),
-            nvrhi::BindingSetItem::Texture_UAV(4, m_renderTargets->Throughput),
-            nvrhi::BindingSetItem::Texture_UAV(5, m_renderTargets->ScreenMotionVectors),
-            nvrhi::BindingSetItem::Texture_UAV(6, m_renderTargets->Depth),
-            nvrhi::BindingSetItem::Texture_UAV(31, m_renderTargets->DenoiserViewspaceZ),
-            nvrhi::BindingSetItem::Texture_UAV(32, m_renderTargets->DenoiserMotionVectors),
-            nvrhi::BindingSetItem::Texture_UAV(33, m_renderTargets->DenoiserNormalRoughness),
-            nvrhi::BindingSetItem::Texture_UAV(34, m_renderTargets->DenoiserDiffRadianceHitDist),
-            nvrhi::BindingSetItem::Texture_UAV(35, m_renderTargets->DenoiserSpecRadianceHitDist),
-            nvrhi::BindingSetItem::Texture_UAV(36, m_renderTargets->DenoiserDisocclusionThresholdMix),
-            nvrhi::BindingSetItem::Texture_UAV(37, m_renderTargets->CombinedHistoryClampRelax),
-            nvrhi::BindingSetItem::Texture_UAV(50, m_shaderDebug->GetDebugVizTexture()),    // todo: move to SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX
-            nvrhi::BindingSetItem::StructuredBuffer_UAV(51, m_feedback_Buffer_Gpu),
-            nvrhi::BindingSetItem::StructuredBuffer_UAV(52, m_debugLineBufferCapture),
-            nvrhi::BindingSetItem::StructuredBuffer_UAV(53, m_debugDeltaPathTree_Gpu),
-            nvrhi::BindingSetItem::StructuredBuffer_UAV(54, m_debugDeltaPathTreeSearchStack),
-            nvrhi::BindingSetItem::Texture_UAV(60, m_renderTargets->SecondarySurfacePositionNormal),
-            nvrhi::BindingSetItem::Texture_UAV(61, m_renderTargets->SecondarySurfaceRadiance),
-            nvrhi::BindingSetItem::Texture_UAV(70, m_renderTargets->RRDiffuseAlbedo),
-            nvrhi::BindingSetItem::Texture_UAV(71, m_renderTargets->RRSpecAlbedo),
-            nvrhi::BindingSetItem::Texture_UAV(72, m_renderTargets->RRNormalsAndRoughness),
-            nvrhi::BindingSetItem::Texture_UAV(73, m_renderTargets->RRSpecMotionVectors),
-            nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer())
-        };
-
-        // NV HLSL extensions - DX12 only - we should probably expose some form of GetNvapiIsInitialized instead
-        if (GetDevice()->queryFeatureSupport(nvrhi::Feature::HlslExtensionUAV))
-        {
-            bindingSetDescBase.bindings.push_back(
-                nvrhi::BindingSetItem::TypedBuffer_UAV(NV_SHADER_EXTN_SLOT_NUM, nullptr));
-        }
-
-        // Main raytracing & etc binding set
-		{
-            nvrhi::BindingSetDesc bindingSetDesc;
-
-            bindingSetDesc.bindings = bindingSetDescBase.bindings;
-
-            bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_UAV(40, m_renderTargets->StablePlanesHeader));
-            bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::StructuredBuffer_UAV(42, m_renderTargets->StablePlanesBuffer));
-            bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_UAV(44, m_renderTargets->StableRadiance));
-            bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::StructuredBuffer_UAV(45, m_renderTargets->SurfaceDataBuffer));
-
-            m_bindingSet = GetDevice()->createBindingSet(bindingSetDesc, m_bindingLayout);
-        }
+        RecreateBindingSet();
 
         m_progressInitializingRenderer.Set(100);
 
@@ -2172,12 +2181,7 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 
         m_commandList->writeBuffer(m_constantBuffer, &constants, sizeof(constants));
 
-		if (m_ui.ActualUseRTXDIPasses())
-            m_rtxdiPass->BeginFrame(m_commandList, *m_renderTargets, m_bindingLayout, m_bindingSet);
-
-        PathTrace(framebuffer, constants);
-
-        Denoise(framebuffer);
+        SampleRenderCode(framebuffer, m_commandList, constants);
 
         PostProcessAA(framebuffer, needNewPasses || m_ui.ResetRealtimeCaches);
     }
@@ -2199,6 +2203,10 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
     PostProcessPostToneMapping(m_commandList, fullscreenView);  // writing to m_renderTargets->LdrColor
 
     //m_postProcess->Render(m_commandList, m_renderTargets->LdrColor);
+
+    if (m_ui.EnableShaderDebug)
+        m_shaderDebug->EndFrameAndOutput(m_commandList, m_renderTargets->LdrFramebuffer->GetFramebuffer(fullscreenView), m_renderTargets->Depth, fbinfo.getViewport());
+
     m_zoomTool->Render(m_commandList, m_renderTargets->LdrColor);
 
     m_commandList->beginMarker("Blit");
@@ -2248,9 +2256,6 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
     }
     m_cpuSideDebugLines.clear();
 
-    if( m_ui.EnableShaderDebug )
-        m_shaderDebug->EndFrameAndOutput(m_commandList, framebuffer, m_renderTargets->Depth, fbinfo.getViewport() );
-
     if( m_ui.ContinuousDebugFeedback || m_pick )
     {
         m_commandList->copyBuffer(m_feedback_Buffer_Cpu, 0, m_feedback_Buffer_Gpu, 0, sizeof(DebugFeedbackStruct) * 1);
@@ -2285,55 +2290,12 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         m_pick = false;
     }
 
-    auto DumpScreenshot = [this](nvrhi::ITexture* framebufferTexture, const char* fileName, bool exitOnCompletion)
+    auto DumpScreenshot = [this, framebufferTexture](const char* fileName)
     {
-        const bool success = SaveTextureToFile(GetDevice(), m_CommonPasses.get(), framebufferTexture, nvrhi::ResourceStates::Common, fileName);
-
-        if (exitOnCompletion)
-        {
-            if (success)
-            {
-                donut::log::info("Image saved successfully %s. Exiting.", fileName);
-                std::exit(0);
-            }
-            else
-            {
-                donut::log::fatal("Unable to save image %s. Exiting.", fileName);
-                std::exit(1);
-            }
-        }
+        return SaveTextureToFile(GetDevice(), m_CommonPasses.get(), framebufferTexture, nvrhi::ResourceStates::Common, fileName);
     };
 
-    if (!m_ui.ScreenshotFileName.empty() && !(m_ui.ScreenshotResetAndDelay && m_ui.ScreenshotResetAndDelayCounter>0) )
-    {
-        std::filesystem::path screenshotFile = m_ui.ScreenshotFileName;
-        if (m_ui.ScreenshotMiniSequence)
-        {
-            if ( m_ui.ScreenshotMiniSequenceCounter == -1 ) // start sequence if in sequence mode
-                m_ui.ScreenshotMiniSequenceCounter = m_ui.ScreenshotMiniSequenceFrames;
-            assert( m_ui.ScreenshotMiniSequenceFrames > 0 );
-            m_ui.ScreenshotMiniSequenceCounter--;
-
-            std::filesystem::path justName = screenshotFile.filename().stem();
-            std::filesystem::path justExtension = screenshotFile.extension();
-            screenshotFile.remove_filename();
-            screenshotFile /= justName.string() + StringFormat("_%03d", m_ui.ScreenshotMiniSequenceFrames - m_ui.ScreenshotMiniSequenceCounter) + justExtension.string();
-        }
-
-        DumpScreenshot(framebufferTexture, screenshotFile.string().c_str(), false /*exitOnCompletion*/);
-
-        if (!m_ui.ScreenshotMiniSequence || m_ui.ScreenshotMiniSequenceCounter==0)
-        {
-            m_ui.ScreenshotFileName = "";
-            m_ui.ScreenshotResetAndDelayCounter = -1;
-            m_ui.ScreenshotMiniSequenceCounter = -1;
-        }
-    }
-
-	if (!m_cmdLine.screenshotFileName.empty() && (m_cmdLine.screenshotFrameIndex == GetFrameIndex()))
-	{
-        DumpScreenshot(framebufferTexture, m_cmdLine.screenshotFileName.c_str(), true /*exitOnCompletion*/);
-	}
+    m_captureScriptManager->PostRender(DumpScreenshot);
 
     if (m_ui.ExperimentalPhotoModeScreenshot)
     {
@@ -2345,9 +2307,123 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         m_temporalAntiAliasingPass->AdvanceFrame();
 
 	std::swap(m_view, m_viewPrevious);
-	GetDeviceManager()->SetVsyncEnabled(m_ui.EnableVsync);
+	GetDeviceManager()->SetVsyncEnabled(m_ui.ActualEnableVsync());
 
     PostUpdatePathTracing();
+}
+
+void Sample::RecreateBindingSet()
+{
+	// WARNING: this must match the layout of the m_bindingLayout (or switch to CreateBindingSetAndLayout)
+    // Fixed resources that do not change between binding sets
+    nvrhi::BindingSetDesc bindingSetDescBase;
+    bindingSetDescBase.bindings = {
+        nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
+        nvrhi::BindingSetItem::PushConstants(1, sizeof(SampleMiniConstants)),
+        //nvrhi::BindingSetItem::ConstantBuffer(2, m_lightsBaker->GetLightingConstants()),
+        nvrhi::BindingSetItem::RayTracingAccelStruct(0, m_topLevelAS),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_subInstanceBuffer),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(2, m_scene->GetInstanceBuffer()),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(3, m_scene->GetGeometryBuffer()),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(4, (m_ommBaker)?(m_ommBaker->GetGeometryDebugBuffer()):(m_materialsBaker->GetMaterialDataBuffer().Get()) ),   // YUCK
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(5, m_materialsBaker->GetMaterialDataBuffer()),
+        nvrhi::BindingSetItem::Texture_SRV(6,  m_renderTargets->LdrColorScratch, nvrhi::Format::SRGBA8_UNORM),
+        nvrhi::BindingSetItem::Texture_SRV(10, m_envMapBaker->GetEnvMapCube()), //m_EnvironmentMap->IsEnvMapLoaded() ? m_EnvironmentMap->GetEnvironmentMap() : m_CommonPasses->m_BlackTexture),
+        nvrhi::BindingSetItem::Texture_SRV(11, m_envMapBaker->GetImportanceSampling()->GetImportanceMapOnly()), //m_EnvironmentMap->IsImportanceMapLoaded() ? m_EnvironmentMap->GetImportanceMap() : m_CommonPasses->m_BlackTexture),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(12, m_lightsBaker->GetControlBuffer()),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(13, m_lightsBaker->GetLightBuffer()),
+        nvrhi::BindingSetItem::StructuredBuffer_SRV(14, m_lightsBaker->GetLightExBuffer()),
+        nvrhi::BindingSetItem::TypedBuffer_SRV(15, m_lightsBaker->GetLightProxyCounters()),     // t_tightProxyCounters
+        nvrhi::BindingSetItem::TypedBuffer_SRV(16, m_lightsBaker->GetLightSamplingProxies()),   // t_LightProxyIndices
+        nvrhi::BindingSetItem::TypedBuffer_SRV(17, m_lightsBaker->GetLocalSamplingBuffer()),    // t_LightLocalSamplingBuffer
+        nvrhi::BindingSetItem::Texture_SRV(18, m_lightsBaker->GetEnvLightLookupMap()),          // t_EnvLookupMap
+        //nvrhi::BindingSetItem::TypedBuffer_SRV(19, ),
+        nvrhi::BindingSetItem::Texture_UAV(20, m_lightsBaker->GetFeedbackTotalWeight()),        // u_LightFeedbackTotalWeight
+        nvrhi::BindingSetItem::Texture_UAV(21, m_lightsBaker->GetFeedbackCandidates()),         // u_LightFeedbackCandidates
+        nvrhi::BindingSetItem::Sampler(0, m_CommonPasses->m_AnisotropicWrapSampler),
+        nvrhi::BindingSetItem::Sampler(1, m_envMapBaker->GetEnvMapCubeSampler()),
+        nvrhi::BindingSetItem::Sampler(2, m_envMapBaker->GetImportanceSampling()->GetImportanceMapSampler()),
+        nvrhi::BindingSetItem::Texture_UAV(0, m_renderTargets->OutputColor),
+        nvrhi::BindingSetItem::Texture_UAV(1, m_renderTargets->ProcessedOutputColor),
+        nvrhi::BindingSetItem::Texture_UAV(2, m_renderTargets->LdrColor, nvrhi::Format::RGBA8_UNORM),
+        nvrhi::BindingSetItem::Texture_UAV(4, m_renderTargets->Throughput),
+        nvrhi::BindingSetItem::Texture_UAV(5, m_renderTargets->ScreenMotionVectors),
+        nvrhi::BindingSetItem::Texture_UAV(6, m_renderTargets->Depth),
+        nvrhi::BindingSetItem::Texture_UAV(7, m_renderTargets->SpecularHitT), 
+        nvrhi::BindingSetItem::Texture_UAV(8, m_renderTargets->ScratchFloat1), 
+        nvrhi::BindingSetItem::Texture_UAV(31, m_renderTargets->DenoiserViewspaceZ),
+        nvrhi::BindingSetItem::Texture_UAV(32, m_renderTargets->DenoiserMotionVectors),
+        nvrhi::BindingSetItem::Texture_UAV(33, m_renderTargets->DenoiserNormalRoughness),
+        nvrhi::BindingSetItem::Texture_UAV(34, m_renderTargets->DenoiserDiffRadianceHitDist),
+        nvrhi::BindingSetItem::Texture_UAV(35, m_renderTargets->DenoiserSpecRadianceHitDist),
+        nvrhi::BindingSetItem::Texture_UAV(36, m_renderTargets->DenoiserDisocclusionThresholdMix),
+        nvrhi::BindingSetItem::Texture_UAV(37, m_renderTargets->CombinedHistoryClampRelax),
+        nvrhi::BindingSetItem::StructuredBuffer_UAV(51, m_feedback_Buffer_Gpu),
+        nvrhi::BindingSetItem::StructuredBuffer_UAV(52, m_debugLineBufferCapture),
+        nvrhi::BindingSetItem::StructuredBuffer_UAV(53, m_debugDeltaPathTree_Gpu),
+        nvrhi::BindingSetItem::StructuredBuffer_UAV(54, m_debugDeltaPathTreeSearchStack),
+        nvrhi::BindingSetItem::Texture_UAV(60, m_renderTargets->SecondarySurfacePositionNormal),
+        nvrhi::BindingSetItem::Texture_UAV(61, m_renderTargets->SecondarySurfaceRadiance),
+        nvrhi::BindingSetItem::Texture_UAV(70, m_renderTargets->RRDiffuseAlbedo),
+        nvrhi::BindingSetItem::Texture_UAV(71, m_renderTargets->RRSpecAlbedo),
+        nvrhi::BindingSetItem::Texture_UAV(72, m_renderTargets->RRNormalsAndRoughness),
+        nvrhi::BindingSetItem::Texture_UAV(73, m_renderTargets->RRSpecMotionVectors),
+        nvrhi::BindingSetItem::Texture_UAV(74, (m_renderTargets->RRTransparencyLayer!=nullptr)?m_renderTargets->RRTransparencyLayer:m_renderTargets->RRSpecMotionVectors),
+        nvrhi::BindingSetItem::Texture_UAV(75, m_renderTargets->DenoiserAvgLayerRadianceHalfRes),
+
+        ///***
+        nvrhi::BindingSetItem::Texture_UAV(100, m_renderTargets->BaseColor),
+        nvrhi::BindingSetItem::Texture_UAV(101, m_renderTargets->SpecNormal),
+        nvrhi::BindingSetItem::Texture_UAV(102, m_renderTargets->RoughnessMetal),
+        nvrhi::BindingSetItem::Texture_UAV(103, m_renderTargets->MaterialInfo),
+        nvrhi::BindingSetItem::Texture_UAV(10, m_renderTargets->LocalCubemap),  // u_LocalCubemap for RT pass
+        ///***
+
+        nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
+        nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture())
+    };
+
+    // NV HLSL extensions - DX12 only - we should probably expose some form of GetNvapiIsInitialized instead
+    if (GetDevice()->queryFeatureSupport(nvrhi::Feature::HlslExtensionUAV))
+    {
+        bindingSetDescBase.bindings.push_back(
+            nvrhi::BindingSetItem::TypedBuffer_UAV(NV_SHADER_EXTN_SLOT_NUM, nullptr));
+    }
+
+    // Main raytracing & etc binding set
+    {
+        nvrhi::BindingSetDesc bindingSetDesc;
+
+        bindingSetDesc.bindings = bindingSetDescBase.bindings;
+
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_UAV(40, m_renderTargets->StablePlanesHeader));
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::StructuredBuffer_UAV(42, m_renderTargets->StablePlanesBuffer));
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_UAV(44, m_renderTargets->StableRadiance));
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::StructuredBuffer_UAV(45, m_renderTargets->SurfaceDataBuffer));
+
+        // Reflection system bindings (t80-t83, b3)
+        // Derived classes can override AddCustomBindings to provide actual textures
+        // Default to black texture fallbacks (NVRHI doesn't allow null textures)
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(80, m_CommonPasses->m_BlackCubeMapArray));  // t_LocalCubemapGGX
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(81, m_CommonPasses->m_BlackCubeMapArray));  // t_DiffuseIrradianceCube
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(82, m_CommonPasses->m_BlackTexture));  // t_SSRBlurChain
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(83, (m_envMapBaker->GetBRDFLUT()!=nullptr)?m_envMapBaker->GetBRDFLUT():m_CommonPasses->m_BlackTexture ));  // t_BRDFLUT
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(84, m_CommonPasses->m_BlackTexture));  // t_DepthHierarchy placeholder
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::ConstantBuffer(10, m_constantBuffer)); // ReflectionConstants (reuse main constant buffer as placeholder)
+        
+        // SSR result UAV (depth hierarchy UAVs u80-84 are in a dedicated binding set in IntroSample)
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_UAV(85, m_renderTargets->Depth));   // u_SSRResult placeholder
+
+        // GTAO output (default to white = no occlusion; overridden by AddCustomBindings)
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(86, m_CommonPasses->m_WhiteTexture));  // t_GTAOOutput placeholder
+        // Previous frame depth (default to black = zero depth; overridden by AddCustomBindings)
+        bindingSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(87, m_CommonPasses->m_BlackTexture));  // t_PrevDepth placeholder
+
+        // Allow derived classes to customize bindings (e.g., add reflection textures, GTAO output)
+        AddCustomBindings(bindingSetDesc);
+
+        m_bindingSet = GetDevice()->createBindingSet(bindingSetDesc, m_bindingLayout);
+    }
 }
 
 std::shared_ptr<donut::engine::Material> Sample::FindMaterial(int materialID) const
@@ -2379,19 +2455,28 @@ void Sample::PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants &
 
     if (useStablePlanes)
     {
-        RAII_SCOPE( m_commandList->beginMarker("PathTracePrePass");, m_commandList->endMarker(); );
         {
+            RAII_SCOPE(m_commandList->beginMarker("PathTracePrePass"); , m_commandList->endMarker(); );
+
+            m_commandList->setTextureState(m_renderTargets->Depth, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->ScreenMotionVectors, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->Throughput, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->SpecularHitT, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
             state.shaderTable = m_ptPipelineBuildStablePlanes->GetShaderTable();
             state.bindings = { m_bindingSet, m_DescriptorTable->GetDescriptorTable() };
             m_commandList->setRayTracingState(state);
             m_commandList->setPushConstants(&miniConstants, sizeof(miniConstants));
             m_commandList->dispatchRays(args);
             m_commandList->setBufferState(m_renderTargets->StablePlanesBuffer, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->Depth, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->ScreenMotionVectors, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->Throughput, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
         }
 
-        RAII_SCOPE(m_commandList->beginMarker("VBufferExport");, m_commandList->endMarker(); );
         {
-		    nvrhi::ComputeState state;
+            RAII_SCOPE(m_commandList->beginMarker("VBufferExport"); , m_commandList->endMarker(); );
+
+            nvrhi::ComputeState state;
 		    state.bindings = { m_bindingSet, m_DescriptorTable->GetDescriptorTable() };
             state.pipeline = m_exportVBufferPSO;
             m_commandList->setComputeState(state);
@@ -2401,6 +2486,13 @@ void Sample::PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants &
 		    m_commandList->dispatch(dispatchSize.x, dispatchSize.y);
         }
     }
+    else
+    {
+
+    }
+
+    // In realtime mode, ScreenMotionVectors reference mode ScreenMotionVectors should be 0
+    m_lightsBaker->UpdateEnd(m_commandList, *m_bindingCache, m_scene, m_materialsBaker, m_ommBaker, m_subInstanceBuffer, m_renderTargets->Depth, m_renderTargets->ScreenMotionVectors);  // <- in the future this will provide motion vectors except in case of reference mode
 
     {
         RAII_SCOPE( m_commandList->beginMarker("PathTrace");, m_commandList->endMarker(); );
@@ -2410,13 +2502,9 @@ void Sample::PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants &
 
         for (uint subSampleIndex = 0; subSampleIndex < m_ui.ActualSamplesPerPixel(); subSampleIndex++)
         {
-            {
-                RAII_SCOPE(m_commandList->beginMarker("UpdateLightSampling"); , m_commandList->endMarker(); );
-                m_lightsBaker->UpdatePreRender(m_commandList, m_scene, m_materialsBaker, m_ommBaker, m_subInstanceBuffer, m_renderTargets->Depth, m_renderTargets->ScreenMotionVectors);  // <- in the future this will provide motion vectors except in case of reference mode
-            }
-
             // required to avoid race conditions in back to back dispatchRays
             m_commandList->setBufferState(m_renderTargets->StablePlanesBuffer, nvrhi::ResourceStates::UnorderedAccess);
+            m_commandList->setTextureState(m_renderTargets->SpecularHitT, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
 
             m_commandList->setRayTracingState(state);
 
@@ -2425,6 +2513,7 @@ void Sample::PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants &
             m_commandList->setPushConstants(&miniConstants, sizeof(miniConstants));
 
             m_commandList->dispatchRays(args);
+            m_commandList->setTextureState(m_renderTargets->SpecularHitT, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
         }
 
         m_commandList->setBufferState(m_renderTargets->StablePlanesBuffer, nvrhi::ResourceStates::UnorderedAccess);
@@ -2449,7 +2538,17 @@ void Sample::PathTrace(nvrhi::IFramebuffer* framebuffer, const SampleConstants &
             m_rtxdiPass->ExecuteFusedDIGIFinal(m_commandList, m_bindingSet);
     }
 
-    if (useStablePlanes && (m_ui.DebugView >= DebugViewType::ImagePlaneRayLength && m_ui.DebugView <= DebugViewType::StablePlaneSpecHitDist || m_ui.DebugView == DebugViewType::StableRadiance) )
+    {
+        RAII_SCOPE(m_commandList->beginMarker("Denoising Guides Bake"); , m_commandList->endMarker(); );
+
+        m_denoisingGuidesBaker->DenoiseSpecHitT(m_commandList, m_bindingSet);
+        m_denoisingGuidesBaker->ComputeAvgLayerRadiance(m_commandList, m_bindingSet);
+
+        if (m_ui.DebugView != DebugViewType::Disabled)
+            m_denoisingGuidesBaker->RenderDebugViz(m_commandList, m_ui.DebugView, m_bindingSet);
+    }
+
+    if (useStablePlanes && (m_ui.DebugView > DebugViewType::Disabled && m_ui.DebugView <= DebugViewType::StablePlane_SpecRadiance || m_ui.DebugView == DebugViewType::StableRadiance) )
     {
         m_commandList->beginMarker("StablePlanesDebugViz");
         nvrhi::TextureDesc tdesc = m_renderTargets->OutputColor->getDesc();
@@ -2501,7 +2600,7 @@ void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
         m_commandList->endMarker();
 
         const float timeDeltaBetweenFrames = m_cmdLine.noWindow ? 1.f/60.f : -1.f; // if we're rendering without a window we set a fix timeDeltaBetweenFrames to ensure that output is deterministic
-        bool enableValidation = m_ui.DebugView == DebugViewType::StablePlaneDenoiserValidation;
+        bool enableValidation = m_ui.DebugView == DebugViewType::StablePlane_DenoiserValidation;
         if (nrdUseRelax)
         {
             m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThreshold, m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, &m_ui.RelaxSettings);
@@ -2602,11 +2701,15 @@ void Sample::PostProcessAA(nvrhi::IFramebuffer* framebuffer, bool reset)
 
         if (m_ui.RealtimeAA == 2)
         {
+            RAII_SCOPE(m_commandList->beginMarker("DLSS"); , m_commandList->endMarker(); );
+
             GetDeviceManager()->GetStreamline().EvaluateDLSS(m_commandList);
             m_commandList->clearState();
         }
         if (m_ui.RealtimeAA == 3)
         {
+            RAII_SCOPE(m_commandList->beginMarker("DLSS-RR");, m_commandList->endMarker(); );
+
             // Direct inputs to denoiser are reused between passes; there's redundant copies but it makes interfacing simpler
             SampleMiniConstants miniConstants = { uint4(0, 0, 0, 0) };
             nvrhi::TextureDesc tdesc = m_renderTargets->OutputColor->getDesc();
@@ -2614,20 +2717,39 @@ void Sample::PostProcessAA(nvrhi::IFramebuffer* framebuffer, bool reset)
             m_postProcess->Apply(m_commandList, PostProcess::ComputePassType::DLSSRRDenoiserPrepareInputs, m_constantBuffer, miniConstants, m_bindingSet, m_bindingLayout, tdesc.width, tdesc.height);
             m_commandList->endMarker();
 
+            static bool useSpecHitT = false; // it's buggy
+            //if (ImGui::IsKeyPressed(ImGuiKey::ImGuiKey_G))
+            //    gmgkmgk = !gmgkmgk;
+
+#if 0
             GetDeviceManager()->GetStreamline().TagResourcesDLSSRR(m_commandList,
                 m_view->GetChildView(ViewType::PLANAR, 0),
                 (int2)m_renderSize,
                 (int2)m_displaySize,
-                m_renderTargets->OutputColor, // nvrhi::ITexture* inputColor,
+                m_renderTargets->ProcessedOutputColor,  //nvrhi::ITexture* outputColor
+                m_renderTargets->OutputColor,           // nvrhi::ITexture* inputColor
                 m_renderTargets->RRDiffuseAlbedo,
                 m_renderTargets->RRSpecAlbedo,
                 m_renderTargets->RRNormalsAndRoughness,
                 nullptr,
+                (useSpecHitT) ? (m_renderTargets->SpecularHitT) : (nullptr),
+                (useSpecHitT) ? (nullptr) : (m_renderTargets->RRSpecMotionVectors),
+                m_renderTargets->RRTransparencyLayer
+#else
+            GetDeviceManager()->GetStreamline().TagResourcesDLSSRR(m_commandList,
+                m_view->GetChildView(ViewType::PLANAR, 0),
+                (int2)m_renderSize,
+                (int2)m_displaySize,
+                m_renderTargets->OutputColor,           // nvrhi::ITexture* inputColor
+                m_renderTargets->RRDiffuseAlbedo,
+                m_renderTargets->RRSpecAlbedo,
+                m_renderTargets->RRNormalsAndRoughness,
                 nullptr,
-                m_renderTargets->RRSpecMotionVectors,
-                m_renderTargets->ProcessedOutputColor //nvrhi::ITexture* outputColor
-
+                (useSpecHitT)?(m_renderTargets->SpecularHitT):(nullptr),
+                (useSpecHitT)?(nullptr):(m_renderTargets->RRSpecMotionVectors),
+                m_renderTargets->ProcessedOutputColor   //nvrhi::ITexture* outputColor
             );
+#endif
 
             m_commandList->commitBarriers();
 
@@ -2693,209 +2815,9 @@ void Sample::DenoisedScreenshot(nvrhi::ITexture * framebufferTexture) const
 
 donut::math::float2 Sample::ComputeCameraJitter(uint frameIndex)
 {
-    if (!m_ui.RealtimeMode || m_ui.RealtimeAA == 0 || m_temporalAntiAliasingPass == nullptr)
+    if (!m_ui.RealtimeMode || m_ui.RealtimeAA == 0 || m_temporalAntiAliasingPass == nullptr || m_ui.DbgFreezeRealtimeNoiseSeed)
         return dm::float2(0,0);
 
     // we currently use TAA for jitter even when it's not used itself
     return m_temporalAntiAliasingPass->GetCurrentPixelOffset();
-}
-
-
-#ifdef _WIN32
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
-#else
-int main(int __argc, const char** __argv)
-#endif
-{
-    // Override Donut callback
-    g_DonutDefaultCallback = donut::log::GetCallback();
-    donut::log::SetCallback(SampleLogCallback);
-
-    nvrhi::GraphicsAPI api = app::GetGraphicsAPIFromCommandLine(__argc, __argv);
-    app::DeviceManager* deviceManager = app::DeviceManager::Create(api);
-
-    app::DeviceCreationParameters deviceParams;
-    deviceParams.backBufferWidth = 0;   // initialized from CmdLine
-    deviceParams.backBufferHeight = 0;  // initialized from CmdLine
-    deviceParams.swapChainSampleCount = 1;
-    deviceParams.swapChainBufferCount = c_swapchainCount;
-    deviceParams.startFullscreen = false;
-    deviceParams.startBorderless = false;
-    deviceParams.vsyncEnabled = true;
-    deviceParams.enableRayTracingExtensions = true;
-#if DONUT_WITH_DX12
-#if defined(RTXPT_D3D_AGILITY_SDK_VERSION)
-    deviceParams.featureLevel = D3D_FEATURE_LEVEL_12_2;
-    static const UUID D3D12ExperimentalShaderModels = { 0x76f5573e, 0xf13a, 0x40f5, {0xb2, 0x97, 0x81, 0xce, 0x9e, 0x18, 0x93, 0x3f} };
-    static const UUID D3D12StateObjectsExperiment = { 0x398a7fd6, 0xa15a, 0x42c1, {0x96, 0x05, 0x4b, 0xd9, 0x99, 0x9a, 0x61, 0xaf} };
-    static const UUID D3D12RaytracingExperiment = { 0xb56e238b, 0xe886, 0x46d8, {0x9b, 0xe1, 0x34, 0x10, 0x30, 0x31, 0x45, 0x09} };
-    UUID Features[] = { D3D12ExperimentalShaderModels }; //, D3D12StateObjectsExperiment }; //, D3D12RaytracingExperiment };
-    HRESULT ok = D3D12EnableExperimentalFeatures(_countof(Features), Features, nullptr, nullptr);
-#else
-    deviceParams.featureLevel = D3D_FEATURE_LEVEL_12_1;
-#endif
-#endif
-#if defined(_DEBUG)
-    deviceParams.enableDebugRuntime = true;
-    deviceParams.enableWarningsAsErrors = true;
-    deviceParams.enableNvrhiValidationLayer = true;
-    deviceParams.enableGPUValidation = false;       // <- this severely impact performance but is good to enable from time to time
-#endif
-    deviceParams.supportExplicitDisplayScaling = true;
-
-#if DONUT_WITH_STREAMLINE
-    deviceParams.checkStreamlineSignature = true;   // <- Set to false if you're using a local build of streamline
-    deviceParams.streamlineAppId = 231313132;
-#if defined(_DEBUG)
-    deviceParams.enableStreamlineLog = true;
-#endif
-#endif
-
-#if DONUT_WITH_VULKAN
-    deviceParams.requiredVulkanDeviceExtensions.push_back("VK_KHR_buffer_device_address");
-    deviceParams.requiredVulkanDeviceExtensions.push_back("VK_KHR_format_feature_flags2");
-
-    // Attachment 0 not written by fragment shader; undefined values will be written to attachment (OMM baker)
-    deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x0000000023e43bb7);
-
-    // vertex shader writes to output location 0.0 which is not consumed by fragment shader (OMM baker)
-    deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x000000000609a13b);
-
-    // vkCmdPipelineBarrier2(): pDependencyInfo.pBufferMemoryBarriers[0].dstAccessMask bit VK_ACCESS_SHADER_READ_BIT
-    // is not supported by stage mask (Unhandled VkPipelineStageFlagBits)
-    // Vulkan validation layer not supporting OMM?
-    deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x00000000591f70f2);
-
-    // vkCmdPipelineBarrier2(): pDependencyInfo->pBufferMemoryBarriers[0].dstAccessMask(VK_ACCESS_SHADER_READ_BIT) is not supported by stage mask(VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT)
-    // Vulkan Validaiotn layer not supporting OMM bug
-    deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x000000005e6e827d);
-#endif
-
-    deviceParams.enablePerMonitorDPI = true;
-
-    std::string preferredScene = "bistro-programmer-art.scene.json"; // "kitchen.scene.json";
-    LocalConfig::PreferredSceneOverride(preferredScene);
-
-    CommandLineOptions cmdLine;
-
-#if 1 // use a bit larger window by default if screen large enough
-    glfwInit();
-    const auto primMonitor = glfwGetPrimaryMonitor();
-    const GLFWvidmode* mode = (primMonitor!=nullptr)?glfwGetVideoMode(primMonitor):(nullptr);
-    if (mode->width > 2560 && mode->height > 1440)
-    {
-        cmdLine.width = 2560;
-        cmdLine.height = 1440;
-    }
-#endif
-    
-    if (!cmdLine.InitFromCommandLine(__argc, __argv))
-    {
-        return 1;
-    }
-
-    if (!cmdLine.scene.empty())
-    {
-        preferredScene = cmdLine.scene;
-    }
-
-    if (cmdLine.nonInteractive)
-    {
-        donut::log::EnableOutputToMessageBox(false);
-    }
-
-    if (cmdLine.debug)
-    {
-        deviceParams.enableDebugRuntime = true;
-        deviceParams.enableNvrhiValidationLayer = true;
-    }
-
-    // We currently have an issue with the debug layer, leading to a GPU crash
-    // It's being actively investigated and this project will be updated as soon
-    // as we have a fix.
-    deviceParams.enableDebugRuntime = false;
-
-    deviceParams.backBufferWidth = cmdLine.width;
-    deviceParams.backBufferHeight = cmdLine.height;
-    deviceParams.startFullscreen = cmdLine.fullscreen;
-
-    if (cmdLine.noWindow)
-    {
-        if (!deviceManager->CreateInstance(deviceParams))
-        {
-            log::fatal("CreateDeviceAndSwapChain failed: Cannot initialize a graphics device with the requested parameters");
-            return 3;
-        }
-    }
-    else
-    {
-        if (!deviceManager->CreateWindowDeviceAndSwapChain(deviceParams, g_windowTitle))
-        {
-            log::fatal("Cannot initialize a graphics device with the requested parameters");
-            return 3;
-        }
-        HelpersRegisterActiveWindow();
-    }
-
-    if (!deviceManager->GetDevice()->queryFeatureSupport(nvrhi::Feature::RayTracingPipeline))
-    {
-        log::fatal("The graphics device does not support Ray Tracing Pipelines");
-        return 4;
-    }
-
-    if (!deviceManager->GetDevice()->queryFeatureSupport(nvrhi::Feature::RayQuery))
-    {
-        log::fatal("The graphics device does not support Ray Queries");
-        return 4;
-    }
-
-#if DONUT_WITH_DX12 && (RTXPT_D3D_AGILITY_SDK_VERSION >= 619)
-    // When using AgilitySDK >= 619, we require shader model 6.9
-    if(deviceManager->GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
-    {
-        ID3D12Device* d3d12Device = static_cast<ID3D12Device*>(
-            deviceManager->GetDevice()->getNativeObject(nvrhi::ObjectTypes::D3D12_Device)
-        );
-
-        D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_9 };
-
-        HRESULT hr = d3d12Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel));
-        assert(SUCCEEDED(hr));
-        if(shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_9)
-        {
-            log::fatal("Shader Model 6.9 is required, but unsupported on the current device. Please check for newer graphics drivers.");
-            return 4;
-        }
-    }
-#endif
-
-    bool NVAPI_SERSupported = deviceManager->GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12 && deviceManager->GetDevice()->queryFeatureSupport(nvrhi::Feature::ShaderExecutionReordering);
-    
-    {
-        SampleUIData& uiData = g_sampleUIData;
-        Sample example(deviceManager, cmdLine, uiData);
-        SampleUI gui(deviceManager, example, uiData, NVAPI_SERSupported);
-
-        if (example.Init(preferredScene))
-        {
-            if (!cmdLine.noWindow)
-                gui.Init( example.GetShaderFactory( ) );
-
-            LocalConfig::PostAppInit(example, uiData);
-
-            deviceManager->AddRenderPassToBack(&example);
-            if (!cmdLine.noWindow)
-                deviceManager->AddRenderPassToBack(&gui);
-            deviceManager->RunMessageLoop();
-            if (!cmdLine.noWindow)
-                deviceManager->RemoveRenderPass(&gui);
-            deviceManager->RemoveRenderPass(&example);
-        }
-    }
-
-    deviceManager->Shutdown();
-
-    delete deviceManager;
-
-    return 0;
 }

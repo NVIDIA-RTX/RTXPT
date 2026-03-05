@@ -11,7 +11,7 @@
 #pragma once
 
 #include "../Shaders/PathTracer/Config.h"
-#include "../SampleCommon.h"
+//#include "../SampleCommon.h"
 #include "../SampleUI.h"
 
 // #include <donut/core/vfs/VFS.h>
@@ -76,6 +76,7 @@ namespace game
         float                       m_animPlaybackSpeed = 1.0f;
         double                      m_animOffset    = 0.0;
         bool                        m_animating     = false;
+        std::string                 m_showOnlyIfTagged = "";
 
         bool                        m_allowKeyMoveIfSelected = true;
 

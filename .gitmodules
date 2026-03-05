@@ -30,10 +30,6 @@
 	path = Assets
 	url = https://github.com/NVIDIA-RTX/RTXPT-Assets.git
 	shallow = true
-[submodule "External/Streamline"]
-	path = External/Streamline
-	url = https://github.com/NVIDIA-RTX/Streamline.git
-	shallow = false
 [submodule "External/Rtxtf"]
 	path = External/Rtxtf
 	url = https://github.com/NVIDIA-RTX/RTXTF-Library.git

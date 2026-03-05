@@ -20,7 +20,7 @@
 #include "FFX_ParallelSort.h"
 
 #include <donut/shaders/binding_helpers.hlsli>
-#include "../Shaders/ShaderDebug.hlsli"
+#include "../Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl"
 
 //cbuffer FFX_ParallelSortCBConstantsBuffer                   : register( b0 )
 //{

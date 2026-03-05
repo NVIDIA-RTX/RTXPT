@@ -34,7 +34,7 @@ struct PolymorphicLightSample
     float3    Normal;
     float3    Radiance;
     float     SolidAnglePdf;
-    bool      LightSampleableByBSDF;
+    bool      LightSampleableByBSDF;    // 'true' if there's a geometric counterpart that the path can sample; 'false' if not "visible" in the scene except as indirect diffuse (not physically correct)
 };
 
 struct PolymorphicLight
@@ -87,7 +87,7 @@ float getAverageDistanceToVolume(float distanceToCenter, float volumeRadius)
     return distance;
 }
 
-#if POLYLIGHT_SPHERE_ENABLE
+#if POLYLIGHT_SPHERE_ENABLE || defined(__INTELLISENSE__)
 // Note: Sphere lights always assume an interaction point is not going to be inside of the sphere, so special logic handling this case
 // can be avoided in sampling logic (for PDF/radiance calculation), as well as individual PDF calculation and radiance evaluation.
 struct SphereLight
@@ -108,12 +108,28 @@ struct SphereLight
     {
         const float3 lightVector = position - viewerPosition;
         const float lightDistance2 = dot(lightVector, lightVector);
-        const float lightDistance = sqrt(lightDistance2);
         const float radius2 = sq(radius);
 
         // Note: Sampling based on PBRT's solid angle sphere sampling, resulting in fewer rays occluded by the light itself,
         // ignoring special case for when viewing inside the light (which should just use normal spherical area sampling)
         // for performance. Similarly condition ignored in PDF calculation as well.
+
+        // Note 2: In RTXPT we only emit light from the surface of the sphere - this makes it consistent the way emissive 
+        // triangles work (they are single sided), and when using analytic light proxies
+#if 1
+        if (lightDistance2 < radius2)
+        {
+            PolymorphicLightSample lightSample;
+            lightSample.Position = position;
+            lightSample.Normal   = float3(0.0, 0.0, 0.0); // -lightVector/lightDistance;
+            lightSample.Radiance = float3(0.0, 0.0, 0.0);
+            lightSample.SolidAnglePdf = 1.0;
+            lightSample.LightSampleableByBSDF = false;
+            return lightSample;
+        }
+#endif
+
+        const float lightDistance = sqrt(lightDistance2);
 
         // Compute theta and phi for cone sampling
 
@@ -173,10 +189,17 @@ struct SphereLight
 
     bool Eval(const float3 rayPos, const float3 rayDir, inout float3 outRadiance, inout float3 outLightSamplePosition)
     {
+        // TODO: pretty sure this can be optimized
+         const float3 lightVector = position - rayPos;
+         const float lightDistance2 = dot(lightVector, lightVector);
+         const float radius2 = sq(radius);
+         if (lightDistance2 < radius2)
+             return false;
+
         if (!IntersectRaySphere(rayPos, rayDir, position, radius, outLightSamplePosition))
             return false;
 
-        outRadiance = radiance * evaluateLightShaping(shaping, rayPos, outLightSamplePosition);
+        outRadiance = radiance * evaluateLightShaping(shaping, rayPos, position); // not sure this is correct/wanted
 
         return true;
     }
@@ -236,7 +259,7 @@ struct SphereLight
 };
 #endif // #if POLYLIGHT_SPHERE_ENABLE
 
-#if POLYLIGHT_POINT_ENABLE
+#if POLYLIGHT_POINT_ENABLE || defined(__INTELLISENSE__)
 // Point light is a sphere light with zero radius.
 // On the host side, they are both created from LightType_Point, depending on the radius.
 // The values returned from all interface methods of PointLight are the same as SphereLight
@@ -305,7 +328,7 @@ struct PointLight
 };
 #endif // #if POLYLIGHT_POINT_ENABLE
 
-#if POLYLIGHT_DIRECTIONAL_ENABLE
+#if POLYLIGHT_DIRECTIONAL_ENABLE || defined(__INTELLISENSE__)
 struct DirectionalLight
 {
     float3 direction;
@@ -372,7 +395,7 @@ struct DirectionalLight
 };
 #endif // #if POLYLIGHT_DIRECTIONAL_ENABLE
 
-#if POLYLIGHT_TRIANGLE_ENABLE
+#if POLYLIGHT_TRIANGLE_ENABLE || defined(__INTELLISENSE__)
 struct TriangleLight
 {
     float3 base;
@@ -498,7 +521,7 @@ struct TriangleLight
 };
 #endif // #if POLYLIGHT_TRIANGLE_ENABLE
 
-#if POLYLIGHT_ENV_ENABLE
+#if POLYLIGHT_ENV_ENABLE || defined(__INTELLISENSE__)
 struct EnvironmentLight
 {
     // Interface methods
@@ -534,7 +557,7 @@ struct EnvironmentLight
 };
 #endif // #if POLYLIGHT_ENV_ENABLE
 
-#if POLYLIGHT_QT_ENV_ENABLE
+#if POLYLIGHT_QT_ENV_ENABLE || defined(__INTELLISENSE__)
 
 struct EnvironmentQuadLight
 {
@@ -646,7 +669,7 @@ PolymorphicLightSample PolymorphicLight::CalcSample(in const PolymorphicLightInf
 
     if (lightSample.SolidAnglePdf > 0)
     {
-        lightSample.Radiance *= evaluateLightShaping(unpackLightShaping(lightInfo), viewerPosition, lightSample.Position);
+        lightSample.Radiance *= evaluateLightShaping(unpackLightShaping(lightInfo), viewerPosition, lightSample.Position); // not sure this is correct/wanted - might be better placed in individual lights
     }
 
     return lightSample;

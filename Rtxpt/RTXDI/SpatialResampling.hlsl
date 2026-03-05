@@ -70,7 +70,7 @@ void RayGen()
 
     // useful for debugging!
     DebugContext debug;
-    debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput);
+    debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack);
 
     switch (g_Const.debug.debugViewType)
     {

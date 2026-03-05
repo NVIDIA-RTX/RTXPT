@@ -47,7 +47,7 @@ const ReSTIRDI_SpatialResamplingParameters getReSTIRDISpatialResamplingParams()
 {
 	ReSTIRDI_SpatialResamplingParameters params = {};
 	params.numDisocclusionBoostSamples = 8;
-	params.numSpatialSamples = 2;
+	params.numSpatialSamples = 1;
 	params.spatialBiasCorrection = ReSTIRDI_SpatialBiasCorrectionMode::Raytraced;
 	params.spatialDepthThreshold = 0.1f;
 	params.spatialNormalThreshold = 0.5f;

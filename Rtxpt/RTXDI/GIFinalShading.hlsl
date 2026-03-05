@@ -47,7 +47,7 @@ bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surf
     #if 0
     {
         DebugContext debug;
-        debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+        debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack );
         //debug.DrawDebugViz(pixelPosition, float4(frac(secondaryPositionNormal.rgb), 1.0));
         if (primaryScatterPdf==0)
             debug.DrawDebugViz(pixelPosition, float4(1, 0.5, 0.0, 1.0));
@@ -122,7 +122,7 @@ bool ReSTIRGIFinalContribution(const uint2 pixelPosition, const RAB_Surface surf
     radianceAndSpecAvg.a = Average(finalRadiance) * bsdfThp.a;
 
     DebugContext debug;
-    debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack, u_DebugVizOutput );
+    debug.Init( g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack );
 
     switch(g_Const.debug.debugViewType)
     {
@@ -161,8 +161,6 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
             uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
 
             float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
-            float specHitDist   = u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist;
-            u_StablePlanesBuffer[address].NoisyRadianceSpecHitDist = AccumulateHitT( radiance.a, specHitDist, newRadianceAndSpecAvg.a, newSpecHitT );
             u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16(radiance.rgba+newRadianceAndSpecAvg.rgba);
         }
         else

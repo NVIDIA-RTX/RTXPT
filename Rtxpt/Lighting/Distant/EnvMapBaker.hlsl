@@ -12,7 +12,7 @@
 #define __ENVMAP_BAKER_HLSL__
 
 #include "SampleProceduralSky.hlsli"
-#include "../../Shaders/ShaderDebug.hlsli"
+#include "../../Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl"
 
 #define EMB_NUM_COMPUTE_THREADS_PER_DIM     8
 #define EMB_MAXDIRLIGHTS                    16

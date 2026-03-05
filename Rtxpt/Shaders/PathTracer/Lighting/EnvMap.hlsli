@@ -13,10 +13,42 @@
 
 #if !defined(__cplusplus)
 #pragma pack_matrix(row_major)
+
+#include "LightingTypes.hlsli"
+#include "../Utils/Geometry.hlsli"
+#include "../Utils/Math/MathHelpers.hlsli"
 #endif
 
-#include "LightingTypes.h"
-#include "../Utils/Geometry.hlsli"
+
+// Environment map color/intensity and orientation modifiers ("in-scene" settings)
+struct EnvMapSceneParams
+{
+	float3x4    Transform;              ///< Local to world transform.
+	float3x4    InvTransform;           ///< World to local transform.
+
+    float3      ColorMultiplier;        ///< Color & radiance scale (Tint * Intensity)
+    float       Enabled;                ///< 1 if enabled, 0 if not
+};
+
+// Environment map importance sampling internals
+struct EnvMapImportanceSamplingParams
+{
+    // MIP descent sampling
+    float2      ImportanceInvDim;       ///< 1.0 / dimension.
+    uint        ImportanceBaseMip;      ///< Mip level for 1x1 resolution.
+    uint        padding0;
+};
+
+// Returned by importance sampling functions
+struct DistantLightSample
+{
+    float3  Dir;        ///< Sampled direction towards the light in world space.
+    float   Pdf;        ///< Probability density function for the sampled direction with respect to solid angle.
+    float3  Le;         ///< Emitted radiance.
+};
+
+#if !defined(__cplusplus)
+
 
 // Core envmap access
 struct EnvMap
@@ -233,6 +265,6 @@ struct EnvMapSampler
 
 };
 
-
+#endif
 
 #endif // #define __ENV_MAP_HLSLI__

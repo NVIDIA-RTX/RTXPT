@@ -23,7 +23,7 @@
 
 #include <donut/app/imgui_renderer.h>
 
-#include "../SampleCommon.h"
+#include "../SampleCommon/SampleCommon.h"
 
 #include "OmmBuildQueue.h"
 
@@ -235,7 +235,7 @@ void OmmBaker::UpdateDebugGeometry(const MeshInfo& _mesh)
     }
 }
 
-void OmmBaker::Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
+bool OmmBaker::Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
 {
     RAII_SCOPE( commandList.beginMarker("OmmBaker");, commandList.endMarker(); );
 
@@ -254,6 +254,7 @@ void OmmBaker::Update(nvrhi::ICommandList& commandList, const donut::engine::Sce
     }
     if (anyDirty)
         WriteGeometryDebugBuffer(commandList);
+    return anyDirty;
 }
 
 void OmmBaker::SetGlobalShaderMacros(std::vector<donut::engine::ShaderMacro>& macros)

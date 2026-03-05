@@ -15,15 +15,13 @@
 #pragma pack_matrix(row_major)
 #endif
 
-#include "LightingTypes.h"
+#include "LightingTypes.hlsli"
 #include "../Utils/Utils.hlsli"
 #include "LightingConfig.h"
 #include "PolymorphicLightPTConfig.h"
 #include "PolymorphicLight.hlsli"
 #include "../Utils/Sampling/Sampling.hlsli"
 #include "LightingAlgorithms.hlsli"
-
-//#include "../../ShaderDebug.hlsli"
 
 #define RTXPT_NEE_MIS_HEURISTIC      MISHeuristic::Balance  // MISHeuristic::PowerTwo
 
@@ -35,23 +33,19 @@ struct LightSampler
     StructuredBuffer<PolymorphicLightInfoEx>    LightsExBuffer;
     Buffer<uint>                                ProxyCounters;              ///< per light sampling proxy counters
     Buffer<uint>                                ProxyIndices;               ///< indices for proxies pointing to LightsBuffer, sorted 
-    LOCAL_SAMPLING_BUFFER_TYPE_SRV              LocalSamplingBuffer;
+    Buffer<uint>                                LocalSamplingBuffer;
     Texture2D<uint>                             EnvLookupMap;
     RWTexture2D<float>                          FeedbackTotalWeight;
-    RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>  FeedbackCandidates;
+    RWTexture2D<uint>  FeedbackCandidates;
 
     lpuint2                                     PixelPos;                   ///< screen pixel being lit (relevant for feedback loop and local sampling)
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-    lpuint2                                     LocalSamplingTilePos;       ///< tile coord, jitter included
-#else
     uint                                        LocalSamplingTilePos;       ///< tile coord, jitter included, in 2D
-#endif
-    bool                                        IsIndirect;
+    bool                                        IsScreenSpaceCoherent;
 
-    static bool IsIndirectHeuristic( StructuredBuffer<LightingControlData> controlBuffer, float rayConeWidth, float totalPathLength )
+    static bool IsScreenSpaceCoherentHeuristic( StructuredBuffer<LightingControlData> controlBuffer, float rayConeWidth, float totalPathLength )
     {
         float rayConeWidthOverTotalPathTravel = rayConeWidth / totalPathLength;
-        return rayConeWidthOverTotalPathTravel >= controlBuffer[0].DirectVsIndirectThreshold;
+        return rayConeWidthOverTotalPathTravel < controlBuffer[0].ScreenSpaceVsWorldSpaceThreshold;
     }
 
     static LightSampler make(
@@ -61,19 +55,16 @@ struct LightSampler
         , StructuredBuffer<PolymorphicLightInfoEx>      lightsExBuffer
         , Buffer<uint>                                  proxyCounters
         , Buffer<uint>                                  proxyIndices
-        , LOCAL_SAMPLING_BUFFER_TYPE_SRV                localSamplingBuffer
+        , Buffer<uint>                                  localSamplingBuffer
         , Texture2D<uint>                               envLookupMap
         , RWTexture2D<float>                            feedbackTotalWeight
-        , RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE>    feedbackCandidates
+        , RWTexture2D<uint>                             feedbackCandidates
         , uint2                                         pixelPos
-        , bool                                          isIndirect ) 
+        , bool                                          isScreenSpaceCoherent ) 
     {
         LightSampler lightSampler;
 
-        lightSampler.IsIndirect             = isIndirect;
-#if PT_NEE_ANTI_LAG_PASS && PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES  // when anti-lag is enabled, we only care about direct samples
-        lightSampler.IsIndirect             = false;
-#endif
+        lightSampler.IsScreenSpaceCoherent  = isScreenSpaceCoherent;
 
         lightSampler.ControlBuffer          = controlBuffer;
         lightSampler.LightsBuffer           = lightsBuffer;
@@ -87,14 +78,10 @@ struct LightSampler
         lightSampler.PixelPos               = (lpuint2)pixelPos;
 
         uint2 jitteredTilePos = (pixelPos+controlBuffer[0].LocalSamplingTileJitter) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx;
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-        lightSampler.LocalSamplingTilePos   = (lpuint2)jitteredTilePos;
-#else
         lightSampler.LocalSamplingTilePos   = LLSB_ComputeBaseAddress(jitteredTilePos, controlBuffer[0].LocalSamplingResolution);
-#endif
 
-        // // storage for indirect sits in the (expanded) lower half
-        // if ( lightSampler.IsIndirect )
+        // // storage for world space sits in somewhere else
+        // if ( !lightSampler.IsScreenSpaceCoherent )
         // {
         //     lightSampler.PixelPos.y                += (lpuint)controlBuffer[0].FeedbackBufferHeight;
         //     lightSampler.LocalSamplingTilePos.y    += (lpuint)controlBuffer[0].TileBufferHeight;
@@ -133,11 +120,7 @@ struct LightSampler
 
     void ReadLocal(uint localIndex, out uint lightIndex, out uint proxyCount)
     {
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-        UnpackMiniListLightAndCount( LocalSamplingBuffer[ uint3(LocalSamplingTilePos, localIndex) ], lightIndex, proxyCount );
-#else
         UnpackMiniListLightAndCount( LocalSamplingBuffer[ LocalSamplingTilePos + localIndex ], lightIndex, proxyCount );
-#endif
     }
 
     uint SampleLocal(const float rnd, out float pdf)
@@ -196,7 +179,7 @@ struct LightSampler
         return float(proxyCountR) / float(localProxyCount);
     }
 
-    void InsertFeedbackFromNEE(const uint lightIndex, const float pixelRadianceContributionAvg, const float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH])
+    void InsertFeedbackFromNEE(const uint lightIndex, const float pixelRadianceContributionAvg, const float randomValue)
     {
         LightFeedbackReservoir feedbackReservoir = GetTemporalFeedbackReservoir();
 
@@ -208,13 +191,14 @@ struct LightSampler
         // should be user option - give some positive bias [0, 1] for globally improbable lights; this (slightly) helps smaller screen regions feature more prominently in Local sampler (and Global but there it evens out)
         feedbackWeight /= pow( SampleGlobalPDF(lightIndex), 0.65 );
 
-        if (IsIndirect)
-            feedbackWeight *= RTXPT_LIGHTING_INDIRECT_FEEDBACK_RATIO;
+        if (IsScreenSpaceCoherent)
+            feedbackWeight *= RTXPT_LIGHTING_SCREEN_SPACE_COHERENT_FEEDBACK_BIAS;
 
-        feedbackReservoir.Add( randomValues, lightIndex, feedbackWeight, IsIndirect );
+        feedbackReservoir.Add( randomValue, lightIndex, feedbackWeight, IsScreenSpaceCoherent );
         feedbackReservoir.CommitToStorage();
     }
 
+    // This should probably just be removed as it only adds complexity to code
     void InsertFeedbackFromBSDF(const uint lightIndex, const float pixelRadianceContributionAvgWithoutBsdfMISWeight, const float bsdfMISWeight, const float randomNumber)
     {
 #if RTXPT_LIGHTING_ENABLE_BSDF_FEEDBACK
@@ -240,55 +224,71 @@ struct LightSampler
 #endif
     }
 
-    float ComputeInternalMIS(const float3 surfacePosW, const PathTracer::PathLightSample lightSample, bool isLocal, const uint localSamples, const uint totalSamples, float bsdfPdf)
+    // Returns pdf-s for selecting the light given the already drawn sample in the sampler it was drawn from (thisPdf) and the other (otherPdf); 
+    // Note: number of drawn samples is baked in but solidAnglePdf is not (but is already computed in lightSample.SolidAnglePdf)
+    void ComputeLightSelectionPdfs(const LightSample lightSample, const uint localCandidateCount, const uint globalCandidateCount, out float thisPdf, out float otherPdf)
     {
-        float thisCount;
-        float otherCount;
-        float thisPdf       = lightSample.SelectionPdf;
-        float otherPdf;
-        [branch]if ( isLocal )
+        thisPdf       = lightSample.SelectionPdf;   // we already have this information, so no need to get it again
+        [branch]if ( lightSample.FromLocalDistribution )
         {
-            thisCount   = localSamples;
-            otherCount  = totalSamples - localSamples;
             otherPdf    = SampleGlobalPDF(lightSample.LightIndex);
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF)
-            otherPdf = RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF;
-#endif
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF)
-            if (thisPdf>0) thisPdf = RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF;
-#endif
         }
         else
         {
-            thisCount   = totalSamples - localSamples;
-            otherCount  = localSamples;
-            [branch]if( localSamples != 0 )
+            if( localCandidateCount != 0 )
+                otherPdf = SampleLocalPDF(lightSample.LightIndex);
+            else
+                otherPdf = 0;
+        }
+    }
+    void ComputeLightSelectionPdfs(const LightSample lightSample, const uint localCandidateCount, const uint globalCandidateCount, out float thisPdf, out float otherPdf, out float thisCount, out float otherCount)
+    {
+        thisPdf         = lightSample.SelectionPdf;   // we already have this information, so no need to get it again
+        [branch]if ( lightSample.FromLocalDistribution )
+        {
+            otherPdf    = SampleGlobalPDF(lightSample.LightIndex);
+            thisCount   = localCandidateCount;
+            otherCount  = globalCandidateCount;
+        }
+        else
+        {
+            thisCount   = globalCandidateCount;
+            if( localCandidateCount != 0 )
             {
-                otherPdf    = SampleLocalPDF(lightSample.LightIndex);
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF)
-                if (otherPdf>0) otherPdf = RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF;
-#endif
+                otherPdf = SampleLocalPDF(lightSample.LightIndex);
+                otherCount = localCandidateCount;
             }
             else
-                otherPdf    = 0;
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF)
-            thisPdf = RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF;
-#endif
+            {   
+                otherPdf = 0;
+                otherCount = 0;
+            }
         }
+    }
 
+//    clean up, optimize/tweak, make it part of UI, clean up so there's a ComputeLightVsBSDF_MIS_ForLight_Approx (and counterpart) so the choice is in user code
+
+#define RTXPT_NEEAT_MIS_APPROXIMATION_LIGHTSAMPLER_BIAS 3
+
+    float ComputeLightVsBSDF_MIS_ForLight_Approx(const LightSample lightSample, const uint candidateSampleCount, const uint fullSampleCount, float bsdfPdf)
+    {
+        return EvalMIS(RTXPT_NEE_MIS_HEURISTIC, fullSampleCount*candidateSampleCount, RTXPT_NEEAT_MIS_APPROXIMATION_LIGHTSAMPLER_BIAS, 1, lightSample.LightSampleableByBSDF?bsdfPdf:0);
+    }
+    float ComputeLightVsBSDF_MIS_ForBSDF_Approx(lpfloat bsdfPdf, const uint candidateSampleCount, const uint fullSampleCount)
+    {
+        return EvalMIS(RTXPT_NEE_MIS_HEURISTIC, 1, bsdfPdf, fullSampleCount*candidateSampleCount, RTXPT_NEEAT_MIS_APPROXIMATION_LIGHTSAMPLER_BIAS);
+    }
+
+    float ComputeLightVsBSDF_MIS_ForLight(const float3 surfacePosW, const LightSample lightSample, float thisPdf, float otherPdf, float thisCount, float otherCount, const uint candidateSampleCount, const uint fullSampleCount, float bsdfPdf)
+    {
         float solidAnglePdf = lightSample.SolidAnglePdf;    //< both 'this' and 'other' are for the same light with same viewer and sample positions, so they will have same SolidAnglePdf
-        bsdfPdf = clamp(bsdfPdf, 0, HLF_MAX);               //< we clamp bsdf so it can safely be packed to fp16 - not needed here but needed to match the "other end"
-
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF)
-        bsdfPdf = RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF;
-#endif
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF)
-        solidAnglePdf = RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF;
-#endif
 
         solidAnglePdf *= LightSamplingMISBoost();           //< this could also be done by dividing bsdfPdf by LightSamplingMISBoost()
 
-        float thisMIS = EvalMIS(RTXPT_NEE_MIS_HEURISTIC, thisCount, thisPdf*solidAnglePdf, otherCount, otherPdf*solidAnglePdf, 1, lightSample.LightSampleableByBSDF?bsdfPdf:0); // balance seems a lot less noisy than power
+        //float lightAvgPdf = (thisPdf*sqrt(thisCount) + otherPdf*sqrt(otherCount))*sqrt(fullSampleCount);
+        float lightAvgPdf = (thisPdf + otherPdf)*fullSampleCount;
+
+        float thisMIS = EvalMIS(RTXPT_NEE_MIS_HEURISTIC, 1, lightAvgPdf*solidAnglePdf, 1, lightSample.LightSampleableByBSDF?bsdfPdf:0); // balance seems a lot less noisy than power
 
         // solidAnglePdf VALIDATION - some hits expected depending on tuning of values
         #if 0
@@ -312,64 +312,55 @@ struct LightSampler
 #endif
         }
         #endif
-
-        return thisMIS / thisCount; // the "/ thisCount" isn't technically part of MIS!! TODO: figure out better naming or pull out
+        return thisMIS; // the "/ thisCount" isn't technically part of MIS!! TODO: figure out better naming or pull out
     }
 
-    float ComputeBSDFMIS(const uint lightIndex, lpfloat bsdfPdf, float solidAnglePdf, const uint localSamples, const uint totalSamples)
+    float ComputeLightVsBSDF_MIS_ForBSDF(const uint lightIndex, lpfloat bsdfPdf, float solidAnglePdf, const uint candidateSampleCount, const uint fullSampleCount)
     {
-        const uint globalSamples = totalSamples - localSamples;
- 
-        float globPdf = SampleGlobalPDF(lightIndex);
-        float narrPdf = SampleLocalPDF(lightIndex);
-
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF)
-        globPdf = RTXPT_NEEAT_MIS_OVERRIDE_GLOBAL_SAMPLER_PDF;
-#endif
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF)
-        if (narrPdf>0) narrPdf = RTXPT_NEEAT_MIS_OVERRIDE_LOCAL_SAMPLER_PDF;
-#endif
-
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF)
-        bsdfPdf = RTXPT_NEEAT_MIS_OVERRIDE_BSDF_PDF;
-#endif
-#if defined(RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF)
-        solidAnglePdf = RTXPT_NEEAT_MIS_OVERRIDE_LIGHT_SOLID_ANGLE_PDF;
-#endif
-
         solidAnglePdf *= LightSamplingMISBoost();           //< this could also be done by dividing bsdfPdf by LightSamplingMISBoost()
 
-        return EvalMIS(RTXPT_NEE_MIS_HEURISTIC, 1, bsdfPdf, globalSamples, globPdf*solidAnglePdf, localSamples, narrPdf*solidAnglePdf); // balance seems a lot less noisy than power
+        uint localCount, globalCount;
+        GetCandidateSampleCounts(candidateSampleCount, localCount, globalCount);
+        
+        float globalPdf = SampleGlobalPDF(lightIndex);
+        float localPdf = (localCount>0)?(SampleLocalPDF(lightIndex)):(0);
+
+        //float lightAvgPdf = (localPdf*sqrt(localCount) + globalPdf*sqrt(globalCount))*sqrt(fullSampleCount);
+        float lightAvgPdf = (localPdf + globalPdf)*fullSampleCount;
+
+        return EvalMIS(RTXPT_NEE_MIS_HEURISTIC, 1, bsdfPdf, 1, lightAvgPdf*solidAnglePdf); // balance seems a lot less noisy than power
     }
 
-    float ComputeBSDFMISForEmissiveTriangle(const uint emissiveTriangleLightIndex, lpfloat bsdfPdf, const float3 viewerPosition, const float3 lightSamplePosition, const uint localSamples, const uint totalSamples)
+    float ComputeBSDFMISForEmissiveTriangle(const uint emissiveTriangleLightIndex, lpfloat bsdfPdf, const float3 viewerPosition, const float3 lightSamplePosition, const uint candidateSampleCount, const uint fullSamples)
     {
-        if( bsdfPdf == 0 )  //< 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1
+        // 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1; no emissive light means missing data - that's fine, also rely on BSDF only
+        if( bsdfPdf == 0 || emissiveTriangleLightIndex == RTXPT_INVALID_LIGHT_INDEX )
             return 1;
 
         PolymorphicLightInfoFull lightInfo = LoadLight(emissiveTriangleLightIndex);
         TriangleLight triangleLight = TriangleLight::Create(lightInfo);
 
         float solidAnglePdf = triangleLight.CalcSolidAnglePdfForMIS(viewerPosition, lightSamplePosition);
-        return ComputeBSDFMIS(emissiveTriangleLightIndex, bsdfPdf, solidAnglePdf, localSamples, totalSamples);
+        return ComputeLightVsBSDF_MIS_ForBSDF(emissiveTriangleLightIndex, bsdfPdf, solidAnglePdf, candidateSampleCount, fullSamples);
     }
 
-    float ComputeBSDFMISForEnvironmentQuad(const uint environmentQuadLightIndex, lpfloat bsdfPdf, const uint localSamples, const uint totalSamples)
+    float ComputeBSDFMISForEnvironmentQuad(const uint environmentQuadLightIndex, lpfloat bsdfPdf, const uint candidateSampleCount, const uint fullSamples)
     {
 #if POLYLIGHT_QT_ENV_ENABLE
-        if( bsdfPdf == 0 )  //< 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1
+        // 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1; no emissive light means missing data - that's fine, also rely on BSDF only
+        if( bsdfPdf == 0 || environmentQuadLightIndex == RTXPT_INVALID_LIGHT_INDEX )
             return 1;
 
         PolymorphicLightInfoFull lightInfo = LoadLight(environmentQuadLightIndex);
         EnvironmentQuadLight eqLight = EnvironmentQuadLight::Create(lightInfo);
         float solidAnglePdf = eqLight.CalcSolidAnglePdfForMIS(0, 0);
-        return ComputeBSDFMIS(environmentQuadLightIndex, bsdfPdf, solidAnglePdf, localSamples, totalSamples);
+        return ComputeLightVsBSDF_MIS_ForBSDF(environmentQuadLightIndex, bsdfPdf, solidAnglePdf, candidateSampleCount, fullSamples);
 #else
         return 1.0;
 #endif
     }
 
-    void ComputeAnalyticLightProxyContributionWithMIS(inout lpfloat3 surfaceEmission, const uint analyticLightIndex, lpfloat bsdfPdf, const float3 previousVertex, const float3 rayDir, const uint localSamples, const uint totalSamples)
+    void ComputeAnalyticLightProxyContributionWithMIS(inout lpfloat3 surfaceEmission, const uint analyticLightIndex, lpfloat bsdfPdf, const float3 previousVertex, const float3 rayDir, const uint localCandidates, const uint fullSamples, const uniform bool useApproxMIS)
     {
         PolymorphicLightInfoFull lightInfo = LoadLight(analyticLightIndex);
 
@@ -387,8 +378,13 @@ struct LightSampler
             float mis = 1.0;
             if (bsdfPdf != 0) // <0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1
             {
-                float solidAnglePdf = sphereLight.CalcSolidAnglePdfForMIS(previousVertex, lightSamplePosition);
-                float mis = ComputeBSDFMIS(analyticLightIndex, bsdfPdf, solidAnglePdf, localSamples, totalSamples);
+                if (useApproxMIS) // useApproxMIS must be compile time const for perf
+                    mis = ComputeLightVsBSDF_MIS_ForBSDF_Approx(bsdfPdf, localCandidates, fullSamples);
+                else
+                {
+                    float solidAnglePdf = sphereLight.CalcSolidAnglePdfForMIS(previousVertex, lightSamplePosition);
+                    mis = ComputeLightVsBSDF_MIS_ForBSDF(analyticLightIndex, bsdfPdf, solidAnglePdf, localCandidates, fullSamples);
+                }
             }
 
             surfaceEmission += lpfloat3(radiance * mis);
@@ -398,7 +394,7 @@ struct LightSampler
     // We can boost the MIS weights for the lighting at the expense of BSDF samples because NEE-AT is shadow-aware and material-aware; some boost is always beneficial but the amount depends on the scene
     float LightSamplingMISBoost()
     {
-        return ControlBuffer[0].LightSampling_MIS_Boost;
+        return 1.0; //ControlBuffer[0].LightSampling_MIS_Boost;
     }
 
     PolymorphicLightInfoFull LoadLight(uint index)
@@ -410,13 +406,17 @@ struct LightSampler
         return PolymorphicLightInfoFull::make(infoBase, infoExtended);
     }
 
-    uint ComputeLocalSampleCount(const uint totalSamples)
+#define RTXPT_LIGHTING_NEEAT_ENABLE_WORLDSPACE_LOCAL_LAYER 0
+
+    template<typename T>
+    void GetCandidateSampleCounts(const uint totalCandidateSamples, out T localCount, out T globalCount)
     {
-#if RTXPT_LIGHTING_NEEAT_ENABLE_INDIRECT_LOCAL_LAYER
-        return ::ComputeLocalSampleCount(ControlBuffer[0].LocalFeedbackUseRatio, totalSamples);
+#if RTXPT_LIGHTING_NEEAT_ENABLE_WORLDSPACE_LOCAL_LAYER
+        localCount = ::ComputeCandidateSampleLocalCount(ControlBuffer[0].LocalToGlobalSampleRatio, totalCandidateSamples);
 #else
-        return IsIndirect?(0):(::ComputeLocalSampleCount(ControlBuffer[0].LocalFeedbackUseRatio, totalSamples));
+        localCount = IsScreenSpaceCoherent?(::ComputeCandidateSampleLocalCount(ControlBuffer[0].LocalToGlobalSampleRatio, totalCandidateSamples)):(0);
 #endif
+        globalCount = totalCandidateSamples - localCount;
     }
 
     // this is a local direction - envMap.ToLocal(worldDir)

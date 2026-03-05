@@ -46,9 +46,6 @@ namespace PathTracer
         PathTracerConstants     PtConsts;
         DebugContext            Debug;
         StablePlanesContext     StablePlanes;
-        uint                    PixelID;
-
-        uint2                   GetPixelPos() { return PathIDToPixel(PixelID); }
     };
 
     /** All surface data returned by the Bridge::loadSurface
@@ -57,72 +54,40 @@ namespace PathTracer
     {
         ShadingData     shadingData;
         ActiveBSDF      bsdf;
-        float3          prevPosW;
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES  // otherwise motion vectors not needed
+        float3          prevPosW;                           // <-- consider storing delta instead of prevPosW and then fp16 might be enough
+#endif
         lpfloat         interiorIoR;    // a.k.a. material IoR
+#if !RTXPT_USE_APPROXIMATE_MIS
+#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
         uint            neeTriangleLightIndex;  // 0xFFFFFFFF if none
+#endif
+#endif
+#if !defined(RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY) || RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY
         uint            neeAnalyticLightIndex;  // 0xFFFFFFFF if none
-        static SurfaceData make( /*VertexData vd, */ShadingData shadingData, ActiveBSDF bsdf, float3 prevPosW, lpfloat interiorIoR, uint neeTriangleLightIndex, uint neeAnalyticLightIndex )
+#endif
+        static SurfaceData make( ShadingData shadingData, ActiveBSDF bsdf, 
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
+                                float3 prevPosW, 
+#endif
+                                lpfloat interiorIoR, uint neeTriangleLightIndex, uint neeAnalyticLightIndex )
         { 
             SurfaceData ret; 
             ret.shadingData             = shadingData; 
             ret.bsdf                    = bsdf; 
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
             ret.prevPosW                = prevPosW; 
+#endif
             ret.interiorIoR             = interiorIoR; 
+#if !RTXPT_USE_APPROXIMATE_MIS
+#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
             ret.neeTriangleLightIndex   = neeTriangleLightIndex;
+#endif
+#endif
+#if !defined(RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY) || RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY
             ret.neeAnalyticLightIndex   = neeAnalyticLightIndex;
+#endif
             return ret; 
-        }
-    };
-
-    /** Describes a light sample, mainly for use in NEE.
-        It is considered in the context of a shaded surface point, from which Distance and Direction to light sample are computed.
-        In case of emissive triangle light source, it is advisable to compute anti-self-intersection offset before computing
-        distance and direction, even though distance shortening is needed anyways for shadow rays due to precision issues.
-        Use ComputeVisibilityRay to correctly compute surface offset.
-    */
-    struct PathLightSample
-    {
-        float3  Li;                     ///< Incident radiance at the shading point (unshadowed). This is already divided by the pdf.
-        //float   Pdf;                    ///< Pdf with respect to solid angle at the shading point with selected light (selectionPDF*solidAnglePdf).
-        float   Distance;               ///< Ray distance for visibility evaluation (NOT shortened or offset to avoid self-intersection). Ray starts at shading surface.
-        float3  Direction;              ///< Ray direction (normalized). Ray starts at shading surface.
-        uint    LightIndex;             ///< Identifier of the source light (index in the light list), 0xFFFFFFFF if not available.
-        float   SelectionPdf;           ///< Pdf of just the source light (LightIndex) selection; In contrast to 'PathLightSample::Pdf' which is a 'selectionPDF * solidAnglePdf'.
-        float   SolidAnglePdf;
-        bool    LightSampleableByBSDF;  ///< Required for MIS vs BSDF; typically emissive and environment samples can be "seen" by BSDF, while analytic Sphere/Point/Spotlight/etc. are virtual, with non-scene representation
-        
-        // Computes shading surface visibility ray starting position with an offset to avoid self intersection at source, and a
-        // shortening offset to avoid self-intersection at the light source end. 
-        // Optimal selfIntersectionShorteningK default found empirically.
-        Ray ComputeVisibilityRay(const ShadingData shadingData, const float selfIntersectionShorteningK = 0.9985)
-        {
-            float3 surfaceShadingNormal = shadingData.N;
-
-            // We must use **shading** normal to correctly figure out whether we're solving for BRDF or BTDF lobe (whether we want to cast the ray above or under the triangle).
-            float faceSide = dot(surfaceShadingNormal, Direction) >= 0 ? 1 : -1;
-
-            float3 surfaceFaceNormal = shadingData.faceNCorrected * faceSide;
-            float3 surfaceWorldPos = ComputeRayOrigin(shadingData.posW, surfaceFaceNormal);
-            return Ray::make(surfaceWorldPos, Direction, 0.0, Distance*selfIntersectionShorteningK); 
-        }
-
-        static PathLightSample make() 
-        { 
-            PathLightSample ret; 
-            ret.Li = float3(0,0,0); 
-            // ret.Pdf = 0; 
-            ret.Distance = 0; 
-            ret.Direction = float3(0,0,0); 
-            ret.LightIndex = 0xFFFFFFFF;
-            ret.LightSampleableByBSDF = false;
-            ret.SolidAnglePdf = 0;
-            ret.SelectionPdf = 0;
-            return ret; 
-        }
-
-        bool Valid()    
-        { 
-            return any(Li > 0); 
         }
     };
 
@@ -133,9 +98,9 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
         bool SkipEmissiveBRDF;          // Ignore next bounce reflective (but not transmissive) radiance because ReSTIR-DI or similar collected (or will collect) it
 #endif
-        bool LightSamplingIsIndirect;   // using indirect part of the LightSampler domain; otherwise using direct
-        uint LocalNEESamples;          // 
-        uint TotalSamples;              //
+        bool LightSamplingIsSSC;        // if SSC, light sampler uses screen space tiles, otherwise world space
+        uint CandidateSamples;          // for WRS, consisting of Local and Global that can be obtained using LightSampler::GetCandidateSampleCounts
+        uint FullSamples;               // actually integrated samples
 
         // Initialize to empty (NEE disabled or primary bounce or etc.)
         static NEEBSDFMISInfo empty() 
@@ -145,9 +110,9 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
             ret.SkipEmissiveBRDF         = false;
 #endif
-            ret.LightSamplingIsIndirect  = false;
-            ret.LocalNEESamples         = 0;
-            ret.TotalSamples             = 0;
+            ret.LightSamplingIsSSC       = false;
+            ret.CandidateSamples         = 0;
+            ret.FullSamples              = 0;
             return ret;
         }
 
@@ -158,9 +123,9 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
             ret.SkipEmissiveBRDF         = (packed & (1 << 14)) != 0;
 #endif
-            ret.LightSamplingIsIndirect  = (packed & (1 << 13)) != 0;
-            ret.LocalNEESamples         = (packed >> 6) & 0x3F;
-            ret.TotalSamples             = (packed) & 0x3F;
+            ret.LightSamplingIsSSC      = (packed & (1 << 13)) != 0;
+            ret.CandidateSamples        = (packed >> 6) & 0x3F;        // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
+            ret.FullSamples             = (packed) & 0x3F;             // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
             return ret;
         }
 
@@ -171,9 +136,9 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
             packed |= ((SkipEmissiveBRDF?1:0)           << 14);
 #endif
-            packed |= ((LightSamplingIsIndirect?1:0)    << 13);
-            packed |= (LocalNEESamples & 0x3F)          << 6;     // avoid overflow by limiting sample count to RTXPT_LIGHTING_MAX_TOTAL_SAMPLE_COUNT
-            packed |= (TotalSamples     & 0x3F);          // avoid overflow by limiting sample count to RTXPT_LIGHTING_MAX_TOTAL_SAMPLE_COUNT
+            packed |= ((LightSamplingIsSSC?1:0)    << 13);
+            packed |= (CandidateSamples & 0x3F)        << 6;           // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
+            packed |= (FullSamples      & 0x3F);                       // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
             return packed;
         }
 
@@ -181,13 +146,13 @@ namespace PathTracer
 
         static bool equals( const NEEBSDFMISInfo a, const NEEBSDFMISInfo b )
         {
-            return     (a.LightSamplingEnabled     == b.LightSamplingEnabled    )
+            return     (a.LightSamplingEnabled  == b.LightSamplingEnabled    )
 #if PT_USE_RESTIR_DI
-                    && (a.SkipEmissiveBRDF         == b.SkipEmissiveBRDF)
+                    && (a.SkipEmissiveBRDF      == b.SkipEmissiveBRDF)
 #endif
-                    && (a.LightSamplingIsIndirect  == b.LightSamplingIsIndirect )
-                    && (a.LocalNEESamples         == b.LocalNEESamples        )
-                    && (a.TotalSamples             == b.TotalSamples            );
+                    && (a.LightSamplingIsSSC    == b.LightSamplingIsSSC )
+                    && (a.CandidateSamples      == b.CandidateSamples        )
+                    && (a.FullSamples           == b.FullSamples            );
         }
 
 #if PT_USE_RESTIR_DI
@@ -209,7 +174,6 @@ namespace PathTracer
 #else
         float4      RadianceAndSpecAvg;             // note: these are also multiplied by path.thp so far
 #endif
-        float       SpecRadianceSourceDistance;         // we actually only really care about specular radiance source distance
 
         NEEBSDFMISInfo BSDFMISInfo;
         
@@ -222,7 +186,6 @@ namespace PathTracer
 #else
             ret.RadianceAndSpecAvg = float4(0,0,0,0);
 #endif
-            ret.SpecRadianceSourceDistance = 0.0;
             ret.BSDFMISInfo = NEEBSDFMISInfo::empty();
             return ret; 
         }
@@ -251,31 +214,6 @@ namespace PathTracer
             VisibilityPayload ret; 
             ret.missed = 0; 
             return ret; 
-        }
-    };
-
-    struct OptimizationHints
-    {
-        bool    NoTextures;
-        bool    NoTransmission;
-        bool    OnlyDeltaLobes;
-
-        static OptimizationHints NoHints()
-        {
-            OptimizationHints ret;
-            ret.NoTextures = false;
-            ret.NoTransmission = false;
-            ret.OnlyDeltaLobes = false;
-            return ret;
-        }
-    
-        static OptimizationHints make(bool noTextures, bool noTransmission, bool onlyDeltaLobes)
-        {
-            OptimizationHints ret;
-            ret.NoTextures = noTextures;
-            ret.NoTransmission = noTransmission;
-            ret.OnlyDeltaLobes = onlyDeltaLobes;
-            return ret;
         }
     };
 }

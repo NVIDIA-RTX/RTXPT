@@ -18,7 +18,7 @@
 #include <donut/core/math/math.h>
 #include <donut\engine\SceneTypes.h>
 
-#include "../ComputePass.h"
+#include "../SampleCommon/ComputePass.h"
 
 #include "../Shaders/Misc/OmmGeometryDebugData.hlsli"
 
@@ -133,7 +133,7 @@ public:
 
     void                            CreateRenderPasses(nvrhi::BindingLayoutHandle bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses);
 
-    void                            Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene);
+    bool                            Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene);
 
     OpacityMicroMapUIData &         UIData()    { return m_uiData; }
     bool                            DebugGUI(float indent, const donut::engine::Scene& scene);

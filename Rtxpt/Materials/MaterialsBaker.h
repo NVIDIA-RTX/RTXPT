@@ -18,11 +18,12 @@
 #include <donut/core/math/math.h>
 #include <donut\engine\SceneTypes.h>
 
-#include "../ComputePass.h"
+#include "../SampleCommon/ComputePass.h"
 #include "../Shaders/SubInstanceData.h"
 #include "../Shaders/PathTracer/Materials/MaterialPT.h"
 
 #include <unordered_map>
+
 
 using namespace donut::math;
 
@@ -40,19 +41,39 @@ namespace donut::engine
 class ShaderDebug;
 class ExtendedScene;
 
-struct MaterialShadingProperties
+struct MaterialShaderPermutation
 {
-    bool AlphaTest;
-    bool HasTransmission;
-    bool NoTransmission;
-    bool OnlyDeltaLobes;
-    bool NoTextures;
-    bool ExcludeFromNEE;
+    const std::string   ShaderFilePath;
+    // const std::string   ClosestHitName;
+    // const std::string   AnyHitName;
 
-    bool operator==(const MaterialShadingProperties& other) const { return AlphaTest == other.AlphaTest && HasTransmission == other.HasTransmission && NoTransmission == other.NoTransmission && OnlyDeltaLobes == other.OnlyDeltaLobes && NoTextures == other.NoTextures && ExcludeFromNEE == other.ExcludeFromNEE; };
-    bool operator!=(const MaterialShadingProperties& other) const { return !(*this == other); }
+    const std::vector<donut::engine::ShaderMacro> 
+                        Macros;
 
-    static MaterialShadingProperties Compute(const struct PTMaterial& material);
+    // runtime data
+    int                 IndexInTable            = -1;
+    std::string         UniqueMaterialName      = "";               // not deterministic! but useful for debugging anyway
+
+    //MaterialShaderPermutation(const std::string & shaderFilePath, const std::string & closestHitName, const std::string & anyHitName, const std::vector<std::pair<std::string, std::string>> & macros );
+};
+
+struct MaterialShaderPermutationKey
+{
+    //    const std::array<unsigned char, 32/*picosha2::k_digest_size*/>  Hash;
+    std::size_t                                                     Hash;
+
+    const std::string                                               FullKey;
+
+    MaterialShaderPermutationKey( const MaterialShaderPermutation & msp );
+
+    bool operator == (const MaterialShaderPermutationKey & other) const = default;    // technically we only need to compare FullKey
+};
+
+// Custom specialization of std::hash can be injected in namespace std.
+struct MaterialShaderPermutationKeyHash
+{
+    // long hash to short hash
+    std::size_t operator()(const MaterialShaderPermutationKey & s) const noexcept   { return s.Hash; }
 };
 
 struct PTTexture
@@ -77,17 +98,29 @@ struct PTMaterialBase
 {
     donut::engine::Material * DonutCounterpart = nullptr;
 
-    // ModelName + Name is unique identifier for the material; there cannot be two materials with the same ModelName and Name
+    // ModelName + Name is unique identifier for the material; there cannot be two materials with the same ModelName and Name - hopefully.
     std::string             Name;
     std::string             ModelName;                                  // material can be saved
+
+    std::string             UniqueName;                                 // mix of Name and ModelName but shortened and hashed - or whatever makes sense and is short
 
     // base texture? & alpha test - opacity?
     // emissive texture?
 
     bool                    SharedWithAllScenes                 = true;     // if 'true', will be saved to MaterialsBaker::m_materialsPath; otherwise in MaterialsBaker::m_materialsSceneSpecializedPath
 
+    // this gets set internally by MaterialsBaker::BakeShaderPermutations - it will be shared with other materials when possible
+    std::shared_ptr<MaterialShaderPermutation>
+                            BakedShaderPermutation;
+
     virtual void            Write(Json::Value & output) = 0;
     virtual bool            Read(Json::Value & output, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache) = 0;
+
+    virtual bool            HasAlphaTest() const = 0;
+
+    /*virtual*/ std::string     UniqueFullName()                            { return UniqueName; }
+
+    virtual MaterialShaderPermutation ComputeShaderPermutation(const std::string & defaultShaderPath) = 0;
 };                                                                                                                      
 
 struct PTMaterial : public PTMaterialBase
@@ -140,6 +173,8 @@ struct PTMaterial : public PTMaterialBase
     bool                    PSDExclude                          = true;
     // for path space decomposition: -1 means no dominant; 0 usually means transmission, 1 usually means reflection, 2 usually means clearcoat reflection - must match corresponding BSDFSample::getDeltaLobeIndex()!
     int                     PSDDominantDeltaLobe                = -1;
+    // this surface is too curved or otherwise problematic to pass motion vectors; other decomposition can continue though
+    int                     PSDBlockMotionVectorsAtSurfaceType  = 0;        // 0 - Off; 1 - AutoLow; 2 - AutoHigh; 3 - Full
 
     // When volume meshes overlap, will cause higher nestedPriority mesh to 'carve out' the volumes with lower nestedPriority (see https://www.sidefx.com/docs/houdini/render/nested.html)
     static constexpr int kMaterialMaxNestedPriority = 14;
@@ -163,17 +198,23 @@ struct PTMaterial : public PTMaterialBase
 
     bool                    UseDonutEmissiveIntensity           = false;        // for being able to use Donut animations
     
-    bool                    SkipRender                          = false;    // if 'true', we just skip drawing all geometries with this material; sometimes we can't edit a specific mesh but we can remove it this way; note: it can also be used for hidden emissives
+    bool                    SkipRender                          = false;        // if 'true', we just skip drawing all geometries with this material; sometimes we can't edit a specific mesh but we can remove it this way; note: it can also be used for hidden emissives
 
     void                    FillData(PTMaterialData & data);
     bool                    EditorGUI(class MaterialsBaker & baker);
     bool                    IsEmissive() const;
 
-    static std::shared_ptr<PTMaterial> FromDonut(const std::shared_ptr<donut::engine::Material>& donutMaterial);
+    static std::shared_ptr<PTMaterial> SafeCast(const std::shared_ptr<donut::engine::Material>& donutMaterial);
+
     static std::shared_ptr<PTMaterial> FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache, const std::string & modelName, const std::string & name);
 
     virtual void            Write(Json::Value & output) override;
     virtual bool            Read(Json::Value & output, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache) override;
+
+    virtual MaterialShaderPermutation 
+                            ComputeShaderPermutation(const std::string & defaultShaderPath) override;
+
+    virtual bool            HasAlphaTest() const override       { return EnableAlphaTesting; }
 };
 
 struct MaterialEx : donut::engine::Material
@@ -184,7 +225,7 @@ struct MaterialEx : donut::engine::Material
 class MaterialsBaker
 {
 public:
-    MaterialsBaker(nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory);
+    MaterialsBaker(const std::string & relativeShaderSourcePath, nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory);
     ~MaterialsBaker();
 
     void                            CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path & sceneFilePath, const std::filesystem::path & mediaPath);
@@ -204,8 +245,15 @@ public:
 
     std::filesystem::path           GetMaterialStoragePath(PTMaterialBase& material);
 
+    const std::shared_ptr<MaterialShaderPermutation> & 
+                                    GetUbershader() const                   { return m_ubershader; }
+    const std::vector<std::shared_ptr<MaterialShaderPermutation>> & 
+                                    GetShaderPermutationTable() const       { return m_shaderPermutationTable; }
+
     bool                            SaveSingle(PTMaterialBase& material);
     bool                            LoadSingle(PTMaterialBase& material);
+
+    std::shared_ptr<PTMaterial>     FindByUniqueID(const std::string & name);
 
 private:
     void                            Clear();
@@ -216,8 +264,13 @@ private:
 
     void                            CompleteDeferredTexturesLoad(nvrhi::ICommandList* commandList);
 
+    void                            BakeShaderPermutations();
+
+    void                            InitializeUniqueDeterministicName(const std::shared_ptr<PTMaterialBase> & material);
+
 private:
     nvrhi::DeviceHandle             m_device;
+    std::string                     m_relativeShaderSourcePath;         // this is the path for the shader file containing material specializations for ClosestHit and (if enabled) AnyHit; it is currently 1 for all materials, but could be per-material
     std::shared_ptr<donut::engine::TextureCache> m_textureCache;
     std::shared_ptr<donut::engine::CommonRenderPasses> m_commonPasses;
     std::shared_ptr<donut::engine::FramebufferFactory> m_framebufferFactory;
@@ -238,4 +291,15 @@ private:
     std::filesystem::path           m_mediaPath;
     std::filesystem::path           m_materialsPath;                    // usually "Assets/Materials/"              <- used for materials shared between all scenes
     std::filesystem::path           m_materialsSceneSpecializedPath;    // usually "Assets/Materials/SceneName/"    <- used for materials specific to scene (not shared between scenes)
+
+    // this ClosestHit/AnyHit should work for all materials (ubershader, not efficient) - it will likely be removed in the future, with only the specialized supported
+    std::shared_ptr<MaterialShaderPermutation>
+                                    m_ubershader;
+    
+    // these are per-material ClosestHit/AnyHit shaders (some materials share same); m_shaderPermutations and m_shaderPermutationTable are always updated together and point to same
+    std::unordered_map<MaterialShaderPermutationKey, std::shared_ptr<MaterialShaderPermutation>, MaterialShaderPermutationKeyHash>
+                                    m_shaderPermutations;
+    std::vector<std::shared_ptr<MaterialShaderPermutation>> m_shaderPermutationTable;
+
+    std::unordered_map<std::string, std::weak_ptr<PTMaterialBase> > m_uniqueNames;
 };

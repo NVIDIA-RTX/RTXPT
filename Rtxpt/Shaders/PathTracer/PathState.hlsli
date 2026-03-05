@@ -15,11 +15,12 @@
 
 #include "Config.h"    
 #include "Utils/Math/Ray.hlsli"
+#include "Utils/Utils.hlsli"
 #include "Utils/SampleGenerators.hlsli"
 #include "Scene/HitInfo.hlsli"
 #include "Rendering/Materials/InteriorList.hlsli"
 #include "Rendering/Materials/TexLODHelpers.hlsli"
-#include "Lighting/LightingTypes.h"
+#include "Lighting/LightingTypes.hlsli"
 #include "PathTracerHelpers.hlsli"
 
 // Be careful with changing these. PathFlags share 32-bit uint with vertexIndex. For now, we keep 10 bits for vertexIndex.
@@ -49,8 +50,8 @@ enum class PathFlags
     restirGIStarted                 = (1<<7),   ///< This path has started collecting data for ReSTIR GI - all radiance from now on is diverted into ReSTIR GI buffers
     restirGICollectSecondarySurface = (1<<8),   ///< This path has started collecting data for ReSTIR GI - next hit surface (or sky) info needs to be saved into ReSTIR GI buffers !!and the flag will be removed then!!
 
-    //specularPrimaryHit              = (1<<9),   ///< Scatter ray went through a specular event on primary hit.
-    //<removed, empty space>          = (1<<10),  ///<
+    enableThreadReorder             = (1<<9),   ///< Path has become divergent, it's probably good to invoke Shader Execution Reordering for the next bounce
+    // exportSpecHitTBlocked           = (1<<10),  ///< This is how PTMaterialFlags_PSDAutoBlockMVsAtSurface is implemented <- actually unnecessary, we can rely on GetMotionVectorSceneLength() != 0
     deltaTransmissionPath           = (1<<11),  ///< Path started with and followed delta transmission events (whenever possible - TIR could be an exception) until it hit the first non-delta event.
     deltaOnlyPath                   = (1<<12),  ///< There was no non-delta events along the path so far.
 
@@ -60,7 +61,7 @@ enum class PathFlags
     stablePlaneOnPlane              = (1<<16),  ///< Current vertex is on a stable plane; this is where we update stablePlaneBaseScatterDiff
     stablePlaneOnBranch             = (1<<17),  ///< Current vertex is on a stable plane or stable branch; all emission is stable and was already collected
     stablePlaneBaseScatterDiff      = (1<<18),  ///< When stepping off the last stable plane & branch, we had a diffuse scatter event (this determines if the radiance is diffuse or specular for denoising purposes)
-    //stablePlaneOnDeltaBranch        = (1<<19),  ///< The first scatter from a stable plane was a delta event
+    exportSpecHitTQueued            = (1<<19),  ///< Export specular hitT distance on first next non-specular scatter (or sky) and clear the flag.
     stablePlaneOnDominantBranch     = (1<<20),  ///< Are we on the dominant stable plane or one of its branches (landing on a new stable branch will re-set this flag accordingly)
 
     // Bits to kPathFlagsBitCount are still unused.
@@ -77,55 +78,95 @@ enum class PackedCounters // each packed to 8 bits, 4 max fits in 32bit uint
     //SubSampleIndex              = 3     ///< Used when doing multiple (sub)samples per pixels: when the path gets terminated, this counter is incremented, and if still < 
 };
 
-// TODO: Compact encoding to reduce live registers, e.g. packed HitInfo, packed normals.
 /** Live state for the path tracer.
 */
-struct PathState
+struct /*PAYLOAD_QUALIFIER*/ PathState
 {
-    uint        id;                     ///< See PathIDToPixel/PathIDFromPixel for encoding
-    uint        flagsAndVertexIndex;    ///< Higher kPathFlagsBitCount bits: Flags indicating the current status. This can be multiple PathFlags flags OR'ed together.
-                                        ///< Lower kVertexIndexBitCount bits: Current vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
+    // 1st 16 bytes
+    // float3      origin  PAYLOAD_FIELD_RW_ALL;               ///< Origin of the scatter ray.
+    // uint        id      PAYLOAD_FIELD_RW_ALL;               ///< See PathIDToPixel/PathIDFromPixel for encoding
+    uint4       PackOriginId /*PAYLOAD_FIELD_RW_ALL*/;
 
-    float       sceneLength;            ///< [DO NOT COMPRESS TO 16bit float!] Path length in scene units (was 0.f at primary hit originally, in this implementation it includes camera to primary hit).
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
-    float       sceneLengthFromDenoisingLayer; ///< [can be compressed to 16bit in most cases] Path length in scene units between denoising layer vertex and the next vertex; useful for estimating denoising motion vectors
-    float       specHitT;               ///< tracks rough hitT (weighted average of sceneLengthFromDenoisingLayer, with L.a used as a weight) 
-#endif
+    // 2nd 16 bytes
+    // float3      dir     PAYLOAD_FIELD_RW_ALL;               ///< Scatter ray normalized direction.
+    //float       sceneLength     PAYLOAD_FIELD_RW_ALL;       ///< [DO NOT COMPRESS TO 16bit float!] Path length in scene units (was 0.f at primary hit originally, in this implementation it includes camera to primary hit).
+    uint4       PackDirSceneLength /*PAYLOAD_FIELD_RW_ALL*/;
 
-    lpfloat     fireflyFilterK;         ///< (0, 1] multiplier for the global firefly filter threshold if used; CAN be compressed to 16bit float!
-    lpuint      packedMISInfo;          ///< See NEEBSDFMISInfo
-    lpfloat     bsdfScatterPdf;         ///< 0 if delta lobe (zero roughness specular) bounce
-    
-    uint        packedCounters;         ///< Packed counters for different types of bounces and etc., see PackedCounters.
-
-    uint        stableBranchID;         ///< Path 'stable delta tree' branch ID for finding matching StablePlane; Gets updated on scatter while path isDeltaOnlyPath;
-
-    // Scatter ray
-    float3      origin;                 ///< Origin of the scatter ray.
-    float3      dir;                    ///< Scatter ray normalized direction.
-    
-    PackedHitInfo hitPacked;            ///< Hit information for the scatter ray. This is populated at committed triangle hits. 4 uints (16 bytes)
-
-    float3      thp;                    ///< Path throughput.
-    lpfloat     thpRuRuCorrection;      ///< Since we use Russian Roulette to decide early termination for next frame, the correct place to apply RR thp boost that preserves unbiasedness is only AFTER emissive/sky is collected.
-
-    InteriorList interiorList;          ///< Interior list. Keeping track of a stack of materials with medium properties. Size depends on INTERIOR_LIST_SLOT_COUNT. 2 slots (8 bytes) by default.
-    RayCone     rayCone;                ///< 4 or 8 bytes depending on USE_RAYCONES_WITH_FP16_IN_RAYPAYLOAD (on, so 4 bytes by default). 
-
+    // 3rd 16 bytes
+    //float3      thp;                                      ///< Path throughput.
+    uint2       pack23  /*PAYLOAD_FIELD_RW_ALL*/;               ///< packed Thp
 #if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
-    lpfloat3x3  imageXform;             ///< Accumulated rotational image transform along the path. This can be float16_t.
+    uint2       imageXformPacked PAYLOAD_FIELD_RW_ALL;      ///< Accumulated rotational image transform along the path. Use PackOrthoMatrix / UnpackOrthoMatrix to extract
 #else
-    float4      L;                      ///< .rgb - accumulated path contribution; .a - specularness (weighted average)
+    //float4      L;                    ///< .rgb - accumulated path contribution; .a - specularness (weighted average)
+    uint2       pack45  /*PAYLOAD_FIELD_RW_ALL*/;               ///< packed L
 #endif
+
+    // 4th 16 bytes
+#if RTXPT_NESTED_DIELECTRICS_QUALITY > 0 || defined(__INTELLISENSE__)
+    InteriorList interiorList   PAYLOAD_FIELD_RW_ALL;       ///< Interior list. Keeping track of a stack of materials with medium properties. Size depends on INTERIOR_LIST_SLOT_COUNT. 2 slots (8 bytes) by default.
+#endif
+    uint        packedCounters  /*PAYLOAD_FIELD_RW_ALL*/;       ///< Packed counters for different types of bounces and etc., see PackedCounters.
+    uint        stableBranchID  /*PAYLOAD_FIELD_RW_ALL*/;       ///< Path 'stable delta tree' branch ID for finding matching StablePlane; Gets updated on scatter while path isDeltaOnlyPath;
+
+    // 5th 16 bytes
+    RayCone     rayCone         /*PAYLOAD_FIELD_RW_ALL*/;                ///< 4 or 8 bytes depending on USE_RAYCONES_WITH_FP16_IN_RAYPAYLOAD (on, so 4 bytes by default). 
+    // lpfloat     fireflyFilterK;                          ///< (0, 1] multiplier for the global firefly filter threshold if used; CAN be compressed to 16bit float!
+    // lpfloat     bsdfScatterPdf;                          ///< 0 if delta lobe (zero roughness specular) bounce
+    uint        pack0           /*PAYLOAD_FIELD_RW_ALL*/;       ///< packed fireflyFilterK && bsdfScatterPdf
+    // lpuint      packedMISInfo;                           ///< See NEEBSDFMISInfo
+    // lpfloat     thpRuRuCorrection;                       ///< Since we use Russian Roulette to decide early termination for next frame, the correct place to apply RR thp boost that preserves unbiasedness is only AFTER emissive/sky is collected.
+    uint        pack1           /*PAYLOAD_FIELD_RW_ALL*/;       ///< packed packedMISInfo and thpRuRuCorrection
+    uint        flagsAndVertexIndex /*PAYLOAD_FIELD_RW_ALL*/;   ///< Higher kPathFlagsBitCount bits: Flags indicating the current status. This can be multiple PathFlags flags OR'ed together.
+                                                            ///< Lower kVertexIndexBitCount bits: Current vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
 
     // Accessors
+    #define PS_CONST
 
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
-    float GetSceneLengthFromDenoisingLayer()    { return sceneLengthFromDenoisingLayer; }
-    float GetSpecHitT()                         { return specHitT; }
+    float3      GetOrigin() PS_CONST            { return asfloat(PackOriginId.xyz); }
+    void        SetOrigin(float3 origin)        { PackOriginId.xyz = asuint(origin); }
+
+    uint        GetId() PS_CONST                   { return PackOriginId.w; }
+    void        SetId(uint id)                  { PackOriginId.w = id; }
+
+    float3      GetDir() PS_CONST               { return asfloat(PackDirSceneLength.xyz); }
+    void        SetDir(float3 origin)           { PackDirSceneLength.xyz = asuint(origin); }
+
+    float       GetSceneLength() PS_CONST       { return asfloat(PackDirSceneLength.w); }
+    void        SetSceneLength(float sceneLength) { PackDirSceneLength.w = asuint(sceneLength); }
+
+#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+    float3x3 GetImageXform() PS_CONST           { return UnpackOrthoMatrix(imageXformPacked); }
+    void     SetImageXform(float3x3 p)          { imageXformPacked = PackOrthoMatrix(p); }
+#endif
+
+#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
+    void    SetFireflyFilterK_BsdfScatterPdf(float fireflyFilterK, float bsdfScatterPdf)            { pack0 = ((f32tof16(clamp(fireflyFilterK, 0, HLF_MAX))) << 16) | (f32tof16(clamp(bsdfScatterPdf, 0, HLF_MAX))); }
+    lpfloat GetFireflyFilterK() PS_CONST        { return lpfloat(f16tof32(pack0 >> 16)); }
+    lpfloat GetBsdfScatterPdf() PS_CONST        { return lpfloat(f16tof32(pack0 & 0xFFFF)); }
+
+    void    SetPackedMISInfo_ThpRuRuCorrection( uint packedMISInfo, float thpRuRuCorrection )       { pack1 = (packedMISInfo<<16) | (f32tof16(clamp(thpRuRuCorrection, 0, HLF_MAX))); }
+    lpuint  GetPackedMISInfo() PS_CONST         { return lpuint(pack1 >> 16); }
+    lpfloat GetThpRuRuCorrection() PS_CONST     { return lpfloat(f16tof32(pack1 & 0xFFFF)); }
 #else
-    float GetSceneLengthFromDenoisingLayer()    { return 0.0f; }
-    float GetSpecHitT()                         { return 0.0f; }
+    // see PTMaterialFlags_PSDAutoBlockMVsAtSurface - if enabled at surface, current SceneLength will be rememberded and used for all subsequent motion vector computation, as well as disable future Xform updates
+    void    SetMotionVectorSceneLength(float l) { pack0 = asuint(l); }
+    float   GetMotionVectorSceneLength()        { return asfloat(pack0); }
+    //void    SetMotionVectorBounceNormal(float3 n) { pack1 = NDirToOctUnorm30(n); }        // too complex
+    //float3  GetMotionVectorBounceNormal()         { return OctToNDirUnorm30(pack1); }     // too complex
+    // there's no NEE while building stable planes as we're on delta branches only!
+    lpuint  GetPackedMISInfo() PS_CONST         { return 0; }    // by convention, NEEBSDFMISInfo::empty().Pack16bit() is 0
+    lpfloat GetBsdfScatterPdf() PS_CONST        { return 0.0; }
+    // there's no RR while building stable planes!
+    lpfloat GetThpRuRuCorrection() PS_CONST     { return 1.0f; }
+#endif
+
+    void    SetThp(float3 thp)                  { thp = clamp( thp, 0.xxx, HLF_MAX.xxx ); pack23 = Fp32ToFp16NoClamp(float4(thp,0)); }
+    float3  GetThp() PS_CONST                   { return Fp16ToFp32( pack23 ).xyz; }
+
+#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
+    void    SetL(float4 l)                      { l = clamp( l, 0.xxxx, HLF_MAX.xxxx ); pack45 = Fp32ToFp16NoClamp(l); }
+    float4  GetL() PS_CONST                     { return Fp16ToFp32( pack45 ); }
 #endif
 
     bool isTerminated() { return !isActive(); }
@@ -146,7 +187,7 @@ struct PathState
     void terminate() { setFlag(PathFlags::active, false); }
     void setActive() { setFlag(PathFlags::active); }
     //void setHit(HitInfo hitInfo) { hit = hitInfo; setFlag(PathFlags::hit); }
-    void setHitPacked(PackedHitInfo hitInfoPacked) { hitPacked = hitInfoPacked; setFlag(PathFlags::hit); }
+    //void setHitPacked(PackedHitInfo hitInfoPacked) { hitPacked = hitInfoPacked; setFlag(PathFlags::hit); }
     void clearHit() { setFlag(PathFlags::hit, false); }
 
     void setTerminateAtNextBounce()   { setFlag(PathFlags::terminateAtNextBounce); }
@@ -198,7 +239,7 @@ struct PathState
         packedCounters += (1u << shift);
     }
 
-    uint2 GetPixelPos() { return PathIDToPixel(id); }
+    uint2 GetPixelPos() { return PathIDToPixel( GetId() ); }
 
     // Unsafe - assumes that index is small enough.
     void setVertexIndex(uint index)
@@ -218,7 +259,7 @@ struct PathState
 
     Ray getScatterRay()
     {
-        return Ray::make(origin, dir, 0.f, kMaxRayTravel);
+        return Ray::make(GetOrigin(), GetDir(), 0.f, kMaxRayTravel);
     }
 
     uint getStablePlaneIndex()                  { return (flagsAndVertexIndex & kStablePlaneIndexBitMask) >> kStablePlaneIndexBitOffset; }

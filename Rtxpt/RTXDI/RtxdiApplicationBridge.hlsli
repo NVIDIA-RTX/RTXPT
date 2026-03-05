@@ -96,7 +96,7 @@ static const bool kSpecularOnly = false;
 static const float kMinRoughness = 0.05f;
 
 //Types
-typedef PathTracerSurfaceData RAB_Surface;
+typedef PathTracerCollectedSurfaceData RAB_Surface;
 
 enum class RayHitType : uint
 {
@@ -269,7 +269,7 @@ float RAB_GetNextRandom(inout RAB_RandomSamplerState rng)
 //Empty type constructors
 RAB_Surface RAB_EmptySurface()
 {
-    return PathTracerSurfaceData::makeEmpty();
+    return PathTracerCollectedSurfaceData::makeEmpty();
 }
 
 RAB_LightInfo RAB_EmptyLightInfo()

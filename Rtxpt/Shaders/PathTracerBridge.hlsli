@@ -12,17 +12,14 @@
 #define __PATH_TRACER_BRIDGE_HLSLI__
 
 #include "PathTracer/Config.h"
-#include "ShaderDebug.hlsli"
+#include "Libraries/ShaderDebug/ShaderDebug.hlsl"
 #include "PathTracer/PathTracerTypes.hlsli"
 #include "PathTracer/Rendering/Volumes/HomogeneousVolumeSampler.hlsli"
 #include "PathTracer/Lighting/EnvMap.hlsli"
 #include "PathTracer/Lighting/LightSampler.hlsli"
 
-#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP && (\
-    (__SHADER_TARGET_MAJOR > 6) || \
-    ((__SHADER_TARGET_MAJOR == 6) && (__SHADER_TARGET_MINOR >= 9)) \
-    )
-#define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS
+#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
+#define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS 0 //RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS
 #else
 #define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS 0
 #endif
@@ -58,18 +55,13 @@ namespace Bridge
 #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
         ,STF_SamplerState stfSamplerState
 #endif
-);
+    );
 
-    static void loadSurfacePosNormOnly(out float3 posW, out float3 faceN, const TriangleHit triangleHit, DebugContext debug);
+    static PathTracer::SurfaceData loadSurface( const uint instanceIndex, const uint geometryIndex, const uint triangleIndex, const float2 barycentrics,
+        const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPosition, DebugContext debug );
 
-    static PathTracer::SurfaceData loadSurface(
-        const uniform PathTracer::OptimizationHints optimizationHints, 
-        const TriangleHit triangleHit, 
-        const float3 rayDir, 
-        const RayCone rayCone, 
-        const int pathVertexIndex, 
-        const uint2 pixelPosition,
-        DebugContext debug);
+    static PathTracer::SurfaceData loadSurface( const TriangleHit triangleHit, 
+        const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPosition, DebugContext debug );
 
     static void updateOutsideIoR(inout PathTracer::SurfaceData surfaceData, lpfloat outsideIoR);
 
@@ -103,7 +95,7 @@ namespace Bridge
     // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
     static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, DebugContext debug);
 
-    static void traceScatterRay(const PathState path, inout RayDesc ray, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, inout PackedHitInfo packedHitInfo, DebugContext debug);
+    static void traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug);
 
 #if PT_USE_RESTIR_GI
     static void StoreSecondarySurfacePositionAndNormal(uint2 pixelCoordinate, float3 worldPos, float3 normal);
@@ -121,10 +113,15 @@ namespace Bridge
     static EnvMapSampler CreateEnvMapImportanceSampler();
 
     static LightSampler CreateLightSampler( const uint2 pixelPos, float rayConeWidth, float totalPathLength );
-    static LightSampler CreateLightSampler( const uint2 pixelPos, bool isIndirect );
+    static LightSampler CreateLightSampler( const uint2 pixelPos, bool isScreenSpaceCoherent );
 
     static float DiffuseEnvironmentMapMIPOffset( );    ///< Use lower MIP level when sampling environment map. Only 0 produces unbiased results
 
+    static void ExportSurfaceInit(uint2 pixelPos);
+    static void ExportSurface(const PathState path, PathTracer::SurfaceData surfaceData, float sceneLength, float3 motionVectors/*, const float roughness, const float3 worldNormal, float3 diffBSDFEstimate, float3 specBSDFEstimate*/ );
+    static void ExportNonSurface(const PathState path, float3 virtualWorldPos, float3 motionVectors );
+    static void ExportSpecHitTStart(const PathState path);
+    static void ExportSpecHitTStop(const PathState path);
 };
 
 #endif // __PATH_TRACER_BRIDGE_HLSLI__

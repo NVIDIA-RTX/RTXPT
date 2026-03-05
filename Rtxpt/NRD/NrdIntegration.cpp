@@ -14,7 +14,7 @@
 
 static_assert(NRD_VERSION_MAJOR >= 4 && NRD_VERSION_MINOR >= 15, "Unsupported NRD version!");
 
-#include "../RenderTargets.h"
+#include "../SampleCommon/RenderTargets.h"
 #include <nvrhi/utils.h>
 #include <donut/core/math/math.h>
 #include <donut/engine/View.h>

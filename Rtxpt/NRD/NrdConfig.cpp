@@ -36,12 +36,12 @@ namespace NrdConfig {
         settings.specularMaxAccumulatedFrameNum = 40;
 
         // aggressive anti-lag settings
-        settings.diffuseMaxFastAccumulatedFrameNum = 3;
-        settings.specularMaxFastAccumulatedFrameNum = 5;
-        settings.antilagSettings.accelerationAmount = 0.95f;
-        settings.antilagSettings.spatialSigmaScale = 0.5f;
-        settings.antilagSettings.temporalSigmaScale = 0.25f;
-        settings.antilagSettings.resetAmount = 0.95f;
+        settings.diffuseMaxFastAccumulatedFrameNum = 5;
+        settings.specularMaxFastAccumulatedFrameNum = 6;
+        settings.antilagSettings.accelerationAmount = 0.55f;
+        settings.antilagSettings.spatialSigmaScale = 2.5f;
+        settings.antilagSettings.temporalSigmaScale = 0.3f;
+        settings.antilagSettings.resetAmount = 0.5f;
 
         return settings;
     }

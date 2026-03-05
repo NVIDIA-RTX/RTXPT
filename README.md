@@ -1,26 +1,27 @@
-# RTX Path Tracing v1.7.1
+# RTX Path Tracing v1.8.1
 
 ![Title](./Docs/r-title.png)
 
-## What's new in 1.7.1
- * A small update that uses Agility SDK 1.619
-	* Uses the DXR version of OMMs by default, rather than NvAPI
-	* Uses the SM6.9 HitObject API for Shader Execution Reordering by default, rather than NvAPI
+## What's new in 1.8.0 and 1.8.1
+ * Performance optimizations (25-30%+ perf gain over 1.7.x with comparable or better quality)
+ * New performance/quality presets in "Display and performance" allow for better scaling from low end to high end GPUs 
+ * New modes in `bistro-programmer-art` scene for stress testing animation and dynamic lighting scenarios (see [1](https://github.com/NVIDIA-RTX/RTXPT-Assets/blob/main/Screenshots/1.8.0/1_Balanced_4k.png), [2](https://github.com/NVIDIA-RTX/RTXPT-Assets/blob/main/Screenshots/1.8.0/2_Balanced_4k.png), [3](https://github.com/NVIDIA-RTX/RTXPT-Assets/blob/main/Screenshots/1.8.0/3_Balanced_4k.png), [4](https://github.com/NVIDIA-RTX/RTXPT-Assets/blob/main/Screenshots/1.8.0/4_Balanced_4k.png))
+ * Fixes for a number of DLSS-RR denoising stability issues in reflected/refracted surfaces
+ * DirectX SER and Opacity Micromaps are now available when Agility SDK 1.619 is enabled (on by default in 1.8.1, requires [DXR 1.2](https://devblogs.microsoft.com/directx/shader-model-6-9-retail-and-more/) driver support; to disable, remove Agility SDK 1.619 from CMake settings)
 
-## What's new in 1.7.0
- * New scene (bistro-programmer-art) for stress testing animation and dynamic lighting scenarios
- * Performance optimizations (10%+ perf gain over 1.6.0)
- * DirectX (Preview Agility SDK) Opacity Micromaps 
  
 See [Releases](https://github.com/NVIDIA-RTX/RTXPT/releases) for more detail and downloads.
 
 ## Overview
 
-RTX Path Tracing is a code sample that strives to embody years of ray tracing and neural graphics research and experience. It is intended as a starting point for a path tracer integration, as a reference for various integrated SDKs, and/or for learning and experimentation.
+RTX Path Tracing is a code sample that strives to embody years of ray tracing and neural graphics research and experience. It is intended as a starting point for a clean path tracer integration, as a reference for various integrated SDKs, and/or for learning and experimentation. 
 
-The base path tracing implementation derives from NVIDIA’s [Falcor Research Path Tracer](https://github.com/NVIDIAGameWorks/Falcor), ported to approachable C++/HLSL [Donut framework](https://github.com/NVIDIAGameWorks/donut).
+It is a pure path tracer that does not rely on rasterization. In its main configuration, all light transport is evaluated within a single ray tracing pass, leveraging light-sampling caches for real-time performance. It further employs path-space layer decomposition and guide-buffer generation to support real-time denoising (DLSS-RR) and other techniques.
 
-GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/gtc/session-catalog/?tab.catalogallsessionstab=16566177511100015Kus&search.industry=option_1559593201839#/session/1666651593475001NN25) provides a high level introduction to most of the features.
+The base path tracing implementation derives from NVIDIA’s [Falcor Research Path Tracer](https://github.com/NVIDIAGameWorks/Falcor), ported to approachable C++/HLSL [Donut framework](https://github.com/NVIDIAGameWorks/donut). 
+
+GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/gtc/session-catalog/?tab.catalogallsessionstab=16566177511100015Kus&search.industry=option_1559593201839#/session/1666651593475001NN25) provides a high level introduction to most of the features, although it is pretty much out of date by now.
+
 
 
 ## Features
@@ -31,7 +32,7 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 * Simple asset pipeline based on glTF 2.0 (support for a subset of glTF extensions including animation)
 * Volumes and nested dielectrics with priority
 * Support for analytic lights (directional, spot, point), emissive triangles and environment map lighting
-* NEE lighting with feedback-based, temporaly adaptive importance sampling
+* NEE lighting with feedback-based, temporaly adaptive guided importance sampling (NEE-AT)
 * Path tracing features such as: Low-discrepancy sample generator based on [Practical Hash-based Owen Scrambling](https://jcgt.org/published/0009/04/01/paper.pdf), use of [RayCones](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones) for texture MIP selection, RR early ray termination, firefly filter and similar 
 * Basic post-processing features such as: TAA, tone mapping, bloom and similar
 * Reference mode 'photo-mode screenshot' with simple [OptiX denoiser](https://developer.nvidia.com/optix-denoiser) integration
@@ -40,14 +41,14 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 * [OMM](https://github.com/NVIDIA-RTX/OMM) integration for fast ray traced alpha testing
 * [NRD](https://github.com/NVIDIA-RTX/NRD) ReLAX and ReBLUR denoiser integration with up to 3-layer path space decomposition
 * [RTXTF](https://github.com/NVIDIA-RTX/RTXTF) integration for Stochastic Texture Filtering
-* [Streamline](https://github.com/NVIDIAGameWorks/Streamline/) integration for DLSS 4.0 (DLSS RR, DLSS SR, DLSS AA, DLSS FG & MFG)
+* [Streamline](https://github.com/NVIDIAGameWorks/Streamline/) integration for DLSS (DLSS RR, DLSS SR, DLSS AA, DLSS FG & MFG)
 
 
 ## Requirements
 
 - Windows 10 20H1 (version 2004-10.0.19041) or newer
-- DXR Capable GPU (DirectX Raytracing 1.1 API, or higher)
-- GeForce Game Ready Driver 580.88 or newer
+- DXR Capable GPU (DirectX Raytracing 1.1 API, or higher; if DXR 1.2 not available please disable Agility SDK 1.619 in CMake settings)
+- GeForce Game Ready Driver 595.71 or newer
 - DirectX 12 or Vulkan API
 - CMake v4.02+
 - Visual Studio 2022 (v143 build tools) or later with Windows 10 SDK version 10.0.20348.0 or 10.0.26100.0 or later
@@ -55,6 +56,7 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 
 ## Known Issues
 
+* By default, Agility SDK 1.619 is enabled and requires DXR 1.2 (Shader Model 6.9). Our current setup can only switch to older shader models at build configuration time, so if your GPU does not support DXR 1.2 with Shader Model 6.9, set RTXPT_D3D_AGILITY_SDK_PATH, RTXPT_D3D_AGILITY_SDK_VERSION and RTXPT_D3D_AGILITY_SDK_VERSION_NAME CMake variables to empty before cleaning the `/bin` folder, re-configuring/re-generating and rebuilding the project.
 * Enabling Vulkan support requires a couple of manual steps, see [below](#building-vulkan)
 * SER and OMM support on Vulkan is currently work in progress
 * Running Vulkan on AMD GPUs may trigger a TDR during TLAS building in scenes with null TLAS instances
@@ -62,6 +64,7 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 * We recommend using *NVIDIA Nsight Graphics* graphics for frame capture and analysis. If using other GPU performance tuning and debugging tools such as *PIX on Windows*, it is advisable to disable NVRHI_WITH_NVAPI and DONUT_WITH_STREAMLINE variables in CMake to avoid compatibility issues. Please note: disabling these settings results in lower performance and missing features
 * There is a known issue resulting in LIVE_DEVICE DirectX warnings reported at shutdown when Streamline is enabled in Debug builds
 * There is a known issue resulting in black or incorrect transparencies/reflection on some AMD systems with latest drivers; this is most likely a driver error and has been reported
+
 
 ## Folder Structure
 

@@ -25,6 +25,8 @@
 #include "../Shaders/PathTracer/Lighting/PolymorphicLight.h"
 #include "../Shaders/Bindings/BindingDataTypes.hlsli"
 
+#include "../Shaders/PathTracer/Lighting/EnvMap.hlsli"
+
 #define TASK_PRIMITIVE_LIGHT_BIT 0x80000000u
 
 #define RTXDI_PRESAMPLING_GROUP_SIZE 256

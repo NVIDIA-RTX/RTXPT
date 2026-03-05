@@ -85,11 +85,9 @@ endfunction()
 option(DONUT_WITH_STREAMLINE "Enable streamline, separate package required" ON)
 set(STREAMLINE_DOWNLOAD_PATH "${CMAKE_SOURCE_DIR}/External/Streamline")
 
-# Use this to optionally download Streamline (and not as a submodule)
-#set(DONUT_STREAMLINE_FETCH_URL "https://github.com/NVIDIAGameWorks/Streamline.git" CACHE STRING "")
-#set(DONUT_STREAMLINE_FETCH_TAG "v2.7.2" CACHE STRING "")
-#set(DONUT_STREAMLINE_FETCH_DIR ${STREAMLINE_DOWNLOAD_PATH} CACHE STRING "Directory to fetch streamline to, empty uses build directory default")
-set(DONUT_STREAMLINE_SEARCH_PATHS ${STREAMLINE_DOWNLOAD_PATH} CACHE STRING "Search paths for streamline package")
+set(DONUT_STREAMLINE_FETCH_URL "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.9.0/streamline-sdk-v2.9.0.zip" CACHE STRING "URL to Streamline package to fetch from https://github.com/NVIDIA-RTX/Streamline/releases")
+set(DONUT_STREAMLINE_FETCH_SHA256 "b7e4f31706cfacafba95d2d4abc2c9dcf2dc5fc58b2a6917c71f83051d271aa1" CACHE STRING "SHA256 hash of Streamline package from https://github.com/NVIDIA-RTX/Streamline/releases")
+set(DONUT_STREAMLINE_FETCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/External/Streamline" CACHE STRING "Directory to fetch Streamline to, empty uses build directory default")
 
 option(STREAMLINE_FEATURE_DLSS_SR   "Include DLSS-SR dll"           ON  )
 option(STREAMLINE_FEATURE_DLSS_RR   "Include DLSS-RR dll"           ON  )
@@ -102,7 +100,6 @@ option(STREAMLINE_FEATURE_DLSS_FG   "Include DLSS-FG dll"           ON  )
 option(STREAMLINE_FEATURE_DEEPDVC   "Include DEEPDVC dll"           OFF )
 option(STREAMLINE_FEATURE_DIRECTSR  "Include DirectSR dll"          OFF )
 #----------------------------------------------------------------------------------------------------------------------
-
 
 #----------------------------------------------------------------------------------------------------------------------
 # Get and unpack DXC for DirectX shader compilation

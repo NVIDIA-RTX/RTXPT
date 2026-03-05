@@ -1,0 +1,376 @@
+/*
+* Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#include "ExtendedScene.h"
+#include <donut/core/json.h>
+#include <donut/core/vfs/VFS.h>
+#include <donut/core/log.h>
+#include <nvrhi/utils.h>
+#include <nvrhi/common/misc.h>
+#include <json/json.h>
+
+using namespace donut::math;
+#include <donut/shaders/light_cb.h>
+
+#include "../Materials/MaterialsBaker.h"
+#include "../OpacityMicroMap/OmmBaker.h"
+
+#include "SampleCommon.h"
+#include "LocalConfig.h"
+
+using namespace donut;
+using namespace donut::engine;
+
+#pragma region ExtendedLights
+
+std::shared_ptr<engine::SceneGraphLeaf> EnvironmentLight::Clone()
+{
+    auto copy = std::make_shared<EnvironmentLight>();
+    copy->color = color;
+    copy->radianceScale = radianceScale;
+    copy->textureIndex = textureIndex;
+    copy->rotation = rotation;
+    copy->path = path;
+    return std::static_pointer_cast<SceneGraphLeaf>(copy);
+}
+
+void LightExtension::Load(const Json::Value& node)
+{
+    Proxies = JsonLoadStringVector(node["proxyMeshNodes"]);
+}
+
+void LightExtension::Store(Json::Value& node) const
+{
+    assert(false && "not implemented :(");
+}
+
+std::shared_ptr<SceneGraphLeaf> SpotLightEx::Clone()
+{
+    auto copy = std::make_shared<SpotLightEx>();
+    copy->color = color;
+    copy->intensity = intensity;
+    copy->radius = radius;
+    copy->range = range;
+    copy->innerAngle = innerAngle;
+    copy->outerAngle = outerAngle;
+    copy->Copy(*this);
+    return std::static_pointer_cast<SceneGraphLeaf>(copy);
+}
+
+void SpotLightEx::Load(const Json::Value& node)
+{
+    SpotLight::Load(node);
+    LightExtension::Load(node);
+}
+
+void SpotLightEx::Store(Json::Value& node) const
+{
+    SpotLight::Store(node);
+    LightExtension::Store(node);
+}
+
+std::shared_ptr<SceneGraphLeaf> PointLightEx::Clone()
+{
+    auto copy = std::make_shared<PointLightEx>();
+    copy->color = color;
+    copy->intensity = intensity;
+    copy->radius = radius;
+    copy->range = range;
+    copy->Copy(*this);
+    return std::static_pointer_cast<SceneGraphLeaf>(copy);
+}
+
+void PointLightEx::Load(const Json::Value& node)
+{
+    PointLight::Load(node);
+    LightExtension::Load(node);
+}
+
+void PointLightEx::Store(Json::Value& node) const
+{
+    PointLight::Store(node);
+    LightExtension::Store(node);
+}
+
+#pragma endregion
+
+void EnvironmentLight::Load(const Json::Value& node)
+{
+    node["radianceScale"] >> radianceScale;
+    node["textureIndex"] >> textureIndex;
+    node["rotation"] >> rotation;
+    node["path"] >> path;
+}
+std::shared_ptr<donut::engine::SceneGraphLeaf> ExtendedSceneTypeFactory::CreateLeaf(const std::string& type)
+{
+    if (type == "EnvironmentLight")
+    {
+        return std::make_shared<EnvironmentLight>();
+    } else
+    if (type == "PointLight")
+    {
+        return std::make_shared<PointLightEx>();
+    } else
+    if (type == "SpotLight")
+    {
+        return std::make_shared<SpotLightEx>();
+    } else
+    if (type == "PerspectiveCamera" || type == "PerspectiveCameraEx")
+    {
+        return std::make_shared<PerspectiveCameraEx>();
+    } else
+    if (type == "MaterialPatch")
+    {
+        assert(false && "Your .scene.json file is out of date, this codepath is no longer supported. Please update your media folder. Loading will continue but some material properties will be missing.");
+        return nullptr;
+    } else
+    if (type == "SampleSettings")
+    {
+        return std::make_shared<SampleSettings>();
+    } else
+    if (type == "GameSettings")
+    {
+        return std::make_shared<GameSettings>();
+    }
+    return SceneTypeFactory::CreateLeaf(type);
+}
+
+std::shared_ptr<MeshInfo> ExtendedSceneTypeFactory::CreateMesh()
+{
+    return std::make_shared<MeshInfoEx>();
+}
+
+std::shared_ptr<MeshGeometry> ExtendedSceneTypeFactory::CreateMeshGeometry()
+{
+    return std::make_shared<MeshGeometryEx>();
+}
+
+std::shared_ptr<Material> ExtendedSceneTypeFactory::CreateMaterial()
+{
+    return std::static_pointer_cast<Material>(std::make_shared<MaterialEx>());
+}
+
+MeshInstanceEx::MeshInstanceEx(const std::shared_ptr<donut::engine::MeshInfo>& mesh)
+    : MeshInstance(mesh)
+{
+    PerGeometryLightSamplerLinks.resize(mesh->geometries.size(), { -1, -1 });
+}
+
+[[nodiscard]] std::shared_ptr<SceneGraphLeaf> MeshInstanceEx::Clone()
+{
+    auto copy = std::make_shared<MeshInstanceEx>(m_Mesh);
+    copy->Copy( static_cast<MeshInstanceExtension&>(*this) );
+    return copy;
+}
+
+std::shared_ptr<donut::engine::MeshInstance> ExtendedSceneTypeFactory::CreateMeshInstance(const std::shared_ptr<MeshInfo>& mesh)
+{
+    return std::static_pointer_cast<MeshInstance>(std::make_shared<MeshInstanceEx>(mesh));
+}
+
+SkinnedMeshInstanceEx::SkinnedMeshInstanceEx(std::shared_ptr<donut::engine::SceneTypeFactory> sceneTypeFactory, std::shared_ptr<donut::engine::MeshInfo> prototypeMesh)
+    : SkinnedMeshInstance(sceneTypeFactory, prototypeMesh) 
+{ 
+    PerGeometryLightSamplerLinks.resize(prototypeMesh->geometries.size(), {-1, -1} ); 
+}
+
+[[nodiscard]] std::shared_ptr<SceneGraphLeaf> SkinnedMeshInstanceEx::Clone()
+{
+    auto copy = std::make_shared<SkinnedMeshInstanceEx>(m_SceneTypeFactory, m_PrototypeMesh);
+
+    for (const auto& joint : joints)
+    {
+        copy->joints.push_back(joint);
+    }
+    copy->Copy(static_cast<MeshInstanceExtension&>(*this));
+    return std::static_pointer_cast<SceneGraphLeaf>(copy);
+}
+
+std::shared_ptr<donut::engine::SkinnedMeshInstance> ExtendedSceneTypeFactory::CreateSkinnedMeshInstance(const std::shared_ptr<donut::engine::SceneTypeFactory> & sceneTypeFactory, const std::shared_ptr<donut::engine::MeshInfo> & prototypeMesh)
+{
+    return std::static_pointer_cast<SkinnedMeshInstance>(std::make_shared<SkinnedMeshInstanceEx>(sceneTypeFactory, prototypeMesh));
+}
+
+void ExtendedScene::ProcessNodesRecursive(std::shared_ptr<donut::engine::SceneGraphNode> node)
+{
+    // std::find_if doesn't compile on linux.
+    auto _find_if = [](
+        ResourceTracker<Material>::ConstIterator begin,
+        ResourceTracker<Material>::ConstIterator end,
+        std::function<bool(const std::shared_ptr<Material>& mat)> fn)->ResourceTracker<Material>::ConstIterator
+    {
+        for (ResourceTracker<Material>::ConstIterator it = begin; it != end; it++)
+        {
+            if (fn(*it)) {
+                return it;
+            }
+        }
+        return end;
+    };
+
+    if (node->GetLeaf() != nullptr)
+    {
+#if 0 // material patching no longer supported - leaving this as a future reference
+        std::shared_ptr<MaterialPatch> materialPatch = std::dynamic_pointer_cast<MaterialPatch>(node->GetLeaf());
+        if (materialPatch != nullptr)
+        {
+            const std::string name = node->GetName();
+
+            auto & materials = m_SceneGraph->GetMaterials();
+            auto it = _find_if( materials.begin(), materials.end(), [&name](const std::shared_ptr<Material> & mat) { return mat->name == name; });
+            if (it == materials.end())
+            {
+                log::warning("Material patch '%s' can't find material to patch!", name.c_str() );
+                assert( false );
+            }
+            else
+            {
+                materialPatch->Patch(**it);
+            }
+        }
+#endif
+        std::shared_ptr<SampleSettings> sampleSettings = std::dynamic_pointer_cast<SampleSettings>(node->GetLeaf());
+        if (sampleSettings != nullptr)
+        {
+            assert(m_loadedSettings == nullptr);    // multiple settings nodes? only last one will be loaded
+            m_loadedSettings = sampleSettings;
+        }
+        std::shared_ptr<GameSettings> gameSettings = std::dynamic_pointer_cast<GameSettings>(node->GetLeaf());
+        if (gameSettings != nullptr)
+        {
+            assert(m_loadedGameSettings == nullptr);    // multiple settings nodes? only last one will be loaded
+            m_loadedGameSettings = gameSettings;
+        }
+        if (node->GetLeaf() != nullptr && node->GetLeaf()->GetContentFlags() == SceneContentFlags::Lights)
+        {
+            auto light = std::dynamic_pointer_cast<Light>(node->GetLeaf());
+            auto lightEx = std::dynamic_pointer_cast<LightExtension>(node->GetLeaf());
+            if (light != nullptr && (light->GetLightType() == LightType_Spot || light->GetLightType() == LightType_Point) && lightEx != nullptr)
+            {
+                for( auto proxyPath : lightEx->Proxies )
+                {
+                    auto proxyNode = m_SceneGraph->FindNode(proxyPath);
+                    if (proxyNode != nullptr)
+                    {
+                        auto smi = std::dynamic_pointer_cast<MeshInstanceExtension>(proxyNode->GetLeaf());
+                        if (smi != nullptr)
+                        {
+                            smi->ProxiedAnalyticLight = lightEx;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for( int i = (int)node->GetNumChildren()-1; i >= 0; i-- )
+        ProcessNodesRecursive(node->GetChild(i)->shared_from_this());
+}
+
+bool ExtendedScene::LoadWithThreadPool(const std::filesystem::path& jsonFileName, donut::engine::ThreadPool* threadPool)
+{
+	if (!Scene::LoadWithThreadPool(jsonFileName, threadPool))
+		return false;
+
+    ProcessNodesRecursive( GetSceneGraph()->GetRootNode() );
+
+#if 1 // example of modifying all materials after scene loading; this is the ideal place to do material modification without worrying about resetting relevant caches/dependencies
+    auto& materials = m_SceneGraph->GetMaterials();
+    for( auto it : materials )
+    {
+        Material & mat = *it;
+        LocalConfig::PostMaterialLoad(mat);
+    }
+#endif
+
+    return true;
+}
+
+std::shared_ptr<EnvironmentLight> FindEnvironmentLight(std::vector <std::shared_ptr<donut::engine::Light>> lights)
+{
+    for (auto light : lights)
+    {
+        if (light->GetLightType() == LightType_Environment)
+        {
+            return std::dynamic_pointer_cast<EnvironmentLight>(light);
+        }
+    }
+    return nullptr;
+}
+
+void EnvironmentLight::FillLightConstants(LightConstants& lightConstants) const
+{
+    Light::FillLightConstants(lightConstants);
+    lightConstants.intensity = 0.0f;
+    lightConstants.color = { 0,0,0 };
+}
+
+std::shared_ptr<SceneGraphLeaf> PerspectiveCameraEx::Clone()
+{
+    auto copy = std::make_shared<PerspectiveCameraEx>();
+    copy->zNear = zNear;
+    copy->zFar = zFar;
+    copy->verticalFov = verticalFov;
+    copy->aspectRatio = aspectRatio;
+    copy->enableAutoExposure = enableAutoExposure;
+    copy->exposureCompensation = exposureCompensation;
+    copy->exposureValue = exposureValue;
+    copy->exposureValueMin = exposureValueMin;
+    copy->exposureValueMax = exposureValueMax;
+    return copy;
+}
+
+void PerspectiveCameraEx::Load(const Json::Value& node)
+{
+    node["enableAutoExposure"] >> enableAutoExposure;
+    node["exposureCompensation"] >> exposureCompensation;
+    node["exposureValue"] >> exposureValue;
+    node["exposureValueMin"] >> exposureValueMin;
+    node["exposureValueMax"] >> exposureValueMax;
+    
+    PerspectiveCamera::Load(node);
+}
+
+bool PerspectiveCameraEx::SetProperty(const std::string& name, const dm::float4& value)
+{
+    assert(false); // not implemented
+    return PerspectiveCamera::SetProperty(name, value);
+}
+
+std::shared_ptr<SceneGraphLeaf> SampleSettings::Clone()
+{
+    auto copy = std::make_shared<SampleSettings>();
+    assert(false); // not properly implemented
+    return copy;
+}
+
+void SampleSettings::Load(const Json::Value& node)
+{
+    node["realtimeMode"] >> realtimeMode;
+    node["enableAnimations"] >> enableAnimations;
+    node["startingCamera"] >> startingCamera;
+    node["realtimeFireflyFilter"] >> realtimeFireflyFilter;
+    node["maxBounces"] >> maxBounces;
+    node["maxDiffuseBounces"] >> maxDiffuseBounces;
+    node["textureMIPBias"] >> textureMIPBias;
+}
+
+std::shared_ptr<SceneGraphLeaf> GameSettings::Clone()
+{
+    auto copy = std::make_shared<SampleSettings>();
+    assert(false); // not properly implemented
+    return copy;
+}
+
+void GameSettings::Load(const Json::Value& node)
+{
+    Json::StreamWriterBuilder writer;
+    jsonData = Json::writeString(writer, node);
+}

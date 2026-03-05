@@ -24,6 +24,17 @@ struct SampleGeneratorVertexBase
     uint    m_vertexIndex;  
 #endif
 
+    static SampleGeneratorVertexBase    make(uint packedPixel, uint vertexIndex, uint sampleIndex)
+    {
+        SampleGeneratorVertexBase ret;
+        ret.m_sampleIndex   = sampleIndex;
+        ret.m_baseHash      = Hash32Combine(Hash32(vertexIndex + 0x035F9F29), packedPixel);
+#ifdef HQ_UNIFORM_SAMPLE_SEQUENCE_GENERATOR_ENABLED
+        ret.m_pixelCoord    = pixelCoord;  
+        ret.m_vertexIndex   = vertexIndex;
+#endif
+        return ret;
+    }
     static SampleGeneratorVertexBase    make(uint2 pixelCoord, uint vertexIndex, uint sampleIndex)
     {
         SampleGeneratorVertexBase ret;
@@ -36,17 +47,6 @@ struct SampleGeneratorVertexBase
         return ret;
     }
 
-    static SampleGeneratorVertexBase    make(uint baseHash, uint sampleIndex)
-    {
-        SampleGeneratorVertexBase ret;
-        ret.m_sampleIndex = sampleIndex;
-        ret.m_baseHash = Hash32(baseHash+0x035F9F29);
-#ifdef HQ_UNIFORM_SAMPLE_SEQUENCE_GENERATOR_ENABLED
-        ret.m_pixelCoord    = uint2(0,0);  
-        ret.m_vertexIndex   = ret.m_baseHash;
-#endif
-        return ret;
-    }
 };
 
 /** Inline quasi-random sample generator.

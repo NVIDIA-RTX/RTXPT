@@ -20,18 +20,14 @@
 
 #include <donut/app/imgui_renderer.h>
 
-#include "../../SampleCommon.h"
+#include "../../SampleCommon/SampleCommon.h"
 
 using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
 
-EnvMapImportanceSamplingBaker::EnvMapImportanceSamplingBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::CommonRenderPasses> commonPasses )
-    : m_device(device)
-    , m_textureCache(textureCache)
-    , m_commonPasses(commonPasses)
-    , m_bindingCache(device)
-    , m_shaderFactory(shaderFactory)
+EnvMapImportanceSamplingBaker::EnvMapImportanceSamplingBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory )
+    : m_device(device), m_shaderFactory(shaderFactory)
 {
 }
 

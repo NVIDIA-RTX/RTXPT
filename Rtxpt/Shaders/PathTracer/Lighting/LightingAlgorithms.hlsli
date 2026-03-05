@@ -113,15 +113,19 @@ class SortedLightList
             for( int j = 0; j < thisCount; j++ )
                 if( dataToValidate[totalSampleCount++] != PackMiniListLightAndCount( lightIndex, thisCount ) )
                 {
+#if NEEAT_ENABLE_DEBUG_DRAW
                     if ( debugPrint )
                         DebugPrint("SortedLightList::Validate failed, index {0}, count {1}", lightIndex, thisCount);
+#endif
                     sallGoodMan = false;
                 }
         }
         if( _MaxSize != totalSampleCount )
         {
+#if NEEAT_ENABLE_DEBUG_DRAW
             if ( debugPrint )
                 DebugPrint("SortedLightList::Validate failed, count different");
+#endif
             return false;
         }
         return sallGoodMan;
@@ -647,19 +651,10 @@ class SortedLightLLRBTree
 
 // Expects elements of storageBuffer[tileAddress, x] to be sorted and 'localLightCount' is the depth of storageBuffer.
 // Note: returning value that consists both of key and counter (which needs unpacking to get actual global index); if not found, RTXPT_INVALID_LIGHT_INDEX returned
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-inline uint LocalLightBinarySearch(Texture3D<uint> storageBuffer, const uint2 tileAddress, const uint globalLightIndexToFind, const uint localLightCount, uniform const uint BINARY_SEARCH_STEPS)
-#else
 inline uint LocalLightBinarySearch(Buffer<uint> storageBuffer, const uint tileAddress, const uint globalLightIndexToFind, const uint localLightCount, uniform const uint BINARY_SEARCH_STEPS)
-#endif
 {
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-    uint indexLeft = 0; 
-    uint indexRight = localLightCount-1;
-#else
     uint indexLeft = tileAddress; 
     uint indexRight = tileAddress + localLightCount-1;
-#endif
     
 #if 0 // early out - doesn't help in this case
     uint keyLeft  = UnpackMiniListLight(storageBuffer[indexLeft] );
@@ -672,11 +667,7 @@ inline uint LocalLightBinarySearch(Buffer<uint> storageBuffer, const uint tileAd
     {
         uint indexMiddle = (indexLeft+indexRight)>>1;
 
-#if RTXPT_LIGHTING_LOCAL_SAMPLING_BUFFER_IS_3D_TEXTURE
-        uint value = storageBuffer[uint3(tileAddress, indexMiddle)];
-#else
         uint value = storageBuffer[indexMiddle];
-#endif
 
         uint keyMiddle = UnpackMiniListLight(value);
 
