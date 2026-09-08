@@ -16,7 +16,7 @@
 bool CommandLineOptions::InitFromCommandLine(int _argc, char const* const* _argv)
 {
 	using namespace cxxopts;
-    
+
 	try
 	{
 		std::filesystem::path exe_path = _argv[0];
@@ -63,7 +63,9 @@ bool CommandLineOptions::InitFromCommandLine(int _argc, char const* const* _argv
             ("disablePostProcessFilters", "Disable post-process filters like bloom", value(DisablePostProcessFilters))
             ("cameraPosDirUp", "Specify camera location to set after loading the scene; format is 9 comma separated values; can be obtained via UI Camera->Copy TO clipboard", value(cameraPosDirUp))
             ("propShowTags", "To show special props only if tag found in list (comma separated values)", value(PropShowTags))
-            ("propCameraAttach", "After load, try to attach camera to the named prop", value(PropCameraAttach))            
+            ("propCameraAttach", "After load, try to attach camera to the named prop", value(PropCameraAttach))
+            ("liveLink", "Enable the Blender Live Link TCP server (listens on 127.0.0.1); see Docs/LiveLink.md", value(liveLink))
+            ("liveLinkPort", "TCP port for the Blender Live Link server (default 42042)", value(liveLinkPort))
             ;
 
 		int argc = _argc;

@@ -72,11 +72,11 @@ public:
 
     void                                    UpdateSubInstanceContents();
     void                                    UploadSubInstanceData(nvrhi::ICommandList* commandList);
-    
+
     void                                    SetUIPick()                             { m_pick = true; }
 
     std::shared_ptr<donut::engine::Material> FindMaterial( int materialID ) const;
-    
+
     void                                    CollectUncompressedTextures();
     auto &                                  GetUncompressedTextures()               { return m_uncompressedTextures; }
     void                                    SaveCurrentCamera() const;
@@ -183,12 +183,27 @@ protected:
     // Called during binding set creation to allow derived classes to add custom bindings
     // The reflection texture slots (t80-t83, b3) have null placeholders by default
     virtual void AddCustomBindings(nvrhi::BindingSetDesc& bindingSetDesc) { }
-    
+
     // Invalidates the binding set, forcing recreation on next frame
     // Call this from derived classes when custom bindings need to be updated
     void InvalidateBindingSet() { m_bindingSet = nullptr; }
     void RecreateBindingSet();
-    
+
+    // Blender Live Link support (see Rtxpt/LiveLink/LiveLinkServer.h and Docs/LiveLink.md).
+    // Applies a camera pose received over Live Link to the free-fly camera; intended to be
+    // called once per received camera command from a derived class' Animate() override.
+    // verticalFovRadians/zNear <= 0 leave the corresponding current value unchanged.
+    void LiveLinkApplyCamera(const dm::float3& pos, const dm::float3& dir, const dm::float3& up, float verticalFovRadians, float zNear)
+    {
+        m_selectedCameraIndex = 0; // Live Link drives the free-fly camera
+        m_camera.LookTo(pos, dir, up);
+        if (verticalFovRadians > 0.0f)
+            m_cameraVerticalFOV = verticalFovRadians;
+        if (zNear > 0.0f)
+            m_cameraZNear = zNear;
+        m_ui.ResetAccumulation = true;
+    }
+
     // all UI-tweakable settings are here
     SampleUIData& m_ui;
     std::unique_ptr<RtxdiPass>                  m_rtxdiPass;
@@ -253,7 +268,7 @@ private:
 
     // lighting
     std::string                                 m_envMapLocalPath;
-    
+
     std::filesystem::path                       m_envMapMediaFolder;
     std::vector<std::filesystem::path>          m_envMapMediaList;
 
@@ -321,7 +336,7 @@ private:
     int                                         m_accumulationSampleIndex = 0;  // accumulated so far in the past, so if 0 this is the first.
 
     uint64_t                                    m_frameIndex = 0;
-    uint                                        m_sampleIndex = 0;            // per-frame sampling index; same as m_accumulationSampleIndex in accumulation mode, otherwise in realtime based on frameIndex%something 
+    uint                                        m_sampleIndex = 0;            // per-frame sampling index; same as m_accumulationSampleIndex in accumulation mode, otherwise in realtime based on frameIndex%something
     SampleConstants                             m_currentConstants = {};
 
     std::unique_ptr<NrdIntegration>             m_nrd[cStablePlaneCount];       // reminder: when switching between ReLAX/ReBLUR, change settings, reset these to 0 and they'll get re-created in CreateRenderPasses!
@@ -357,4 +372,3 @@ private:
     bool                                        m_asyncLoadingInProgress = false;
     bool                                        m_accumulationCompleted = false;
 };
-

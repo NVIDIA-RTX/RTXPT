@@ -14,13 +14,52 @@
 
 #include "SampleCommon/SplashScreen.h"
 
+#include "LiveLink/LiveLinkServer.h"
+#include <donut/core/log.h>
+
 // IntroRenderer: Simplified renderer for introductory samples
 // Currently just uses the base Sample class as-is
 // TODO: Override methods to simplify/disable advanced features
 class AdvancedPathTracer : public Sample
 {
 public:
-    using Sample::Sample;
+    AdvancedPathTracer(donut::app::DeviceManager& deviceManager, const CommandLineOptions& cmdLine)
+        : Sample(deviceManager, cmdLine)
+    {
+        // Blender Live Link (see Rtxpt/LiveLink/LiveLinkServer.h and Docs/LiveLink.md)
+        if (cmdLine.liveLink)
+        {
+            m_liveLink = std::make_unique<rtxpt::livelink::LiveLinkServer>();
+            if (!m_liveLink->Start((uint16_t)cmdLine.liveLinkPort))
+                donut::log::warning("Failed to start Blender Live Link server on port %d", (int)cmdLine.liveLinkPort);
+        }
+    }
+
+    virtual void Animate(float fElapsedTimeSeconds) override
+    {
+        Sample::Animate(fElapsedTimeSeconds);
+
+        // Apply any camera/reload commands received from the Blender Live Link add-on
+        // since the last frame.
+        if (m_liveLink && m_liveLink->IsRunning())
+        {
+            for (const auto& cmd : m_liveLink->PopCommands())
+            {
+                switch (cmd.type)
+                {
+                case rtxpt::livelink::CommandType::Camera:
+                    LiveLinkApplyCamera(cmd.cameraPosition, cmd.cameraDirection, cmd.cameraUp, cmd.cameraVerticalFovRadians, cmd.cameraZNear);
+                    break;
+                case rtxpt::livelink::CommandType::Reload:
+                    SetCurrentScene(cmd.reloadScenePath, true);
+                    break;
+                case rtxpt::livelink::CommandType::Hello:
+                    donut::log::info("LiveLink: client connected (%s)", cmd.helloInfo.c_str());
+                    break;
+                }
+            }
+        }
+    }
 
     virtual void SampleRenderCode(nvrhi::IFramebuffer* framebuffer, nvrhi::CommandListHandle commandList, const SampleConstants& constants) override
     {
@@ -57,6 +96,11 @@ public:
     virtual std::string GetMaterialSpecializationShader() const override {
         return "PathTracerMaterialSpecializations.hlsl";
     }
+
+private:
+    // Blender Live Link (see Rtxpt/LiveLink/LiveLinkServer.h and Docs/LiveLink.md); null unless
+    // RTXPT was started with --liveLink.
+    std::unique_ptr<rtxpt::livelink::LiveLinkServer> m_liveLink;
 };
 
 class AdvancedSample : public SampleBaseApp
@@ -80,7 +124,7 @@ int main(int __argc, const char** __argv)
 
     // Run the sample app
     const auto status = example.Init(__argc, __argv);
-    
+
     splashScreen.Stop();
 
     if (status == SampleBaseApp::InitReturnCodes::Success)
@@ -89,6 +133,6 @@ int main(int __argc, const char** __argv)
 
         example.End();
     }
-    
+
     return static_cast<int>(status);
 }

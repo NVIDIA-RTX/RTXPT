@@ -52,12 +52,16 @@ struct CommandLineOptions
 
     bool OverrideAutoexposureOff    = false;
     float OverrideExposureOffset    = FLT_MAX;
-    
+
     bool DisableFireflyFilters      = false;
     bool DisablePostProcessFilters  = false;
 
     std::string PropShowTags        = "";
     std::string PropCameraAttach    = "";
+
+    // Blender Live Link (see Rtxpt/LiveLink/LiveLinkServer.h and Docs/LiveLink.md)
+    bool     liveLink       = false;
+    uint32_t liveLinkPort   = 42042;
 
 	CommandLineOptions(){}
 

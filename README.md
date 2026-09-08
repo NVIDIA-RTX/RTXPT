@@ -42,6 +42,7 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 * [NRD](https://github.com/NVIDIA-RTX/NRD) ReLAX and ReBLUR denoiser integration with up to 3-layer path space decomposition
 * [RTXTF](https://github.com/NVIDIA-RTX/RTXTF) integration for Stochastic Texture Filtering
 * [Streamline](https://github.com/NVIDIAGameWorks/Streamline/) integration for DLSS (DLSS RR, DLSS SR, DLSS AA, DLSS FG & MFG)
+* Optional **Blender Live Link** (`--liveLink`) - drive the free-fly camera live from a Blender viewport and hot-reload scenes exported from Blender without restarting RTXPT; see [Docs/LiveLink.md](Docs/LiveLink.md)
 
 
 ## Requirements
@@ -78,6 +79,7 @@ GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/g
 | /Support				| optional command line tools (denoiser, texture compressor, etc)
 | /Rtxpt				| **RTX Path Tracing core; Sample.cpp/.h/.hlsl contain entry points**
 | /Rtxpt/PathTracer		| **Core path tracing shaders**
+| /Rtxpt/LiveLink		| Blender Live Link TCP server (see [Docs/LiveLink.md](Docs/LiveLink.md))
 
 
 ## Build
@@ -137,7 +139,24 @@ Camera can be moved using W/S/A/D keys and rotated by dragging with the left mou
 - `--fullscreen` to start in full screen mode; example: `--width 3840 --height 2160 --fullscreen`
 - `--debug` to enable the graphics API debug layer or runtime, and additional validation layers.
 - `--vk` to enable Vulkan (see [building-vulkan](#building-vulkan))
+- `--liveLink` to enable the Blender Live Link TCP server, and `--liveLinkPort` to pick a non-default port (see [Blender Live Link](#blender-live-link) below)
  
+
+## Blender Live Link
+
+RTXPT can be driven live from a running Blender session: with `--liveLink` enabled,
+moving the camera in the Blender viewport updates RTXPT's camera in real time, and a
+**Sync Full Scene** button in the companion **RTXPT Live Link** Blender add-on
+re-exports the scene and hot-reloads it in RTXPT without restarting the executable.
+
+```
+Rtxpt.exe --scene YourProject.scene.json --liveLink
+```
+
+See [Docs/LiveLink.md](Docs/LiveLink.md) for the wire protocol, setup instructions and
+current limitations, and the `rtxpt-exporter` repository for the Blender add-ons
+(RTXPT Exporter and RTXPT Live Link).
+
 
 ## Developer Documentation
 
