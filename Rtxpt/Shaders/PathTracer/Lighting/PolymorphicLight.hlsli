@@ -508,7 +508,7 @@ struct TriangleLight
 
         PolymorphicLight::PackColor(radiance, lightInfo.Base);
         lightInfo.Base.Center = base + ((edge1 + edge2) / 3.0); 
-        float3 edges = (f32tof16(edge1) & 0xffff) | (f32tof16(edge2) << 16);
+        uint3 edges = (f32tof16(edge1) & 0xffff) | (f32tof16(edge2) << 16);
         lightInfo.Base.Direction1 = edges.x;
         lightInfo.Base.Direction2 = edges.y;
         lightInfo.Base.Scalars = edges.z;
