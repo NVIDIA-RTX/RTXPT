@@ -24,7 +24,8 @@ struct SubInstanceData  // could have been called GeometryInstanceData but that'
 {
     static const int Flags_AlphaTested      	= (1<<16);
     static const int Flags_ExcludeFromNEE    	= (1<<17);
-    static const int Flags_Dummy0               = (1<<18); // free up to (1<<23)
+    static const int Flags_NEEFilterGlass       = (1<<18); // ExcludeFromNEE on a thin, smooth, specular-transmissive material: NEE visibility rays are attenuated by its transmittance instead of ignoring it, and the light beyond it is counted once (see Bridge::traceVisibilityRay and NEEBSDFMISInfo::BehindNEEFilterGlass)
+    static const int Flags_Dummy0               = (1<<19); // free up to (1<<23)
 
     static const int Flags_AlphaOffsetMask      = (0xFF000000);
     static const int Flags_AlphaOffsetOffset    = (24);
