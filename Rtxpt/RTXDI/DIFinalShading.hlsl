@@ -43,12 +43,14 @@ bool getFinalSample(const uint2 reservoirPos, const RAB_Surface surface, out flo
     RAB_LightInfo lightInfo = RAB_LoadLightInfo(lightIdx, false);
     lightSample = RAB_SamplePolymorphicLight(lightInfo, surface, lightUV);
 
-    // Check the light is visible to the surface 
+    // Check the light is visible to the surface; NEE filter glass on the way attenuates it
+    float3 transmittance = float3(1, 1, 1);
     if (g_RtxdiBridgeConst.restirDI.shadingParams.enableFinalVisibility)
     {
         const RayDesc ray = setupVisibilityRay(surface, lightSample, g_RtxdiBridgeConst.rayEpsilon);
 
-        if (!GetFinalVisibility(SceneBVH, ray))
+        transmittance = GetFinalVisibilityTransmittance(SceneBVH, ray);
+        if (!any(transmittance > 0))
         {
             RTXDI_StoreVisibilityInDIReservoir(reservoir, 0, true);
             RTXDI_StoreDIReservoir(reservoir, g_RtxdiBridgeConst.restirDI.reservoirBufferParams, reservoirPos, g_RtxdiBridgeConst.restirDI.bufferIndices.shadingInputBufferIndex);
@@ -58,6 +60,7 @@ bool getFinalSample(const uint2 reservoirPos, const RAB_Surface surface, out flo
 
     // Compute incident radience
     ComputeIncidentRadience(surface, RTXDI_GetDIReservoirInvPdf(reservoir), lightSample, Li, dir, distance);
+    Li *= transmittance;
     
     return true;
 }

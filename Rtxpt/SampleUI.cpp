@@ -1756,6 +1756,7 @@ void SampleUI::buildUI(void)
         const bool wasAlphaTestedEnabled = material->EnableAlphaTesting;
         const bool wasTransmissionEnabled = material->EnableTransmission;
         const bool wasExcludedFromNEE = material->ExcludeFromNEE;
+        const bool wasNEEFilterGlass = material->IsNEEFilterGlass();
         const float alphaCutoffBefore = material->AlphaCutoff;
         const bool wasSkipRender = material->SkipRender;
         
@@ -1771,6 +1772,7 @@ void SampleUI::buildUI(void)
             wasAlphaTestedEnabled != material->EnableAlphaTesting || 
             wasTransmissionEnabled != material->EnableTransmission || 
             wasExcludedFromNEE != material->ExcludeFromNEE ||
+            wasNEEFilterGlass != material->IsNEEFilterGlass() ||
             wasSkipRender != material->SkipRender ||
             dirty)
         {
@@ -1780,7 +1782,7 @@ void SampleUI::buildUI(void)
 
 		// The domain change might require a rebuild without the Opaque flag
         if (wasAlphaTestedEnabled != material->EnableAlphaTesting || alphaCutoffBefore != alphaCutoffAfter ||
-            wasExcludedFromNEE != material->ExcludeFromNEE || mspBefore != mspAfter || wasSkipRender != material->SkipRender)
+            wasExcludedFromNEE != material->ExcludeFromNEE || wasNEEFilterGlass != material->IsNEEFilterGlass() || mspBefore != mspAfter || wasSkipRender != material->SkipRender)
             m_ui.ShaderAndACRefreshDelayedRequest = 1.0f;
 
         if( m_ui.ShaderAndACRefreshDelayedRequest > 0 )

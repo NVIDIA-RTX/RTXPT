@@ -98,6 +98,7 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
         bool SkipEmissiveBRDF;          // Ignore next bounce reflective (but not transmissive) radiance because ReSTIR-DI or similar collected (or will collect) it
 #endif
+        bool BehindNEEFilterGlass;      // path went through NEE filter glass by delta transmission after the vertex this info belongs to, which counts the light beyond the glass (attenuated by it, see Bridge::traceVisibilityRay); the emission this segment reaches is weighted with the approximate MIS pair, or skipped if ReSTIR DI counted it
         bool LightSamplingIsSSC;        // if SSC, light sampler uses screen space tiles, otherwise world space
         uint CandidateSamples;          // for WRS, consisting of Local and Global that can be obtained using LightSampler::GetCandidateSampleCounts
         uint FullSamples;               // actually integrated samples
@@ -110,6 +111,7 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
             ret.SkipEmissiveBRDF         = false;
 #endif
+            ret.BehindNEEFilterGlass     = false;
             ret.LightSamplingIsSSC       = false;
             ret.CandidateSamples         = 0;
             ret.FullSamples              = 0;
@@ -123,6 +125,7 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
             ret.SkipEmissiveBRDF         = (packed & (1 << 14)) != 0;
 #endif
+            ret.BehindNEEFilterGlass    = (packed & (1 << 12)) != 0;
             ret.LightSamplingIsSSC      = (packed & (1 << 13)) != 0;
             ret.CandidateSamples        = (packed >> 6) & 0x3F;        // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
             ret.FullSamples             = (packed) & 0x3F;             // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
@@ -136,6 +139,7 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
             packed |= ((SkipEmissiveBRDF?1:0)           << 14);
 #endif
+            packed |= ((BehindNEEFilterGlass?1:0)  << 12);
             packed |= ((LightSamplingIsSSC?1:0)    << 13);
             packed |= (CandidateSamples & 0x3F)        << 6;           // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
             packed |= (FullSamples      & 0x3F);                       // ensured to fit with RTXPT_LIGHTING_MAX_SAMPLE_COUNT
@@ -150,6 +154,7 @@ namespace PathTracer
 #if PT_USE_RESTIR_DI
                     && (a.SkipEmissiveBRDF      == b.SkipEmissiveBRDF)
 #endif
+                    && (a.BehindNEEFilterGlass  == b.BehindNEEFilterGlass)
                     && (a.LightSamplingIsSSC    == b.LightSamplingIsSSC )
                     && (a.CandidateSamples      == b.CandidateSamples        )
                     && (a.FullSamples           == b.FullSamples            );
@@ -160,6 +165,10 @@ namespace PathTracer
 #else
         bool GetSkipEmissiveBRDF()          { return false; }
 #endif
+
+        // Whether the vertex this info belongs to counts the light its scatter ray reaches: by its NEE (then MIS applies), by ReSTIR DI (which handles reflection only),
+        // or - behind NEE filter glass - as the vertex before the glass.
+        bool CountsLightAhead(bool scatterWasTransmission)  { return LightSamplingEnabled || (GetSkipEmissiveBRDF() && !scatterWasTransmission) || BehindNEEFilterGlass; }
 
 
     };

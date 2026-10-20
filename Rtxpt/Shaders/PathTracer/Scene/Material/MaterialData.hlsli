@@ -35,8 +35,9 @@ struct MaterialHeader
     static const uint kPSDExcludeFlagOffset = kThinSurfaceFlagOffset + 1;
     static const uint kPSDBlockMotionVectorsAtSurfaceFlagOffset = kPSDExcludeFlagOffset + 1;
     static const uint kPSDDominantDeltaLobeP1Offset = kPSDBlockMotionVectorsAtSurfaceFlagOffset + 1;
+    static const uint kNEEFilterGlassFlagOffset = kPSDDominantDeltaLobeP1Offset + kPSDDominantDeltaLobeP1Bits;
 
-    static const uint kTotalHeaderBitsX = kPSDDominantDeltaLobeP1Offset + kPSDDominantDeltaLobeP1Bits;
+    static const uint kTotalHeaderBitsX = kNEEFilterGlassFlagOffset + 1;
 
     /** Set the nested priority used for nested dielectrics.
     */
@@ -81,6 +82,12 @@ struct MaterialHeader
 
     void setPSDDominantDeltaLobeP1(uint psdDominantDeltaLobeP1) { packedData.x = PACK_BITS(kPSDDominantDeltaLobeP1Bits, kPSDDominantDeltaLobeP1Offset, packedData.x, (uint)psdDominantDeltaLobeP1); }
     uint getPSDDominantDeltaLobeP1()             { return EXTRACT_BITS(kPSDDominantDeltaLobeP1Bits, kPSDDominantDeltaLobeP1Offset, packedData.x); }
+
+    /** NEE filter glass: thin, smooth, specular-transmissive surface excluded from NEE, which NEE visibility rays cross attenuated by its transmittance
+        instead of ignoring it (see SubInstanceData::Flags_NEEFilterGlass and Bridge::traceVisibilityRay).
+    */
+    void setNEEFilterGlass(bool neeFilterGlass) { packedData.x = PACK_BITS(1, kNEEFilterGlassFlagOffset, packedData.x, neeFilterGlass ? 1 : 0); }
+    bool isNEEFilterGlass()  { return packedData.x & (1u << kNEEFilterGlassFlagOffset); }
 
     static MaterialHeader make( ) { MaterialHeader header; header.packedData = 0; return header; }
 };

@@ -698,6 +698,7 @@ static PathTracer::SurfaceData Bridge::loadSurface( const uint instanceIndex, co
     ptShadingData.mtl.setThinSurface( donutMaterialThinSurface );
     ptShadingData.mtl.setPSDExclude( (donutMaterial.flags & PTMaterialFlags_PSDExclude) != 0 );
     ptShadingData.mtl.setPSDDominantDeltaLobeP1( (donutMaterial.flags & PTMaterialFlags_PSDDominantDeltaLobeP1Mask) >> PTMaterialFlags_PSDDominantDeltaLobeP1Shift );
+    ptShadingData.mtl.setNEEFilterGlass( (t_SubInstanceData[subInstanceDataIndex].FlagsAndAlphaInfo & SubInstanceData::Flags_NEEFilterGlass) != 0 );
 
 
     // stopping motion vectors from being calculated behind/beyond this surface
@@ -988,32 +989,77 @@ bool Bridge::AlphaTestVisibilityRay(uint instanceID, uint instanceIndex, uint ge
     return AlphaTestImpl(subInstanceData, triangleIndex, rayBarycentrics);
 }
 
+// World space normal (not normalized) of a visibility ray candidate at its barycentrics: the interpolated vertex normal, which is what the BSDF's Fresnel term
+// sees at a hit (Bridge::loadSurface), or the face normal for a mesh without normals. The ray query does not expose the triangle's vertices.
+float3 CandidateNormal(SubInstanceData subInstanceData, uint triangleIndex, float2 rayBarycentrics, float3x4 objectToWorld)
+{
+    GeometryData geometry = t_GeometryData[subInstanceData.GlobalGeometryIndex_PTMaterialDataIndex >> 16];
+    ByteAddressBuffer indexBuffer = t_BindlessBuffers[NonUniformResourceIndex(geometry.indexBufferIndex)];
+    ByteAddressBuffer vertexBuffer = t_BindlessBuffers[NonUniformResourceIndex(geometry.vertexBufferIndex)];
+    uint3 indices = indexBuffer.Load3(geometry.indexOffset + triangleIndex * c_SizeOfTriangleIndices);
+    float3 normal;
+    if (geometry.normalOffset != ~0u)
+    {
+        float3 barycentrics = float3(1.0 - rayBarycentrics.x - rayBarycentrics.y, rayBarycentrics.x, rayBarycentrics.y);
+        normal = barycentrics.x * normalize(Unpack_RGB8_SNORM(vertexBuffer.Load(geometry.normalOffset + indices[0] * c_SizeOfNormal)))
+               + barycentrics.y * normalize(Unpack_RGB8_SNORM(vertexBuffer.Load(geometry.normalOffset + indices[1] * c_SizeOfNormal)))
+               + barycentrics.z * normalize(Unpack_RGB8_SNORM(vertexBuffer.Load(geometry.normalOffset + indices[2] * c_SizeOfNormal)));
+    }
+    else
+    {
+        float3 p0 = asfloat(vertexBuffer.Load3(geometry.positionOffset + indices[0] * c_SizeOfPosition));
+        float3 p1 = asfloat(vertexBuffer.Load3(geometry.positionOffset + indices[1] * c_SizeOfPosition));
+        float3 p2 = asfloat(vertexBuffer.Load3(geometry.positionOffset + indices[2] * c_SizeOfPosition));
+        normal = cross(p1 - p0, p2 - p0);
+    }
+    return mul(objectToWorld, float4(normal, 0)).xyz;
+}
+
+// Straight-through transmittance of NEE filter glass at the crossing angle: what the thin surface's delta transmission lobe carries on average (see Bridge::loadSurface and
+// FalcorBSDF::sample) - (1 - F) * transmission * (1 - metalness) * base colour, from the material constants; visibility rays do not read textures.
+float3 NEEFilterGlassTransmittance(PTMaterialData material, float cosTheta)
+{
+    float F = evalFresnelDielectric(1.0 / material.IoR, cosTheta);
+    return material.BaseOrDiffuseColor * (material.TransmissionFactor * (1.0 - material.Metalness) * (1.0 - F));
+}
+
+// Visibility ray candidate, shared by Bridge::traceVisibilityRay and the ReSTIR DI final visibility (RtxdiApplicationBridge.hlsli): an alpha-tested occluder is committed, NEE filter
+// glass attenuates the transmittance by its straight-through transmittance at the crossing angle (each crossing is reported once, see AccelerationStructureUtil.h) and other
+// geometry excluded from NEE is ignored (biased - see the material's "Ignore by NEE shadow ray" tooltip).
+void ProcessVisibilityRayCandidate(inout RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float3 rayDirection, inout float3 transmittance, inout bool crossedNEEFilterGlass)
+{
+    SubInstanceData subInstanceData = t_SubInstanceData[rayQuery.CandidateInstanceID() + rayQuery.CandidateGeometryIndex()];
+
+    [branch] if ((subInstanceData.FlagsAndAlphaInfo & SubInstanceData::Flags_ExcludeFromNEE) == 0)
+    {
+        [branch] if (AlphaTestImpl(subInstanceData, rayQuery.CandidatePrimitiveIndex(), rayQuery.CandidateTriangleBarycentrics()))
+            rayQuery.CommitNonOpaqueTriangleHit();
+    }
+    else if ((subInstanceData.FlagsAndAlphaInfo & SubInstanceData::Flags_NEEFilterGlass) != 0)
+    {
+        const float3 normal = CandidateNormal(subInstanceData, rayQuery.CandidatePrimitiveIndex(), rayQuery.CandidateTriangleBarycentrics(), rayQuery.CandidateObjectToWorld3x4());
+        const float cosTheta = abs(dot(normal, rayDirection)) / max(length(normal) * length(rayDirection), 1e-30);
+        transmittance *= NEEFilterGlassTransmittance(t_PTMaterialData[subInstanceData.GlobalGeometryIndex_PTMaterialDataIndex & 0xFFFF], cosTheta);
+        crossedNEEFilterGlass = true;
+    }
+}
+
 // There's a relatively high cost to this when used in large shaders just due to register allocation required for alphaTest, even if all geometries are opaque.
 // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
-bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, DebugContext debug)
+float3 Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, out bool crossedNEEFilterGlass, DebugContext debug)
 {
+    float3 transmittance = float3(1, 1, 1);
+    crossedNEEFilterGlass = false;
+
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
     rayQuery.TraceRayInline(SceneBVH, RAY_FLAG_NONE, 0xff, ray);
 
     while (rayQuery.Proceed())
     {
         if (rayQuery.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
-        {
-            [branch]if (Bridge::AlphaTestVisibilityRay(
-                rayQuery.CandidateInstanceID(),
-                rayQuery.CandidateInstanceIndex(),
-                rayQuery.CandidateGeometryIndex(),
-                rayQuery.CandidatePrimitiveIndex(),
-                rayQuery.CandidateTriangleBarycentrics()
-                //, debug
-                ) )
-            {
-                rayQuery.CommitNonOpaqueTriangleHit();
-                //break; // <- TODO: revisit - not needed when using RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH?
-            }
-        }
+            ProcessVisibilityRayCandidate(rayQuery, ray.Direction, transmittance, crossedNEEFilterGlass);
     }
-        
+
 #if ENABLE_DEBUG_VIZUALISATIONS && ENABLE_DEBUG_LINES_VIZ && !NON_PATH_TRACING_PASS && PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
     float visible = rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     if (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
@@ -1023,7 +1069,7 @@ bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pa
         debug.DrawLine(ray.Origin, ray.Origin+ray.Direction*ray.TMax, float4(visible.x, visible.x, 0.8, 0.2), float4(visible.x, visible.x, 0.8, 0.2));
 #endif
 
-    return !rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    return (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? float3(0, 0, 0) : transmittance;
 }
 
 void Bridge::traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug)

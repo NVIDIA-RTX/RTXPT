@@ -599,6 +599,25 @@ bool GetFinalVisibility(RaytracingAccelerationStructure accelStruct, RayDesc ray
     return visible;
 }
 
+// Final visibility of a ReSTIR DI light sample as the light's transmittance: 0 if occluded, otherwise attenuated by the NEE filter glass crossed (see Bridge::traceVisibilityRay).
+// ReSTIR GI keeps GetFinalVisibility: a GI sample's radiance already carries the throughput of the glass its path went through.
+float3 GetFinalVisibilityTransmittance(RaytracingAccelerationStructure accelStruct, RayDesc ray)
+{
+    float3 transmittance = float3(1, 1, 1);
+    bool crossedNEEFilterGlass = false;
+
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
+    rayQuery.TraceRayInline(accelStruct, RAY_FLAG_NONE, 0xff, ray);
+
+    while (rayQuery.Proceed())
+    {
+        if (rayQuery.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+            ProcessVisibilityRayCandidate(rayQuery, ray.Direction, transmittance, crossedNEEFilterGlass);
+    }
+
+    return (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? float3(0, 0, 0) : transmittance;
+}
+
 // Return true if anything was hit. If false, RTXDI will do environment map sampling
 // o_lightIndex: If hit, must be a valid light index for RAB_LoadLightInfo, if no local light was hit, must be RTXDI_InvalidLightIndex
 // randXY: The randXY that corresponds to the hit location and is the same used for RAB_SamplePolymorphicLight

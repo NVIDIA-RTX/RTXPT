@@ -282,7 +282,9 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Material has no volumetric properties - used for double sided thin surfaces like leafs.\nNon-transparent materials are always considered thin surface.");
 
         update |= ImGui::Checkbox("Ignore by NEE shadow ray (bias!)", &ExcludeFromNEE);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation\nNote: this isn't physically correct - it adds bias!");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignored for shadow rays during Next Event Estimation\nNote: this isn't physically correct - it adds bias!\n"
+            "Exception: a thin, smooth surface with specular transmission attenuates the shadow rays by its straight-through\n"
+            "transmittance instead, and the light beyond it is not counted twice (NEE and BSDF sampling agree).");
 
         update |= ImGui::SliderFloat("Shadow NoL Fadeout", &ShadowNoLFadeout, 0.0f, 0.2f);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip(
@@ -992,6 +994,8 @@ void UpdateSubInstanceData(SubInstanceData & ret, const std::shared_ptr<Extended
 
     if (material.ExcludeFromNEE)
         ret.FlagsAndAlphaInfo |= SubInstanceData::Flags_ExcludeFromNEE;
+    if (material.IsNEEFilterGlass())
+        ret.FlagsAndAlphaInfo |= SubInstanceData::Flags_NEEFilterGlass;
 
     uint globalGeometryIndex = mesh->geometries[0]->globalGeometryIndex + meshGeometryIndex;
     uint globalMaterialIndex = material.GPUDataIndex;

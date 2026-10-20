@@ -93,7 +93,9 @@ namespace Bridge
 
     // There's a relatively high cost to this when used in large shaders just due to register allocation required for alphaTest, even if all geometries are opaque.
     // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
-    static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, DebugContext debug);
+    // Returns the light's transmittance along the ray: 0 if occluded, otherwise the product of the straight-through transmittances of the NEE filter glass crossed
+    // (1 if none; see SubInstanceData::Flags_NEEFilterGlass); crossedNEEFilterGlass reports whether any such glass was crossed.
+    static float3 traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, out bool crossedNEEFilterGlass, DebugContext debug);
 
     static void traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug);
 

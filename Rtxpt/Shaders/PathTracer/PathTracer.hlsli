@@ -438,7 +438,8 @@ namespace PathTracer
         lpfloat3 environmentEmission = 0.f;
 
         NEEBSDFMISInfo misInfo = NEEBSDFMISInfo::Unpack16bit(path.GetPackedMISInfo());
-        if ( !(misInfo.GetSkipEmissiveBRDF() && !path.wasScatterTransmission()) )
+        // behind NEE filter glass, ReSTIR DI at the vertex before the glass collected the sky through it (see NEEBSDFMISInfo::BehindNEEFilterGlass)
+        if ( !(misInfo.GetSkipEmissiveBRDF() && !path.wasScatterTransmission()) && !(misInfo.BehindNEEFilterGlass && misInfo.GetSkipEmissiveBRDF()) )
         {
             // raw source for our environment map
             EnvMap envMap = Bridge::CreateEnvMap(); 
@@ -462,7 +463,10 @@ namespace PathTracer
                 misWeight = lightSampler.ComputeLightVsBSDF_MIS_ForBSDF_Approx(bsdfScatterPdf, misInfo.CandidateSamples, misInfo.FullSamples);
 #else
                 uint environmentQuadLightIndex = lightSampler.LookupEnvLightByDirection( localDir ); //< figure out light index from the direction! it's guaranteed to be valid
-                misWeight = lightSampler.ComputeBSDFMISForEnvironmentQuad(environmentQuadLightIndex, bsdfScatterPdf, misInfo.CandidateSamples, misInfo.FullSamples);
+                if (misInfo.BehindNEEFilterGlass)   // the light sampling vertex is behind the glass: its light samples through the glass took the approximate weight, this is the pairing one
+                    misWeight = lightSampler.ComputeLightVsBSDF_MIS_ForBSDF_Approx(bsdfScatterPdf, misInfo.CandidateSamples, misInfo.FullSamples);
+                else
+                    misWeight = lightSampler.ComputeBSDFMISForEnvironmentQuad(environmentQuadLightIndex, bsdfScatterPdf, misInfo.CandidateSamples, misInfo.FullSamples);
 #endif
 
 #if RTXPT_LIGHTING_ENABLE_BSDF_FEEDBACK
@@ -602,8 +606,8 @@ namespace PathTracer
         }
 #endif
 
-        // should we ignore this triangle's emission, and if not, is there any emission
-        if ( !(misInfo.GetSkipEmissiveBRDF() && !path.wasScatterTransmission()) && (any(shadingData.emission>0)) )
+        // should we ignore this triangle's emission (ReSTIR DI collects it, directly or through NEE filter glass), and if not, is there any emission
+        if ( !(misInfo.GetSkipEmissiveBRDF() && !path.wasScatterTransmission()) && !(misInfo.BehindNEEFilterGlass && misInfo.GetSkipEmissiveBRDF()) && (any(shadingData.emission>0)) )
         {
             // figure out MIS vs our lighting technique, if any
             float misWeight = 1.0f;
@@ -619,7 +623,10 @@ namespace PathTracer
 #if RTXPT_USE_APPROXIMATE_MIS
                 misWeight = lightSampler.ComputeLightVsBSDF_MIS_ForBSDF_Approx(bsdfScatterPdf, misInfo.CandidateSamples, misInfo.FullSamples);
 #else
-                misWeight = lightSampler.ComputeBSDFMISForEmissiveTriangle(surfaceData.neeTriangleLightIndex, bsdfScatterPdf, rayOrigin, shadingData.posW, misInfo.CandidateSamples, misInfo.FullSamples);
+                if (misInfo.BehindNEEFilterGlass)   // the light sampling vertex is behind the glass, not at rayOrigin: its light samples through the glass took the approximate weight, this is the pairing one
+                    misWeight = lightSampler.ComputeLightVsBSDF_MIS_ForBSDF_Approx(bsdfScatterPdf, misInfo.CandidateSamples, misInfo.FullSamples);
+                else
+                    misWeight = lightSampler.ComputeBSDFMISForEmissiveTriangle(surfaceData.neeTriangleLightIndex, bsdfScatterPdf, rayOrigin, shadingData.posW, misInfo.CandidateSamples, misInfo.FullSamples);
 #endif
 
 #if RTXPT_LIGHTING_ENABLE_BSDF_FEEDBACK
@@ -634,7 +641,7 @@ namespace PathTracer
 #endif // !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
 
 #if !defined(RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY) || RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY
-        if (surfaceData.neeAnalyticLightIndex != 0xFFFFFFFF)
+        if (surfaceData.neeAnalyticLightIndex != 0xFFFFFFFF && !(misInfo.BehindNEEFilterGlass && misInfo.GetSkipEmissiveBRDF()))
         {
             LightSampler lightSampler = Bridge::CreateLightSampler( path.GetPixelPos(), misInfo.LightSamplingIsSSC );
 
@@ -642,7 +649,7 @@ namespace PathTracer
 #if RTXPT_USE_APPROXIMATE_MIS            
             bool approxMIS = true;
 #else
-            bool approxMIS = false;
+            bool approxMIS = misInfo.BehindNEEFilterGlass;  // behind NEE filter glass the light sampling vertex is not rayOrigin; its samples through the glass took the approximate weight
 #endif
             lightSampler.ComputeAnalyticLightProxyContributionWithMIS(surfaceEmission, surfaceData.neeAnalyticLightIndex, (applyMIS)?(path.GetBsdfScatterPdf()):(0.0), rayOrigin, rayDir, misInfo.CandidateSamples, misInfo.FullSamples, approxMIS);
         }
@@ -720,7 +727,18 @@ namespace PathTracer
 #endif
 
 #if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES        
-        path.SetPackedMISInfo_ThpRuRuCorrection( neeResult.BSDFMISInfo.Pack16bit(), path.GetThpRuRuCorrection() );
+        NEEBSDFMISInfo nextMISInfo = neeResult.BSDFMISInfo;
+        // A delta transmission through NEE filter glass does not bend the path, so the segment beyond continues the light transport of the vertex before the glass: when that
+        // vertex counts the light ahead (its light samples cross the glass attenuated by it, see Bridge::traceVisibilityRay), its MIS info and scatter pdf travel on with
+        // the flag, and the emission this segment reaches is weighted against that vertex's light sampling (see NEEBSDFMISInfo::BehindNEEFilterGlass).
+        const NEEBSDFMISInfo prevMISInfo = NEEBSDFMISInfo::Unpack16bit(preScatterPath.GetPackedMISInfo());
+        if (shadingData.mtl.isNEEFilterGlass() && path.wasScatterTransmission() && path.wasScatterDelta() && prevMISInfo.CountsLightAhead(preScatterPath.wasScatterTransmission()))
+        {
+            nextMISInfo = prevMISInfo;
+            nextMISInfo.BehindNEEFilterGlass = true;
+            path.SetFireflyFilterK_BsdfScatterPdf( path.GetFireflyFilterK(), preScatterPath.GetBsdfScatterPdf() );
+        }
+        path.SetPackedMISInfo_ThpRuRuCorrection( nextMISInfo.Pack16bit(), path.GetThpRuRuCorrection() );
 
         float4 neeRadianceAndSpecAvg = neeResult.GetRadianceAndSpecAvg();
         if ( any(neeRadianceAndSpecAvg>0) )

@@ -187,11 +187,14 @@ namespace PathTracer
                                 inout UniformSampleSequenceGenerator sampleGenerator, const WorkingContext workingContext)
     {
         bool visible = false;
+        bool crossedNEEFilterGlass = false;
+        float3 transmittance = float3(1, 1, 1);
 
         /*[branch]*/ if (lightSample.Valid())   // if sample's bad, skip; we tried casting the ray anyway but ignoring the results - didn't yield better perf
         {
             RayDesc ray = ComputeVisibilityRay(lightSample, shadingData);
-            visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), workingContext.Debug);
+            transmittance = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), crossedNEEFilterGlass, workingContext.Debug);
+            visible = any(transmittance > 0);
         }
 
         // if( workingContext.Debug.IsDebugPixel() )
@@ -230,6 +233,14 @@ namespace PathTracer
 #else
             float pathMIS = lightSampler.ComputeLightVsBSDF_MIS_ForLight(shadingData.posW, lightSample, thisPdf, otherPdf, thisCount, otherCount, candidateSampleCount, fullSamples, scatterPdfForDir);
 #endif
+
+            // NEE filter glass was crossed: the light is attenuated by the glass, and the BSDF path through the glass weights the emission it reaches with the approximate pair
+            // of this weight (NEEBSDFMISInfo::BehindNEEFilterGlass), since the geometry the exact weight needs is on the other side of the glass
+            if (crossedNEEFilterGlass)
+            {
+                pathMIS = lightSampler.ComputeLightVsBSDF_MIS_ForLight_Approx(lightSample, candidateSampleCount, fullSamples, scatterPdfForDir);
+                lightSample.Li *= transmittance;
+            }
 
             // apply MIS and other multipliers to light here - reduces register pressure and computation later
             lightSample.Li *= fadeOut * wrsMIS * pathMIS / (float)fullSamples;

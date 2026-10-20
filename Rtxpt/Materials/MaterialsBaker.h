@@ -169,6 +169,12 @@ struct PTMaterial : public PTMaterialBase
     // The mesh will not be part of NEE.
     bool                    ExcludeFromNEE                      = false;
 
+    // ExcludeFromNEE on a thin, smooth, specular-transmissive (metal-rough) material - glass whose specular transmission is a delta lobe that does not bend the ray: NEE
+    // visibility rays are attenuated by its straight-through transmittance instead of ignoring it, and the path tracer does not count the light beyond it a second time
+    // (see SubInstanceData::Flags_NEEFilterGlass). Roughness below kMinGGXAlpha (BxDF.hlsli) is a delta lobe whatever the roughness texture says; a diffuse transmission
+    // share stays with the glass vertex's own light sampling.
+    bool                    IsNEEFilterGlass() const            { return ExcludeFromNEE && ThinSurface && EnableTransmission && TransmissionFactor > 0.0f && !UseSpecularGlossModel && Roughness * Roughness < 0.0064f; }
+
     // will not propagate dominant stable plane when doing path space decomposition
     bool                    PSDExclude                          = true;
     // for path space decomposition: -1 means no dominant; 0 usually means transmission, 1 usually means reflection, 2 usually means clearcoat reflection - must match corresponding BSDFSample::getDeltaLobeIndex()!

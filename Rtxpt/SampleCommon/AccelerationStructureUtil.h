@@ -85,8 +85,10 @@ namespace bvh
 
             geometryDesc.geometryType = nvrhi::rt::GeometryType::Triangles;
             
-            // both EnableAlphaTesting and ExcludeFromNEE require custom shader handling
+            // both EnableAlphaTesting and ExcludeFromNEE require custom shader handling; NEE filter glass attenuates a visibility ray once per crossing, so a crossing must be reported only once
             geometryDesc.flags = (materialPT.EnableAlphaTesting || materialPT.ExcludeFromNEE) ? nvrhi::rt::GeometryFlags::None : nvrhi::rt::GeometryFlags::Opaque;
+            if (materialPT.IsNEEFilterGlass())
+                geometryDesc.flags = nvrhi::rt::GeometryFlags::NoDuplicateAnyHitInvocation;
             blasDesc.bottomLevelGeometries.push_back(geometryDesc);
         }
 
