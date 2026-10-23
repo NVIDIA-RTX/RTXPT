@@ -32,38 +32,29 @@ using namespace donut::math;
 
 bool EnsureDirectoryExists(const std::filesystem::path& dir)
 {
-    if (std::filesystem::exists(dir))
-    {
-        if (!std::filesystem::is_directory(dir))
-        {
-            log::error("Attempting ensure directory exists, but path '%s' is a file", dir.string().c_str());
-            return false;
-        }
-        return true;
-    }
+    // Idempotent: the shader pipeline bakers call this concurrently on the same output folder from
+    // their thread pools, so success is whether the directory exists afterwards, not whether this
+    // call is the one that created it. That is what the is_directory() check below decides.
+    //
+    // Neither result of create_directories() can decide it. The bool means "a new directory was
+    // created", so it is false for a folder that was already there, and the error_code reports the
+    // failure of some component of a multi-level create, which need not be the leaf. Both are used
+    // only to explain a failure.
+    //
+    // The error_code overload also keeps a real failure - no permission, a file in the way - from
+    // throwing filesystem_error out of a worker task.
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
 
-    std::filesystem::path pathSoFar;
-    for (const auto& part : std::filesystem::absolute(dir)) 
-    {
-        pathSoFar /= part;
-        if (std::filesystem::exists(pathSoFar))
-        {
-            if (!std::filesystem::is_directory(pathSoFar))
-            {
-                log::error("Attempting ensure directory exists, but path '%s' is a file", pathSoFar.string().c_str());
-                return false;
-            }
-        }
-        else
-        {
-            if (!std::filesystem::create_directory(pathSoFar))
-            {
-                log::error("Attempting ensure directory exists, but unable to create or access '%s' directory", pathSoFar.string().c_str());
-                return false;
-            }
-        }
-    }
-    return true;
+    if (std::filesystem::is_directory(dir))
+        return true;
+
+    if (std::filesystem::exists(dir))
+        log::error("Attempting ensure directory exists, but path '%s' is a file", dir.string().c_str());
+    else
+        log::error("Attempting ensure directory exists, but unable to create or access '%s' directory (%s)", dir.string().c_str(), ec.message().c_str());
+
+    return false;
 }
 
 std::vector<std::filesystem::path> EnumerateFilesWithWildcard( const std::filesystem::path& folder, const std::string& wildcard ) 
@@ -168,6 +159,22 @@ static bool                 g_NonInteractive = false;
 void HelpersSetNonInteractive()
 {
     g_NonInteractive = true;
+}
+
+bool HelpersIsNonInteractive()
+{
+    return g_NonInteractive;
+}
+
+void HelpersExitProcess(int exitCode)
+{
+    // Not std::exit: DLL detach with Streamline/NGX still initialized crashes in nvngx_dlssd. TerminateProcess skips
+    // detach and static destructors (so no joinable progress bar threads either); only stdio needs flushing.
+    fflush(nullptr);
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), (UINT)exitCode);
+#endif
+    std::_Exit(exitCode);
 }
 
 #ifdef _WIN32

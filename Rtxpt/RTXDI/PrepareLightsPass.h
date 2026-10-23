@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "../Shaders/PathTracer/Config.h"
+
 #include <donut/engine/SceneGraph.h>
 #include <nvrhi/nvrhi.h>
 #include <rtxdi/DI/ReSTIRDI.h>

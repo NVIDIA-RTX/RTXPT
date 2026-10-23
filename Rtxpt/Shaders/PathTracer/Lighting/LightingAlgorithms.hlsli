@@ -95,7 +95,7 @@ class SortedLightList
             uint thisCount  = Items[i].Payload;
 
             for( int j = 0; j < thisCount; j++ )
-                storageBuffer[uint3(tileAddress.xy, totalSampleCount++)] = PackMiniListLightAndCount( lightIndex, thisCount );
+                storageBuffer[uint3(tileAddress.xy, totalSampleCount++)] = NEEAT::PackMiniListLightAndCount( lightIndex, thisCount );
         }
         return totalSampleCount;
     }
@@ -111,7 +111,7 @@ class SortedLightList
             uint thisCount  = Items[i].Payload;
 
             for( int j = 0; j < thisCount; j++ )
-                if( dataToValidate[totalSampleCount++] != PackMiniListLightAndCount( lightIndex, thisCount ) )
+                if( dataToValidate[totalSampleCount++] != NEEAT::PackMiniListLightAndCount( lightIndex, thisCount ) )
                 {
 #if NEEAT_ENABLE_DEBUG_DRAW
                     if ( debugPrint )
@@ -650,26 +650,31 @@ class SortedLightLLRBTree
 
 
 // Expects elements of storageBuffer[tileAddress, x] to be sorted and 'localLightCount' is the depth of storageBuffer.
-// Note: returning value that consists both of key and counter (which needs unpacking to get actual global index); if not found, RTXPT_INVALID_LIGHT_INDEX returned
+// Note: returning value that consists both of key and counter (which needs unpacking to get actual global index); if not found, NEEAT_INVALID_LIGHT_INDEX returned
 inline uint LocalLightBinarySearch(Buffer<uint> storageBuffer, const uint tileAddress, const uint globalLightIndexToFind, const uint localLightCount, uniform const uint BINARY_SEARCH_STEPS)
 {
-    uint indexLeft = tileAddress; 
-    uint indexRight = tileAddress + localLightCount-1;
-    
+    // Signed offsets within the tile: a key below every key in the tile must stop the search rather than step to tileAddress-1, which
+    // is the previous tile's last (largest) key - or, for tile 0, out of bounds - and could falsely match
+    int indexLeft = 0;
+    int indexRight = int(localLightCount) - 1;
+
 #if 0 // early out - doesn't help in this case
-    uint keyLeft  = UnpackMiniListLight(storageBuffer[indexLeft] );
-    uint keyRight = UnpackMiniListLight(storageBuffer[indexRight]);
+    uint keyLeft  = UnpackMiniListLight(storageBuffer[tileAddress + indexLeft] );
+    uint keyRight = UnpackMiniListLight(storageBuffer[tileAddress + indexRight]);
     if (globalLightIndexToFind < keyLeft || globalLightIndexToFind > keyRight)
-        return RTXPT_INVALID_LIGHT_INDEX;
+        return NEEAT_INVALID_LIGHT_INDEX;
 #endif
 
     [unroll] for (uint i = 0u; i < BINARY_SEARCH_STEPS; ++i)
     {
-        uint indexMiddle = (indexLeft+indexRight)>>1;
+        if( indexLeft > indexRight )
+            break;
 
-        uint value = storageBuffer[indexMiddle];
+        int indexMiddle = (indexLeft+indexRight)>>1;
 
-        uint keyMiddle = UnpackMiniListLight(value);
+        uint value = storageBuffer[tileAddress + indexMiddle];
+
+        uint keyMiddle = NEEAT::UnpackMiniListLight(value);
 
         if( keyMiddle < globalLightIndexToFind )
             indexLeft = indexMiddle+1;
@@ -678,7 +683,7 @@ inline uint LocalLightBinarySearch(Buffer<uint> storageBuffer, const uint tileAd
         else 
             return value;
     }
-    return RTXPT_INVALID_LIGHT_INDEX;
+    return NEEAT_INVALID_LIGHT_INDEX;
 }
 
 

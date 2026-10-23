@@ -44,14 +44,13 @@ void RayGen()
             g_RtxdiBridgeConst.restirDI.bufferIndices.spatialResamplingInputBufferIndex);
 
         RTXDI_DISpatialResamplingParameters sparams;
-        sparams.sourceBufferIndex = g_RtxdiBridgeConst.restirDI.bufferIndices.spatialResamplingInputBufferIndex;
-        sparams.numSamples = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.numSpatialSamples;
+        sparams.numSamples = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.numSamples;
         sparams.numDisocclusionBoostSamples = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.numDisocclusionBoostSamples;
         sparams.targetHistoryLength = g_RtxdiBridgeConst.restirDI.temporalResamplingParams.maxHistoryLength;
-        sparams.biasCorrectionMode = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.spatialBiasCorrection;
-        sparams.samplingRadius =  g_RtxdiBridgeConst.restirDI.spatialResamplingParams.spatialSamplingRadius;
-        sparams.depthThreshold =  g_RtxdiBridgeConst.restirDI.spatialResamplingParams.spatialDepthThreshold;
-        sparams.normalThreshold = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.spatialNormalThreshold;
+        sparams.biasCorrectionMode = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.biasCorrectionMode;
+        sparams.samplingRadius =  g_RtxdiBridgeConst.restirDI.spatialResamplingParams.samplingRadius;
+        sparams.depthThreshold =  g_RtxdiBridgeConst.restirDI.spatialResamplingParams.depthThreshold;
+        sparams.normalThreshold = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.normalThreshold;
         sparams.enableMaterialSimilarityTest = true;
         sparams.discountNaiveSamples = g_RtxdiBridgeConst.restirDI.spatialResamplingParams.discountNaiveSamples;
 
@@ -62,6 +61,7 @@ void RayGen()
             rng, 
             g_RtxdiBridgeConst.runtimeParams,
             g_RtxdiBridgeConst.restirDI.reservoirBufferParams,
+            g_RtxdiBridgeConst.restirDI.bufferIndices.spatialResamplingInputBufferIndex,
             sparams, 
             lightSample);
     }

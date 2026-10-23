@@ -11,13 +11,14 @@
 #include "ComputePipelineBaker.h"
 #include "ShaderCompilerUtils.h"
 #include "SampleCommon.h"
+#include "DirectoryModifiedMonitor.h"
 
 #include <donut/app/ApplicationBase.h>
 #include <donut/core/log.h>
 #include <donut/core/vfs/VFS.h>
 
 #define COMPUTE_BAKER_ENABLE_MULTITHREADED_COMPILE 1
-#define COMPUTE_BAKER_EMBED_PDBS 0
+#define COMPUTE_BAKER_EMBED_PDBS 1
 #define COMPUTE_BAKER_USE_OPTIMIZATIONS 1
 
 using namespace donut;
@@ -44,6 +45,13 @@ ComputePipelineBaker::ComputePipelineBaker(nvrhi::IDevice* device, const std::ve
         m_additionalMonitorPaths.push_back(std::filesystem::absolute(path));
     }
     
+    // One group covering ShadersPath plus every additional path, so a query is a single fold. ShadersPath is shared with
+    // PTPipelineBaker and the monitor canonicalises, so that root ends up scanned once for both.
+    std::vector<std::filesystem::path> monitored;
+    monitored.push_back(m_compilerConfig.ShadersPath);
+    monitored.insert(monitored.end(), m_additionalMonitorPaths.begin(), m_additionalMonitorPaths.end());
+    m_sourceMonitor = DirectoryModifiedMonitor::Register(monitored);
+
     log::info("ComputePipelineBaker initialized (monitoring %d additional paths)", (int)m_additionalMonitorPaths.size());
 }
 
@@ -94,48 +102,26 @@ void ComputePipelineBaker::EnqueueShaderForCompilation(ComputeShaderVariant* var
 
 void ComputePipelineBaker::Update(bool forceReload)
 {
-    // Auto-reload: poll for source file changes
+    // Auto-reload: check for source file changes. The monitor's worker does the walking; the registered group already
+    // folds ShadersPath and every additional path, so this is one query.
     if (!forceReload && !m_variants.empty())
     {
-        static auto lastPollTime = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        float elapsed = std::chrono::duration<float>(now - lastPollTime).count();
-        
-        if (elapsed >= m_autoReloadPollIntervalSeconds)
+        ZoneScopedN("ComputePipelineHotReloadCheck");
+        auto currentTimestamp = DirectoryModifiedMonitor::Query(m_sourceMonitor);
+
+        if (currentTimestamp.has_value())
         {
-            lastPollTime = now;
-            
-            // Check the main shaders path
-            auto currentTimestamp = GetLatestModifiedTimeDirectoryRecursive(m_compilerConfig.ShadersPath);
-            
-            // Also check additional monitored paths
-            for (const auto& path : m_additionalMonitorPaths)
+            if (!m_cachedSourceTimestamp.has_value())
             {
-                if (std::filesystem::exists(path))
-                {
-                    auto pathTimestamp = GetLatestModifiedTimeDirectoryRecursive(path);
-                    if (pathTimestamp.has_value())
-                    {
-                        if (!currentTimestamp.has_value() || *pathTimestamp > *currentTimestamp)
-                            currentTimestamp = pathTimestamp;
-                    }
-                }
+                // First observation - just cache the timestamp
+                m_cachedSourceTimestamp = currentTimestamp;
             }
-            
-            if (currentTimestamp.has_value())
+            else if (*currentTimestamp != *m_cachedSourceTimestamp)
             {
-                if (!m_cachedSourceTimestamp.has_value())
-                {
-                    // First poll - just cache the timestamp
-                    m_cachedSourceTimestamp = currentTimestamp;
-                }
-                else if (*currentTimestamp != *m_cachedSourceTimestamp)
-                {
-                    // Source files changed - trigger reload
-                    m_cachedSourceTimestamp = currentTimestamp;
-                    forceReload = true;
-                    log::info("Compute shader source changes detected - triggering hot reload...");
-                }
+                // Source files changed - trigger reload
+                m_cachedSourceTimestamp = currentTimestamp;
+                forceReload = true;
+                log::info("Compute shader source changes detected - triggering hot reload...");
             }
         }
     }
@@ -162,27 +148,21 @@ void ComputePipelineBaker::Update(bool forceReload)
     // Get latest source modification time (from all monitored paths)
     EnsureDirectoryExists(m_compilerConfig.ShaderBinariesPath);
     
-    m_lastUpdatedSourceTimestamp = GetLatestModifiedTimeDirectoryRecursive(m_compilerConfig.ShadersPath);
-    
-    // Also include additional monitored paths
-    for (const auto& path : m_additionalMonitorPaths)
-    {
-        if (std::filesystem::exists(path))
-        {
-            auto pathTimestamp = GetLatestModifiedTimeDirectoryRecursive(path);
-            if (pathTimestamp.has_value())
-            {
-                if (!m_lastUpdatedSourceTimestamp.has_value() || *pathTimestamp > *m_lastUpdatedSourceTimestamp)
-                    m_lastUpdatedSourceTimestamp = pathTimestamp;
-            }
-        }
-    }
+    // ScanNow, not Query: this feeds ShaderCompilerUtils::IsCompiledShaderUpToDate ('binaryTime >= lastSourceModified'
+    // per shader), so a cached timestamp that is up to one poll interval stale could silently skip a compile. Only runs
+    // when a reload is already happening, where the walk is free next to the compilation it precedes. The registered
+    // group already covers ShadersPath plus every additional path.
+    m_lastUpdatedSourceTimestamp = DirectoryModifiedMonitor::ScanNow(m_sourceMonitor);
     
     if (!m_lastUpdatedSourceTimestamp.has_value())
     {
         log::error("Unable to get source timestamp - cannot dynamically compile compute shaders");
         return;
     }
+
+    // Sync the watcher's baseline with what this batch compiles; otherwise an edit it hasn't polled yet (e.g. saved just
+    // before Ctrl+R) triggers a second, redundant reload.
+    m_cachedSourceTimestamp = m_lastUpdatedSourceTimestamp;
 
     m_version++;
 
@@ -198,7 +178,6 @@ void ComputePipelineBaker::Update(bool forceReload)
             if (variant->m_localVersion != m_version || forceReload)
             {
                 updateQueue.push_back(variant);
-                variant->ResetPipeline();
                 variant->m_lockedBaker = shared_from_this();
                 variant->PrepareCompilation(*m_lastUpdatedSourceTimestamp);
                 EnqueueShaderForCompilation(variant.get());
@@ -267,23 +246,42 @@ void ComputePipelineBaker::Update(bool forceReload)
         m_parallelCompileListAll.clear();
         m_parallelCompileListUnique.clear();
 
-        // Mark variants as updated
+        // All or nothing: callers chain variants over shared data, so a partial swap would silently mix old and new code.
+        // On failure every variant keeps its previous pipeline until Retry recompiles it; Cancel closes the app.
         for (auto& variant : updateQueue)
         {
             if (firstError.empty())
+            {
+                variant->CommitPending();
                 variant->m_localVersion = m_version;
+            }
+            else
+                variant->DiscardPending();
             variant->m_lockedBaker = nullptr;
         }
 
         if (!firstError.empty())
         {
+            firstError += m_compilerConfig.LongPathErrorHint();
+
+            // Nobody to click Retry: log and take the Cancel path
+            if (HelpersIsNonInteractive())
+            {
+                log::error("%s", firstError.c_str());
+                HelpersExitProcess(1);
+            }
+
 #if _WIN32
             extern HWND HelpersGetActiveWindow();
             int result = MessageBoxA(HelpersGetActiveWindow(), firstError.c_str(),
                 "Compute Shader Compile Error", MB_RETRYCANCEL | MB_ICONWARNING | MB_SETFOREGROUND | MB_TASKMODAL);
             if (result == IDCANCEL)
 #endif
-                break;
+                HelpersExitProcess(1); // the renderer can't work with broken shaders
+
+            // Retry: rescan, as the source may have been fixed while the error box was up
+            if (std::optional<std::filesystem::file_time_type> rescan = DirectoryModifiedMonitor::ScanNow(m_sourceMonitor); rescan.has_value())
+                m_lastUpdatedSourceTimestamp = m_cachedSourceTimestamp = rescan;
         }
         else
         {
@@ -325,11 +323,32 @@ bool ComputeShaderVariant::NeedsUpdate() const
     return m_localVersion != baker->GetVersion() || m_pipeline == nullptr;
 }
 
-void ComputeShaderVariant::ResetPipeline()
+void ComputeShaderVariant::CommitPending()
 {
-    m_shader = nullptr;
-    m_pipeline = nullptr;
-    m_localVersion = -1;
+    assert(m_pendingPipeline != nullptr);
+    m_shader = m_pendingShader;
+    m_pipeline = m_pendingPipeline;
+    m_pendingShader = nullptr;
+    m_pendingPipeline = nullptr;
+}
+
+void ComputeShaderVariant::DiscardPending()
+{
+    m_pendingShader = nullptr;
+    m_pendingPipeline = nullptr;
+}
+
+bool ComputeShaderVariant::Dispatch(nvrhi::ICommandList* commandList, int width, int height, int depth, const nvrhi::BindingSetVector& bindings) const
+{
+    if (m_pipeline == nullptr)
+        return false;
+
+    nvrhi::ComputeState state;
+    state.pipeline = m_pipeline;
+    state.bindings = bindings;
+    commandList->setComputeState(state);
+    commandList->dispatch(width, height, depth);
+    return true;
 }
 
 void ComputeShaderVariant::PrepareCompilation(std::filesystem::file_time_type lastModifiedSourceCode)
@@ -369,14 +388,15 @@ void ComputeShaderVariant::PrepareCompilation(std::filesystem::file_time_type la
     if (cmdResult.HashHex != m_compiledHashHex)
     {
         m_compiledHashHex = cmdResult.HashHex;
-        ResetPipeline();
     }
 
-    m_compiledFileNameNoExt = m_shaderSrcFileName.stem().string() + "_" + m_entryPoint + "_" + m_compiledHashHex;
+    m_compiledFileNameNoExt = m_shaderSrcFileName.stem().string() + "_" + m_entryPoint + "_" + m_compiledHashHex.substr(0, ShaderCompilerUtils::k_CacheFileHashHexChars);
     m_compiledFullPath = std::filesystem::absolute(
         baker->GetShaderBinariesPath() / m_compiledFileNameNoExt).string() + ".bin";
+#if !COMPUTE_BAKER_EMBED_PDBS
     std::string compiledFullPathPdb = std::filesystem::absolute(
         baker->GetShaderBinariesPath() / m_compiledFileNameNoExt).string() + ".pdb";
+#endif
 
     // Check if compiled file is up to date
     if (ShaderCompilerUtils::IsCompiledShaderUpToDate(m_compiledFullPath, lastModifiedSourceCode))
@@ -400,7 +420,7 @@ void ComputeShaderVariant::PrepareCompilation(std::filesystem::file_time_type la
             log::info("Enqueuing compute shader '%s' for compilation...", m_debugName.c_str());
         
         m_compileCmdLine = command;
-        ResetPipeline();
+        m_sourceSnapshot = lastModifiedSourceCode;
     }
 }
 
@@ -410,6 +430,10 @@ void ComputeShaderVariant::CompileIfNeeded()
         return;
 
     log::info("Compiling compute shader '%s'...", m_debugName.c_str());
+
+    // Ensure the output directory exists (shader paths may include subdirectories)
+    std::filesystem::path outputDir = std::filesystem::path(m_compiledFullPath).parent_path();
+    EnsureDirectoryExists(outputDir);
 
     auto [resNum, resString, resErrorString] = SystemShell(m_compileCmdLine, false);
 
@@ -423,11 +447,16 @@ void ComputeShaderVariant::CompileIfNeeded()
 
     if (!m_compileError.empty())
         log::warning("%s", m_compileError.c_str());
+    else
+    {   // Stamped with the source snapshot, not the compile end time, so a source saved mid-compile still counts as newer
+        std::error_code ec;
+        std::filesystem::last_write_time(m_compiledFullPath, m_sourceSnapshot, ec);
+    }
 }
 
 void ComputeShaderVariant::LoadShaderAndCreatePipeline()
 {
-    if (!m_compileError.empty() || m_pipeline != nullptr)
+    if (!m_compileError.empty())
         return;
 
     auto baker = m_lockedBaker;
@@ -450,9 +479,9 @@ void ComputeShaderVariant::LoadShaderAndCreatePipeline()
     shaderDesc.debugName = m_debugName;
     shaderDesc.entryName = m_entryPoint.c_str();
 
-    m_shader = baker->GetDevice()->createShader(shaderDesc, data->data(), data->size());
+    m_pendingShader = baker->GetDevice()->createShader(shaderDesc, data->data(), data->size());
 
-    if (!m_shader)
+    if (!m_pendingShader)
     {
         m_compileError = StringFormat("ERROR creating compute shader handle for '%s'", m_debugName.c_str());
         return;
@@ -460,15 +489,15 @@ void ComputeShaderVariant::LoadShaderAndCreatePipeline()
 
     // Create pipeline
     nvrhi::ComputePipelineDesc pipelineDesc;
-    pipelineDesc.CS = m_shader;
+    pipelineDesc.CS = m_pendingShader;
     pipelineDesc.bindingLayouts = m_bindingLayouts;
 
-    m_pipeline = baker->GetDevice()->createComputePipeline(pipelineDesc);
+    m_pendingPipeline = baker->GetDevice()->createComputePipeline(pipelineDesc);
 
-    if (!m_pipeline)
+    if (!m_pendingPipeline)
     {
         m_compileError = StringFormat("ERROR creating compute pipeline for '%s'", m_debugName.c_str());
-        m_shader = nullptr;
+        m_pendingShader = nullptr;
         return;
     }
 

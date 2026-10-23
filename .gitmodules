@@ -34,3 +34,7 @@
 	path = External/Rtxtf
 	url = https://github.com/NVIDIA-RTX/RTXTF-Library.git
 	shallow = false
+[submodule "External/SHARC"]
+	path = External/SHARC
+	url = https://github.com/NVIDIA-RTX/SHARC.git
+	shallow = false

@@ -40,17 +40,7 @@ between the bridge functions.
 #define POLYLIGHT_DIRECTIONAL_ENABLE    1   // baked into envmap (Distant lighting code)
 #define POLYLIGHT_ENV_ENABLE            1   // handled by Distant lighting code, not polymorphic light
 #define POLYLIGHT_QT_ENV_ENABLE         0   // environment map quad tree in equal area octahedral mapping
-#define POLYLIGHT_CONFIGURED
-
-// This is a adapter for PolymorphicLight, enabling features as needed by RTXDI
-
-// Polymorphic light config - RTXDI will also need ENV 
-#define POLYLIGHT_SPHERE_ENABLE         1
-#define POLYLIGHT_POINT_ENABLE          1
-#define POLYLIGHT_TRIANGLE_ENABLE       1
-#define POLYLIGHT_DIRECTIONAL_ENABLE    1   // probably not needed as baked in envmap but this need testing
-#define POLYLIGHT_ENV_ENABLE            1
-#define POLYLIGHT_QT_ENV_ENABLE         0   // environment map quad tree in equal area octahedral mapping
+#define POLYLIGHT_LIGHT_CLUSTER         0
 #define POLYLIGHT_CONFIGURED
 
 #include "ShaderParameters.h"
@@ -93,7 +83,7 @@ SamplerState s_EnvironmentSampler                           : register(s4 VK_DES
 #include "PolymorphicLightRTXDI.hlsli"
 
 static const bool kSpecularOnly = false;
-static const float kMinRoughness = 0.05f;
+//static const float kMinRoughnessK = 0.05f;
 
 //Types
 typedef PathTracerCollectedSurfaceData RAB_Surface;
@@ -181,7 +171,7 @@ void AnyHit(inout RayPayload payload : SV_RayPayload, in RayAttributes attrib : 
 RayHitInfo TraceVisibilityRay(RaytracingAccelerationStructure accelStruct, RayDesc ray)
 {
 #if USE_RAY_QUERY
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
     rayQuery.TraceRayInline(accelStruct, RAY_FLAG_NONE, 0xff, ray);
 
     while (rayQuery.Proceed())
@@ -247,6 +237,7 @@ struct RAB_LightSample
 typedef PolymorphicLightInfoFull RAB_LightInfo;
 // Using the RTXPT Sample Generator
 typedef SampleGenerator RAB_RandomSamplerState;
+typedef RAB_RandomSamplerState RTXDI_RandomSamplerState;
 
 
 // Initialized the random sampler for a given pixel or tile index.
@@ -261,6 +252,11 @@ RAB_RandomSamplerState RAB_InitRandomSampler(uint2 index, uint pass)
 
 // Draws a random number X from the sampler, so that (0 <= X < 1).
 float RAB_GetNextRandom(inout RAB_RandomSamplerState rng)
+{
+    return sampleNext1D(rng);
+}
+
+float RTXDI_GetNextRandom(inout RTXDI_RandomSamplerState rng)
 {
     return sampleNext1D(rng);
 }
@@ -382,9 +378,16 @@ void RAB_GetLightDirDistance(RAB_Surface surface, RAB_LightSample lightSample,
     out float3 o_lightDir,
     out float o_lightDistance)
 {
-    if (lightSample.lightType == PolymorphicLightType::kEnvironment /*|| lightSample.lightType == PolymorphicLightType::kDirectional*/)
+    if (lightSample.lightType == PolymorphicLightType::kEnvironment)
     {
         o_lightDir = -lightSample.normal;
+        o_lightDistance = DISTANT_LIGHT_DISTANCE;
+    }
+    else if (lightSample.lightType == PolymorphicLightType::kDirectional)
+    {
+        // DirectionalLight::CalcSample stashes the unit toLight vector directly in
+        // lightSample.position (see PolymorphicLight.hlsli); no normalize/subtract needed.
+        o_lightDir = lightSample.position;
         o_lightDistance = DISTANT_LIGHT_DISTANCE;
     }
     else
@@ -507,6 +510,16 @@ float RAB_GetSurfaceBrdfPdf(RAB_Surface surface, float3 dir)
         return 0;
 #endif
     return surface.EvalPdf(dir, true);
+}
+
+float RAB_SurfaceEvaluateBrdfPdf(RAB_Surface surface, float3 dir)
+{
+    return RAB_GetSurfaceBrdfPdf(surface, dir);
+}
+
+bool RAB_SurfaceImportanceSampleBrdf(RAB_Surface surface, inout RAB_RandomSamplerState rng, out float3 dir)
+{
+    return RAB_GetSurfaceBrdfSample(surface, rng, dir);
 }
 
 

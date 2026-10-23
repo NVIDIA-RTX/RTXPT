@@ -13,6 +13,8 @@
 #ifndef __PACKING_HLSLI__
 #define __PACKING_HLSLI__
 
+#include "ColorHelpers.hlsli"
+
 // Pack [0.0, 1.0] float to a uint of a given bit depth
 #define PACK_UFLOAT_TEMPLATE(size)                      \
 uint Pack_R ## size ## _UFLOAT(float r, float d = 0.5f) \
@@ -166,6 +168,32 @@ float4 Unpack_RGBA8_SNORM(uint value)
     );
 }
 
+uint Pack_SRGB8_A8(float3 linearRGB, float a)
+{
+    float3 s = LinearToSRGB(saturate(linearRGB));
+    uint r = uint(s.r * 255.0 + 0.5);
+    uint g = uint(s.g * 255.0 + 0.5);
+    uint b = uint(s.b * 255.0 + 0.5);
+    uint aw = uint(saturate(a) * 255.0 + 0.5);
+    return r | (g << 8) | (b << 16) | (aw << 24);
+}
+
+float3 Unpack_SRGB8(uint p)
+{
+    return SRGBToLinear(float3(float(p & 0xFF), float((p >> 8) & 0xFF), float((p >> 16) & 0xFF)) / 255.0);
+}
+
+float Unpack_A8(uint p) 
+{ 
+    return float((p >> 24) & 0xFF) / 255.0; 
+}
+
+float4 Unpack_SRGB8_A8(uint p)
+{
+    return float4( Unpack_SRGB8(p), Unpack_A8(p) );
+}
+
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // (R11G11B10 conversion code below taken from Miniengine's PixelPacking_R11G11B10.hlsli,  
 // Copyright (c) Microsoft, MIT license, Developed by Minigraph, Author:  James Stanard; original file link:
@@ -261,6 +289,36 @@ void Fp16ToFp32(uint3 d, out float3 a, out float3 b)
 
 	a = float3(d0, d1.x);
 	b = float3(d1.y, d2);
+}
+
+static const float kEmissionPackMax    = 1000000.0;
+static const float kEmissionPackLogMax = 19.931570012018494; // log2(1000000 + 1)
+
+uint PackEmissionRGB10Log(float3 emission)
+{
+    emission = min(max(emission, float3(0.0, 0.0, 0.0)),
+                   float3(kEmissionPackMax, kEmissionPackMax, kEmissionPackMax));
+
+    float3 encoded = log2(emission + float3(1.0, 1.0, 1.0)) / kEmissionPackLogMax;
+
+    uint3 q = uint3(round(encoded * 1023.0));
+    q = min(q, uint3(1023, 1023, 1023));
+
+    return (q.x      ) |
+           (q.y << 10) |
+           (q.z << 20);
+}
+
+float3 UnpackEmissionRGB10Log(uint packedEmission)
+{
+    uint3 q;
+    q.x =  packedEmission        & 1023u;
+    q.y = (packedEmission >> 10) & 1023u;
+    q.z = (packedEmission >> 20) & 1023u;
+
+    float3 encoded = float3(q) / 1023.0;
+
+    return exp2(encoded * kEmissionPackLogMax) - float3(1.0, 1.0, 1.0);
 }
 
 #endif // __PACKING_HLSLI__

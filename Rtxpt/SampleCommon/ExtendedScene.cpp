@@ -18,9 +18,11 @@
 
 using namespace donut::math;
 #include <donut/shaders/light_cb.h>
+#include <donut/shaders/skinning_cb.h>
 
 #include "../Materials/MaterialsBaker.h"
 #include "../OpacityMicroMap/OmmBaker.h"
+#include "../OpacityMicroMap/OmmCpuInputIdentity.h"
 
 #include "SampleCommon.h"
 #include "LocalConfig.h"
@@ -34,7 +36,7 @@ std::shared_ptr<engine::SceneGraphLeaf> EnvironmentLight::Clone()
 {
     auto copy = std::make_shared<EnvironmentLight>();
     copy->color = color;
-    copy->radianceScale = radianceScale;
+    copy->intensity = intensity;
     copy->textureIndex = textureIndex;
     copy->rotation = rotation;
     copy->path = path;
@@ -103,7 +105,7 @@ void PointLightEx::Store(Json::Value& node) const
 
 void EnvironmentLight::Load(const Json::Value& node)
 {
-    node["radianceScale"] >> radianceScale;
+    node["intensity"] >> intensity;
     node["textureIndex"] >> textureIndex;
     node["rotation"] >> rotation;
     node["path"] >> path;
@@ -272,6 +274,101 @@ void ExtendedScene::ProcessNodesRecursive(std::shared_ptr<donut::engine::SceneGr
 
     for( int i = (int)node->GetNumChildren()-1; i >= 0; i-- )
         ProcessNodesRecursive(node->GetChild(i)->shared_from_this());
+}
+
+void ExtendedScene::CreateMeshBuffers(nvrhi::ICommandList* commandList)
+{
+    std::vector<MeshInfoEx*> pending;
+    {
+        // All meshes sharing a BufferGroup must be identified before its first upload.
+        // Borrow the source arrays for exact equality; retain only IDs after this scope.
+        omm::CpuInputIdentityRegistry identities;
+        for (const auto& source : m_SceneGraph->GetMeshes())
+        {
+            auto* mesh = dynamic_cast<MeshInfoEx*>(source.get());
+            if (!mesh) continue;
+            if (mesh->OmmCpuInputIdentity && mesh->OmmCpuInputIdentity->IsValidFor(*mesh))
+                continue;
+            mesh->InvalidateOmmCpuInputIdentity();
+            if (!omm::CpuMeshInputIdentity::SupportsStaticMesh(*mesh) || !mesh->buffers
+                || mesh->buffers->indexBuffer || mesh->buffers->vertexBuffer)
+                continue;
+            for (size_t i = 0; i < mesh->geometries.size(); ++i)
+            {
+                const auto& geometry = mesh->geometries[i];
+                if (!geometry) continue;
+                const auto* material = dynamic_cast<const MaterialEx*>(geometry->material.get());
+                const auto* pt = material ? material->PTMaterial.get() : nullptr;
+                // Missing or later-enabled materials bake independently. Texture upload
+                // may still be deferred, so Loaded->texture is not required here.
+                if (!pt || !pt->EnableAlphaTesting || !pt->EnableBaseTexture || !pt->BaseTexture.Loaded)
+                    continue;
+                const uint64_t id = identities.Intern(*mesh, *geometry);
+                if (!id) continue;
+                if (!mesh->OmmCpuInputIdentity)
+                    mesh->OmmCpuInputIdentity = std::make_shared<omm::CpuMeshInputIdentity>(*mesh);
+                mesh->OmmCpuInputIdentity->geometries[i].id = id;
+            }
+            if (mesh->OmmCpuInputIdentity) pending.push_back(mesh);
+        }
+    }
+    Scene::CreateMeshBuffers(commandList);
+    for (auto* mesh : pending)
+        if (!mesh->OmmCpuInputIdentity->BindUploadedBuffers(*mesh))
+            mesh->InvalidateOmmCpuInputIdentity();
+
+	// Ideally this below should be fixed on Donut side:
+    // Donut rests skinned vertex buffers in VertexBuffer and joint buffers in ShaderResource, both illegal in compute queue
+    // barriers (async prefix); swap the just-created, still unused buffers for NonPixelShaderResource ones
+    for (const auto& skinned : m_SceneGraph->GetSkinnedMeshInstances())
+    {
+        BufferGroup& buffers = *skinned->GetMesh()->buffers;
+        if (buffers.vertexBuffer->getDesc().initialState == nvrhi::ResourceStates::NonPixelShaderResource)
+            continue;
+
+        nvrhi::BufferDesc desc = buffers.vertexBuffer->getDesc();
+        desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+        buffers.vertexBuffer = m_Device->createBuffer(desc);
+        if (m_DescriptorTable)
+            buffers.vertexBufferDescriptor = std::make_shared<DescriptorHandle>(
+                m_DescriptorTable->CreateDescriptorHandle(nvrhi::BindingSetItem::RawBuffer_SRV(0, buffers.vertexBuffer)));
+
+        desc = skinned->jointBuffer->getDesc();
+        desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+        skinned->jointBuffer = m_Device->createBuffer(desc);
+
+        nvrhi::BindingSetDesc setDesc;
+        setDesc.bindings = {
+            nvrhi::BindingSetItem::PushConstants(0, sizeof(SkinningConstants)),
+            nvrhi::BindingSetItem::RawBuffer_SRV(0, skinned->GetPrototypeMesh()->buffers->vertexBuffer),
+            nvrhi::BindingSetItem::RawBuffer_SRV(1, skinned->jointBuffer),
+            nvrhi::BindingSetItem::RawBuffer_UAV(0, buffers.vertexBuffer)
+        };
+        skinned->skinningBindingSet = m_Device->createBindingSet(setDesc, m_SkinningBindingLayout);
+    }
+}
+
+// Ideally this change should go into Donut and the above swap shouldn't be needed
+// Read only by compute and ray tracing here; resting in NonPixelShaderResource keeps their barriers legal on a compute queue
+nvrhi::BufferHandle ExtendedScene::CreateMaterialBuffer()
+{
+    nvrhi::BufferDesc desc = Scene::CreateMaterialBuffer()->getDesc();
+    desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    return m_Device->createBuffer(desc);
+}
+
+nvrhi::BufferHandle ExtendedScene::CreateGeometryBuffer()
+{
+    nvrhi::BufferDesc desc = Scene::CreateGeometryBuffer()->getDesc();
+    desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    return m_Device->createBuffer(desc);
+}
+
+nvrhi::BufferHandle ExtendedScene::CreateInstanceBuffer()
+{
+    nvrhi::BufferDesc desc = Scene::CreateInstanceBuffer()->getDesc();
+    desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    return m_Device->createBuffer(desc);
 }
 
 bool ExtendedScene::LoadWithThreadPool(const std::filesystem::path& jsonFileName, donut::engine::ThreadPool* threadPool)

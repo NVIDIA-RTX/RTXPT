@@ -13,6 +13,9 @@
 
 #define TONEMAPPING_AUTOEXPOSURE_CPU     1
 #define TONEMAPPING_EXPOSURE_KEY         0.042
+// Total (auto x user) exposure is clamped to [2^MIN, 2^MAX]; this also bounds preExposedGrayLuminance to 0.18 x [2^-MAX, 2^-MIN]
+#define TONEMAPPING_EXPOSURE_LOG2_MIN    -6.0f
+#define TONEMAPPING_EXPOSURE_LOG2_MAX    6.0f
 
 enum class ToneMapperOperator : uint32_t
 {
@@ -31,11 +34,7 @@ struct ToneMappingConstants
     float whiteMaxLuminance;
 	uint toneMapOperator;
     uint clamped;
-	uint autoExposure;
-	float avgLuminance;
-	float autoExposureLumValueMin;
-	float autoExposureLumValueMax;
-    float3x4 colorTransform;
+    float3x4 colorTransform;    // white balance x total exposure (auto x user, clamped) - see ToneMappingPass::UpdateExposure
     uint enabled;
     uint _padding0;
     uint _padding1;

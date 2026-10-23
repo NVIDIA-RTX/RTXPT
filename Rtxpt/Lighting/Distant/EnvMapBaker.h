@@ -25,6 +25,7 @@ using namespace donut::math;
 #include "EnvMapBaker.hlsl"
 #include "BRDFLUTGenerator.hlsl"
 
+#include "../../Shaders/PathTracer/Lighting/EnvMap.hlsli"
 #include "SampleProceduralSky.h"
 
 namespace donut::engine
@@ -89,7 +90,9 @@ public:
 
     void                            CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory, std::shared_ptr<ComputePipelineBaker> computePipelineBaker);
 
-    void                            PreUpdate( nvrhi::ICommandList* commandList, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::string envMapBackgroundPath );    // use to update to figure out GetTargetCubeResolution() default cubemap resolution and needed before Update; Ignore return if not needed.
+    // Use to update to figure out GetTargetCubeResolution() default cubemap resolution and needed before Update. Returns true if it
+    // replaced textures that callers may have bound (the cube set or the source env map), so binding caches must drop them.
+    bool                            PreUpdate( nvrhi::ICommandList* commandList, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::string envMapBackgroundPath );
     // Returns 'true' if contents changed; note: directionalLights must be transformed to Environment map local space. 
     bool                            Update( nvrhi::ICommandList * commandList, donut::engine::BindingCache & bindingCache, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const BakeSettings & settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate );
 
@@ -101,6 +104,8 @@ public:
     bool                            DebugGUI(float indent);
 
     bool                            IsProcedural() const            { return IsProceduralSky( m_loadedSourceBackgroundPath.c_str() ); }
+    // PreUpdate/Update would flush to the graphics queue or swap the cube (new bindings); mirrors their conditions
+    bool                            NeedsGraphicsQueue(const std::string & envMapBackgroundPath) const;
     const std::shared_ptr<SampleProceduralSky> &
                                     GetProceduralSky() const        { return m_proceduralSky; }
 
@@ -114,12 +119,15 @@ public:
     nvrhi::TextureHandle            GetBRDFLUT() const              { return m_brdfLUT; }
     bool                            IsBRDFLUTReady() const          { return m_brdfLUT != nullptr && m_brdfLUTGenerated; }
 
-    // Process an external cubemap with the specified options
-    // This allows reusing the mip generation, GGX filtering, and SH projection for external cubemaps (e.g., local RT cubemap)
+    // Process a cubemap with the specified options (mip generation, GGX filtering, SH projection).
+    // Used to derive the prefiltered specular + diffuse-irradiance cubes from the environment map.
+    // envParams (rotation + color/intensity) is applied to the source cube while filtering, so the
+    // resulting prefiltered/irradiance cubes are world-indexed and correctly scaled.
     void                            ProcessCubemap(
                                         nvrhi::ICommandList* commandList,
                                         donut::engine::BindingCache& bindingCache,
                                         nvrhi::TextureHandle sourceCubemap,
+                                        const EnvMapSceneParams& envParams,
                                         const CubemapProcessingOptions& options,
                                         const CubemapProcessingResults& results);
     
@@ -128,9 +136,9 @@ public:
     
 private:
     void                            GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
-                                        nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap);
+                                        nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap, const EnvMapSceneParams& envParams);
     void                            ConvolveDiffuseIrradiance(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache,
-                                        nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap);
+                                        nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap, const EnvMapSceneParams& envParams);
     void                            GenerateCubemapMips(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
                                         nvrhi::TextureHandle cubemap);
 
@@ -191,7 +199,7 @@ private:
     uint                            m_bakedLightCount = 0;
 
     int                             m_compressionQuality = 1;       // 0 - disabled; 1 - low quality; 2 - high quality
-    bool                            m_outputIsCompressed = false;   // updated in Update() - it reflects current state of textures while 'm_compressionQuality' reflects required (future) state
+    bool                            m_outputIsCompressed = false;   // chosen in PreUpdate() from 'm_compressionQuality' (see there); Update() writes the texture it selects
 
     std::shared_ptr<SampleProceduralSky>
                                     m_proceduralSky;
@@ -215,10 +223,12 @@ private:
     // GGX pre-filtering for specular IBL - managed by ComputePipelineBaker for hot reload
     std::shared_ptr<ComputeShaderVariant> m_ggxPrefilterVariant;
     nvrhi::BindingLayoutHandle      m_ggxPrefilterBindingLayout;
+    nvrhi::BufferHandle             m_ggxPrefilterConstantBuffer;   // volatile CB: GGXPrefilterConstants embeds EnvMapSceneParams, too large for root/push constants
 
     // Diffuse irradiance convolution (SH-based) - managed by ComputePipelineBaker for hot reload
     std::shared_ptr<ComputeShaderVariant> m_irradianceConvolveVariant;
     nvrhi::BindingLayoutHandle      m_irradianceConvolveBindingLayout;
+    nvrhi::BufferHandle             m_irradianceConvolveConstantBuffer; // volatile CB: IrradianceConvolveConstants embeds EnvMapSceneParams
 
     // Reference to compute pipeline baker for hot reload support
     std::shared_ptr<ComputePipelineBaker> m_computePipelineBaker;

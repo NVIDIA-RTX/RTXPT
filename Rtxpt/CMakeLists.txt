@@ -11,8 +11,8 @@ include(../External/Donut/compileshaders.cmake)
 file(GLOB_RECURSE shaders "*.hlsl" "*.hlsli")
 file(GLOB_RECURSE shared_sources "*.cpp" "*.h" "*.md")
 # Separate out shared sources from entry point files
-list(REMOVE_ITEM shared_sources 
-    "${CMAKE_CURRENT_SOURCE_DIR}/IntroSample.cpp"
+list(REMOVE_ITEM shared_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/IntroSample/IntroSample.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/AdvancedSample.cpp"
 )
 
@@ -36,15 +36,19 @@ set(SHADERMAKE_OPTIONS_SPIRV "")
 endif()
 
 if(DONUT_WITH_AFTERMATH OR DONUT_EMBED_SHADER_PDBS)
-    set(shadermake_options --embedPDB)
+    set(shadermake_options "--embedPDB")
 #else()
-#    set(shadermake_options --PDB)
+#    set(shadermake_options "--PDB")
 endif()
 
 #set(shadermake_options --verbose)
 
 if(RTXPT_D3D_AGILITY_SDK_VERSION AND (RTXPT_D3D_AGILITY_SDK_VERSION GREATER_EQUAL "619"))
-    set(shadermake_options "-m 6_9")
+    # Appended to the string, not set over it: overwriting would silently drop the --embedPDB above and
+    # leave the precompiled shaders with no debug info. It has to stay ONE string rather than become a
+    # list - donut_compile_shaders declares SHADERMAKE_OPTIONS as a one-value keyword, so a second list
+    # element is dropped, and losing "-m 6_9" this way fails the build at SM 6.5 on AllocateRayQuery2.
+    string(APPEND shadermake_options " -m 6_9")
 endif()
 
 donut_compile_shaders(
@@ -54,8 +58,8 @@ donut_compile_shaders(
     FOLDER ${folder}
     DXIL ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/${project}/dxil
     SPIRV_DXC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/${project}/spirv
-    INCLUDES ${CMAKE_SOURCE_DIR}/External/Nrd/Shaders/Include ${CMAKE_SOURCE_DIR}/External/Rtxdi/Include ${CMAKE_SOURCE_DIR}/External
-    SHADERMAKE_OPTIONS ${shadermake_options}
+    INCLUDES ${CMAKE_SOURCE_DIR}/External/Nrd/Shaders ${CMAKE_SOURCE_DIR}/External/Rtxdi/Include ${CMAKE_SOURCE_DIR}/External
+    SHADERMAKE_OPTIONS "${shadermake_options}"
     SHADERMAKE_OPTIONS_DXIL ${SHADERMAKE_OPTIONS_DXIL}
     SHADERMAKE_OPTIONS_SPIRV ${SHADERMAKE_OPTIONS_SPIRV}
 )
@@ -63,38 +67,46 @@ donut_compile_shaders(
 
 ##########################################################################
 ################ dynamic shader recompile dependencies ###################
-set(DYNSH_COPY1_MARKER "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Tools/copyVK.marker")
-set(DYNSH_COPY2_MARKER "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Tools/copyDX.marker")
 set(DYNSH_COPY3_MARKER "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Source/copy.marker")
 
+# The runtime compilers are copied on every build (copy_if_different only updates changed files), not once behind a
+# marker - otherwise a DXC upgrade or a different DXC_SPIRV_PATH never reaches bin/ShaderDynamic/Tools.
+
+# DXC_CUSTOM_PATH and DXC_SPIRV_PATH are the build host's compilers; a cross-build ships the embedded DXC for the target instead
+set(DYNSH_CROSS_DXC_DIR "")
+if (NOT NVRHI_TARGET_ARCH STREQUAL NVRHI_HOST_ARCH)
+    set(DYNSH_CROSS_DXC_DIR "${CMAKE_SOURCE_DIR}/External/dxc/build/native/bin/${NVRHI_TARGET_ARCH}")
+endif()
+
 # vulkan SDK dxc (optional)
+set(DYNSH_COPY_VK_COMMANDS "")
 if (DXC_SPIRV_PATH)
 get_filename_component(DXC_SPIRV_PATH_MINUS_EXE ${DXC_SPIRV_PATH} DIRECTORY)
+if (DYNSH_CROSS_DXC_DIR)
+    set(DXC_SPIRV_PATH_MINUS_EXE "${DYNSH_CROSS_DXC_DIR}")
+endif()
 file(GLOB FILES_TO_COPY_2 "${DXC_SPIRV_PATH_MINUS_EXE}/*.exe" "${DXC_SPIRV_PATH_MINUS_EXE}/*.dll" "${DXC_SPIRV_PATH_MINUS_EXE}/*.json")
-set(DEST_DIR_2 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Tools/vk/x64")
-add_custom_command(
-    OUTPUT "${DYNSH_COPY1_MARKER}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic
+set(DEST_DIR_2 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Tools/vk/${NVRHI_TARGET_ARCH}")
+set(DYNSH_COPY_VK_COMMANDS
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_2}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FILES_TO_COPY_2} ${DEST_DIR_2}
-    COMMAND ${CMAKE_COMMAND} -E touch "${DYNSH_COPY1_MARKER}"
-    COMMENT "Copying ${DXC_SPIRV_PATH_MINUS_EXE} to ${DEST_DIR_2}"
 )
 endif()
 
 # d3d12 dxc
 set(SOURCE_DIR_1 "${DXC_CUSTOM_PATH}")
-set(DEST_DIR_1 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Tools/d3d12/x64")
+if (DYNSH_CROSS_DXC_DIR)
+    set(SOURCE_DIR_1 "${DYNSH_CROSS_DXC_DIR}")
+endif()
+set(DEST_DIR_1 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Tools/d3d12/${NVRHI_TARGET_ARCH}")
 # d3d12 linux dxc
 # ...
 
-add_custom_command(
-    OUTPUT "${DYNSH_COPY2_MARKER}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic
+add_custom_target(ShaderDynamicAssets ALL
+    ${DYNSH_COPY_VK_COMMANDS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_1}
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${SOURCE_DIR_1} ${DEST_DIR_1}
-    COMMAND ${CMAKE_COMMAND} -E touch "${DYNSH_COPY2_MARKER}"
-    COMMENT "Copying ${SOURCE_DIR_1} to ${DEST_DIR_1}"
+    COMMENT "Copying shader compilers"
 )
 
 # shader files - main rtxpt
@@ -107,6 +119,12 @@ set(DEST_DIR_DONUT_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Sour
 set(SOURCE_DIR_NVAPI_SHADERS "${PROJECT_SOURCE_DIR}/External/NVAPI")
 set(DEST_DIR_NVAPI_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Source/External/NVAPI")
 file(GLOB SOURCE_DIR_NVAPI_SHADERS_FILES "${SOURCE_DIR_NVAPI_SHADERS}/nvHLSL*.h" "${SOURCE_DIR_NVAPI_SHADERS}/nvShader*.h")
+# shader files - RTXDI shader dependencies
+set(SOURCE_DIR_RTXDI_SHADERS "${PROJECT_SOURCE_DIR}/External/Rtxdi/Include")
+set(DEST_DIR_RTXDI_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Source/External/Rtxdi/Include")
+# shader files - SHaRC shader dependencies
+set(SOURCE_DIR_SHARC_SHADERS "${PROJECT_SOURCE_DIR}/External/SHARC/include")
+set(DEST_DIR_SHARC_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Source/External/SHARC/include")
 #message("SourceDir=${SOURCE_DIR_RTXPT_SHADERS}, DestDir=${DEST_DIR_RTXPT_SHADERS}")
 add_custom_target(ShaderDynamicAssets_CopyAlways
 #    OUTPUT "${DYNSH_COPY3_MARKER}" <- let this run every build; it will only update changed
@@ -116,17 +134,19 @@ add_custom_target(ShaderDynamicAssets_CopyAlways
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${SOURCE_DIR_DONUT_SHADERS} ${DEST_DIR_DONUT_SHADERS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_NVAPI_SHADERS}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SOURCE_DIR_NVAPI_SHADERS_FILES} ${DEST_DIR_NVAPI_SHADERS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_RTXDI_SHADERS}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${SOURCE_DIR_RTXDI_SHADERS} ${DEST_DIR_RTXDI_SHADERS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_SHARC_SHADERS}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${SOURCE_DIR_SHARC_SHADERS} ${DEST_DIR_SHARC_SHADERS}
 #    COMMAND ${CMAKE_COMMAND} -E touch "${DYNSH_COPY3_MARKER}" <- let this run every build; it will only update changed
     COMMENT "Copying shader sources"
 )
-
-add_custom_target(ShaderDynamicAssets ALL DEPENDS "${DYNSH_COPY1_MARKER}" "${DYNSH_COPY2_MARKER}")
 
 ##########################################################################
 
 # Create a static library for shared code (used by both samples)
 add_library(RtxptCore STATIC ${shared_sources})
-target_link_libraries(RtxptCore PUBLIC cxxopts donut_render donut_app donut_engine NRD Rtxdi omm-lib omm-gpu-nvrhi)
+target_link_libraries(RtxptCore PUBLIC cxxopts donut_render donut_app donut_engine NRD Rtxdi omm-lib omm-gpu-nvrhi TracyClient)
 target_include_directories(RtxptCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "../External/Nrd/Include" ${CMAKE_SOURCE_DIR}/External/Rtxdi/Include)
 target_compile_definitions(RtxptCore PUBLIC RTXPT_D3D12_WITH_NVAPI=$<BOOL:${NVRHI_WITH_NVAPI}>)
 add_dependencies(RtxptCore rtxpt_shaders nrd_shaders omm_shaders ShaderDynamicAssets ShaderDynamicAssets_CopyAlways)
@@ -155,18 +175,26 @@ macro(add_rtxpt_sample TARGET_NAME MAIN_SOURCE)
     
     # AgilitySDK support for this target
     if (RTXPT_D3D_AGILITY_SDK_PATH AND RTXPT_D3D_AGILITY_SDK_VERSION)
-        target_compile_definitions(${project} PUBLIC RTXPT_D3D_AGILITY_SDK_VERSION=${RTXPT_D3D_AGILITY_SDK_VERSION})
+        target_compile_definitions(${TARGET_NAME} PUBLIC RTXPT_D3D_AGILITY_SDK_VERSION=${RTXPT_D3D_AGILITY_SDK_VERSION})
         add_custom_command(
-            TARGET ${project} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${project}>/D3D12/"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/D3D12Core.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll "$<TARGET_FILE_DIR:${project}>/D3D12/"
+            TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${TARGET_NAME}>/D3D12/"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/${NVRHI_TARGET_ARCH}/D3D12Core.dll "$<TARGET_FILE_DIR:${TARGET_NAME}>/D3D12/"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/bin/${NVRHI_TARGET_ARCH}/d3d12SDKLayers.dll "$<TARGET_FILE_DIR:${TARGET_NAME}>/D3D12/"
         )
-        target_compile_definitions(${project} PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
-        target_include_directories(${project} PRIVATE ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/include)
+        target_compile_definitions(${TARGET_NAME} PRIVATE NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP=$<BOOL:${NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP}>)
+        target_include_directories(${TARGET_NAME} PRIVATE ${RTXPT_D3D_AGILITY_SDK_PATH}/build/native/include)
+    endif()
+
+    if (DONUT_WITH_AFTERMATH)
+        add_custom_command(
+            TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:${TARGET_NAME}> "$<TARGET_FILE_DIR:${TARGET_NAME}>/"
+            COMMAND_EXPAND_LISTS
+        )
     endif()
 endmacro()
 
 # Build both sample executables
-#add_rtxpt_sample(IntroSample "IntroSample.cpp") # Work in progress!
+add_rtxpt_sample(IntroSample "IntroSample/IntroSample.cpp")
 add_rtxpt_sample(Rtxpt "AdvancedSample.cpp")

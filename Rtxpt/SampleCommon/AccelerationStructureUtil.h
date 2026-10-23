@@ -32,6 +32,14 @@ namespace bvh
         uint32_t ommArrayDataBufferOffset = 0;
     };
 
+    // Whether this mesh's BLAS is refit every frame rather than built once. Drives the build-flag
+    // choice below, and must be the same predicate anything else uses to route a mesh - a BLAS built
+    // without AllowCompaction cannot be asked for its compacted size.
+    inline bool IsSkinnedMesh(const donut::engine::MeshInfo& mesh)
+    {
+        return mesh.skinPrototype.use_count() != 0;
+    }
+
     static nvrhi::rt::AccelStructDesc GetMeshBlasDesc(
         const Config& cfg,
         const donut::engine::MeshInfo& mesh,
@@ -91,7 +99,7 @@ namespace bvh
         }
 
         // don't compact acceleration structures that are built per frame
-        if (mesh.skinPrototype.use_count() != 0)
+        if (IsSkinnedMesh(mesh))
         {
             blasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace | (updateSkinMeshes ? nvrhi::rt::AccelStructBuildFlags::PerformUpdate : nvrhi::rt::AccelStructBuildFlags::AllowUpdate);
         }

@@ -44,7 +44,8 @@ public:
 public:
     ZoomSettings &                  Settings( )         { return m_settings; }
 
-     void                           Render( nvrhi::ICommandList * commandList, nvrhi::TextureHandle colorInOut );
+     // bindingCache must be cleared whenever colorInOut is recreated, or it pins the old texture - Sample's is.
+     void                           Render( nvrhi::ICommandList * commandList, donut::engine::BindingCache & bindingCache, nvrhi::TextureHandle colorInOut );
 
      bool                           KeyboardUpdate(int key, int scancode, int action, int mods);
      void                           MousePosUpdate(double xpos, double ypos);
@@ -62,7 +63,6 @@ private:
     ComputePass                     m_CSZoomTool;
 
     nvrhi::BindingLayoutHandle      m_bindingLayout;
-    donut::engine::BindingCache     m_bindingCache;
 
     donut::math::float2             m_lastMousePos;
 };

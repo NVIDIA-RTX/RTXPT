@@ -1,0 +1,242 @@
+/*
+* Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#ifndef __STANDARD_BSDF_HLSLI__ // using instead of "#pragma once" due to https://github.com/microsoft/DirectXShaderCompiler/issues/3943
+#define __STANDARD_BSDF_HLSLI__
+
+#include "../Config.h"
+
+#include "../Utils/Math/MathConstants.hlsli"
+#include "../Utils/Math/MathHelpers.hlsli"
+
+#include "IBSDF.hlsli"
+#include "BxDF.hlsli"
+
+/** Implementation of Falcor's standard surface BSDF.
+
+    The BSDF has the following lobes:
+    - Delta reflection (ideal specular reflection).
+    - Specular reflection using a GGX microfacet model.
+    - Diffuse reflection using Disney's diffuse BRDF.
+    - Delta transmission (ideal specular transmission).
+    - Specular transmission using a GGX microfacet model.
+    - Diffuse transmission.
+
+    The BSDF is a linear combination of the above lobes.
+*/
+struct StandardBSDF // : IBSDF
+{
+#if RecycleSelectSamples
+    static const int cRandomNumberCountForSampling = 3;
+#else
+    static const int cRandomNumberCountForSampling = 4;
+#endif
+
+    StandardBSDFData data;      ///< BSDF parameters.
+    // float3 emission;            ///< Radiance emitted in the incident direction (wi).
+
+    static StandardBSDF make( StandardBSDFData data ) 
+    { 
+        StandardBSDF d;
+        d.data = data;
+        //d.emission = emission;
+        return d;
+    }
+
+    float4 eval(const ShadingData shadingData, const float3 wo)
+    {
+        float3 wiLocal = shadingData.ToLocal(shadingData.V);
+        float3 woLocal = shadingData.ToLocal(wo);
+
+        FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+
+        return bsdf.eval(wiLocal, woLocal);
+    }
+
+    bool sample(const ShadingData shadingData, const float4 preGeneratedSamples, out BSDFSample result, bool useImportanceSampling)
+    {
+        if (!useImportanceSampling) return sampleReference(shadingData, preGeneratedSamples, result);
+
+        float3 wiLocal = shadingData.ToLocal(shadingData.V);
+        float3 woLocal = float3(0,0,0);
+
+        FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+#if RecycleSelectSamples
+        bool valid = bsdf.sample(wiLocal, woLocal, result.pdf, result.weight, result.lobe, result.lobeP, preGeneratedSamples.xyz);
+#else
+        bool valid = bsdf.sample(wiLocal, woLocal, result.pdf, result.weight, result.lobe, result.lobeP, preGeneratedSamples.xyzw);
+#endif
+        result.wo = shadingData.FromLocal(woLocal);
+
+        return valid;
+    }
+
+    float evalPdf(const ShadingData shadingData, const float3 wo, bool useImportanceSampling)
+    {
+        if (!useImportanceSampling) return evalPdfReference(shadingData, wo);
+
+        float3 wiLocal = shadingData.ToLocal(shadingData.V);
+        float3 woLocal = shadingData.ToLocal(wo);
+
+        FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+
+        return bsdf.evalPdf(wiLocal, woLocal);
+    }
+
+    void estimateSpecDiffBSDF( out float3 outDiffEstimate, out float3 outSpecEstimate, const float3 normal, const float3 viewVector )
+    {
+    #if 1
+        lpfloat dataRoughness = data.Roughness();
+        float alpha = dataRoughness * dataRoughness;
+        float roughness = alpha < kMinGGXAlpha ? 0.f : dataRoughness;
+
+        // Compute approximation of the albedos.
+        // For now use the blend weights and colors, but this should be improved to better numerically approximate the integrals.
+        lpfloat dataDiffuseTransmission = data.DiffuseTransmission();
+        lpfloat dataSpecularTransmission = data.SpecularTransmission();
+        lpfloat3 dataTransmission = data.Transmission();
+        lpfloat3 dataSpecular = data.Specular();
+        lpfloat3 diffuseReflectionAlbedo = (lpfloat(1.f) - dataDiffuseTransmission) * (lpfloat(1.f) - dataSpecularTransmission) * data.Diffuse();
+        lpfloat3 diffuseTransmissionAlbedo = dataDiffuseTransmission * dataTransmission * (lpfloat(1.f) - dataSpecularTransmission); // used to have  "* (1.f - dataSpecularTransmission)" too
+        lpfloat3 specularReflectionAlbedo = (lpfloat(1.f) - dataSpecularTransmission) * dataSpecular;
+        lpfloat3 specularTransmissionAlbedo = dataSpecularTransmission * dataTransmission;
+
+        // Note - not clamping estimate here - it can be zero; clamp it at use location
+        outDiffEstimate = diffuseReflectionAlbedo+diffuseTransmissionAlbedo; // note, also adding base path throughput to modulation here!
+        const float NdotV = saturate(dot(normal, viewVector));
+        const float ggxAlpha = roughness * roughness;
+        float3 specularReflectance = approxSpecularIntegralGGX(specularReflectionAlbedo, ggxAlpha, NdotV); // note, also adding base path throughput to modulation here!
+        specularReflectance += specularTransmissionAlbedo; // best approximation for now
+        outSpecEstimate = specularReflectance;
+     #else
+        outDiffEstimate = float3(1,1,1);
+        outSpecEstimate = float3(1,1,1);
+     #endif
+    }
+
+    #if 0
+    BSDFProperties getProperties(const ShadingData shadingData)
+    {
+        BSDFProperties p; p.flags = 0; // = {};
+
+        // p.emission = emission;
+
+        // Clamp roughness so it's representable of what is actually used in FalcorBSDF.
+        // Roughness^2 below kMinGGXAlpha is used to indicate perfectly smooth surfaces.
+        lpfloat dataRoughness = data.Roughness();
+        float alpha = dataRoughness * dataRoughness;
+        p.roughness = alpha < kMinGGXAlpha ? 0.f : dataRoughness;
+
+
+        // Compute approximation of the albedos.
+        // For now use the blend weights and colors, but this should be improved to better numerically approximate the integrals.
+        lpfloat dataDiffuseTransmission = data.DiffuseTransmission();
+        lpfloat dataSpecularTransmission = data.SpecularTransmission();
+        lpfloat3 dataTransmission = data.Transmission();
+        lpfloat3 dataSpecular = data.Specular();
+        p.diffuseReflectionAlbedo = (1.f - dataDiffuseTransmission) * (1.f - dataSpecularTransmission) * data.Diffuse();
+        p.diffuseTransmissionAlbedo = dataDiffuseTransmission * dataTransmission * (1.f - dataSpecularTransmission); // used to have  "* (1.f - dataSpecularTransmission)" too
+        p.specularReflectionAlbedo = (1.f - dataSpecularTransmission) * dataSpecular;
+        p.specularTransmissionAlbedo = dataSpecularTransmission * dataTransmission;
+
+        // Pass on our specular reflectance field unmodified.
+        p.specularReflectance = dataSpecular;
+
+        if (dataDiffuseTransmission > 0.f || dataSpecularTransmission > 0.f) p.flags |= (uint)BSDFProperties::Flags::IsTransmissive;
+
+        return p;
+    }
+    #endif
+
+    uint getLobes(const ShadingData shadingData)
+    {
+        return FalcorBSDF::getLobes(data);
+    }
+
+
+    // Additional functions
+
+    /** Reference implementation that uses cosine-weighted hemisphere sampling.
+        This is for testing purposes only.
+        \param[in] sd Shading data.
+        \param[in] sampleGenerator Sample generator.
+        \param[out] result Generated sample. Only valid if true is returned.
+        \return True if a sample was generated, false otherwise.
+    */
+    bool sampleReference(const ShadingData shadingData, const float4 preGeneratedSamples, out BSDFSample result)
+    {
+        const bool isTransmissive = (getLobes(shadingData) & (uint)LobeType::Transmission) != 0;
+
+        float3 wiLocal = shadingData.ToLocal(shadingData.V);
+        float3 woLocal = sample_cosine_hemisphere_concentric(preGeneratedSamples.xy, result.pdf); // pdf = cos(theta) / pi
+
+        if (isTransmissive)
+        {
+            if (preGeneratedSamples.z < 0.5f)
+            {
+                woLocal.z = -woLocal.z;
+            }
+            result.pdf *= 0.5f;
+            if (min(abs(wiLocal.z), abs(woLocal.z)) < kMinCosTheta || result.pdf == 0.f) return false;
+        }
+        else
+        {
+            if (min(wiLocal.z, woLocal.z) < kMinCosTheta || result.pdf == 0.f) return false;
+        }
+
+        FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+
+        result.wo = shadingData.FromLocal(woLocal);
+        result.weight = (bsdf.eval(wiLocal, woLocal).rgb) / result.pdf;
+        result.lobe = (uint)(woLocal.z > 0.f ? (uint)LobeType::DiffuseReflection : (uint)LobeType::DiffuseTransmission);
+
+        return true;
+    }
+
+    /** Evaluates the directional pdf for sampling the given direction using the reference implementation.
+        \param[in] sd Shading data.
+        \param[in] wo Outgoing direction.
+        \return PDF with respect to solid angle for sampling direction wo.
+    */
+    float evalPdfReference(const ShadingData shadingData, const float3 wo)
+    {
+        const bool isTransmissive = (getLobes(shadingData) & (uint)LobeType::Transmission) != 0;
+
+        float3 wiLocal = shadingData.ToLocal(shadingData.V);
+        float3 woLocal = shadingData.ToLocal(wo);
+
+        if (isTransmissive)
+        {
+            if (min(abs(wiLocal.z), abs(woLocal.z)) < kMinCosTheta) return 0.f;
+            return 0.5f * woLocal.z * K_1_PI; // pdf = 0.5 * cos(theta) / pi
+        }
+        else
+        {
+            if (min(wiLocal.z, woLocal.z) < kMinCosTheta) return 0.f;
+            return woLocal.z * K_1_PI; // pdf = cos(theta) / pi
+        }
+    }
+
+    void evalDeltaLobes(const ShadingData shadingData, out DeltaLobe deltaLobes[cMaxDeltaLobes], out int deltaLobeCount, out float nonDeltaPart)
+    {
+        float3 wiLocal = shadingData.ToLocal(shadingData.V);
+        
+        FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data); 
+        bsdf.evalDeltaLobes(wiLocal, deltaLobes, deltaLobeCount, nonDeltaPart);
+        
+        // local to world!
+        for ( uint i = 0; i < deltaLobeCount; i++ )
+            deltaLobes[i].dir = shadingData.FromLocal(deltaLobes[i].dir);
+    }
+
+
+};
+
+#endif // __STANDARD_BSDF_HLSLI__

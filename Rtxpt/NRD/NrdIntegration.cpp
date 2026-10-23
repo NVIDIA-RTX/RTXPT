@@ -12,9 +12,10 @@
 
 #if WITH_NRD
 
-static_assert(NRD_VERSION_MAJOR >= 4 && NRD_VERSION_MINOR >= 15, "Unsupported NRD version!");
+static_assert(NRD_VERSION_MAJOR >= 4 && NRD_VERSION_MINOR >= 17, "Unsupported NRD version!");
 
 #include "../SampleCommon/RenderTargets.h"
+#include "../SampleCommon/GpuProfiler.h"
 #include <nvrhi/utils.h>
 #include <donut/core/math/math.h>
 #include <donut/engine/View.h>
@@ -35,6 +36,28 @@ static void* NrdReallocate(void* userArg, void* memory, size_t size, size_t alig
 static void NrdFree(void* userArg, void* memory)
 {
     free(memory);
+}
+
+// NRD's PipelineDesc::shaderIdentifier is "fileName|macro1=value1|macro2=value2..." (or just "fileName")
+static void ParseNrdShaderIdentifier(const char* shaderIdentifier, std::string& outFileName, std::vector<donut::engine::ShaderMacro>& outMacros)
+{
+    const std::string identifier(shaderIdentifier);
+    const size_t firstSeparator = identifier.find('|');
+    outFileName = identifier.substr(0, firstSeparator);
+
+    size_t pos = firstSeparator;
+    while (pos != std::string::npos)
+    {
+        const size_t nextSeparator = identifier.find('|', pos + 1);
+        const size_t tokenLength = (nextSeparator == std::string::npos) ? std::string::npos : (nextSeparator - pos - 1);
+        const std::string token = identifier.substr(pos + 1, tokenLength);
+
+        const size_t equalsPos = token.find('=');
+        assert(equalsPos != std::string::npos);
+        outMacros.push_back({ token.substr(0, equalsPos), token.substr(equalsPos + 1) });
+
+        pos = nextSeparator;
+    }
 }
 
 static nvrhi::Format GetNvrhiFormat(nrd::Format format)
@@ -109,8 +132,6 @@ NrdIntegration::~NrdIntegration()
 
 bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::ShaderFactory& shaderFactory)
 {
-    const nrd::LibraryDesc& libraryDesc = nrd::GetLibraryDesc();
-
     const nrd::DenoiserDesc denoiserDescs[] =
     {
         { m_identifier, m_denoiser }
@@ -127,12 +148,12 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
     if (res != nrd::Result::SUCCESS)
         return false;
 
-    const nrd::InstanceDesc& instanceDesc = nrd::GetInstanceDesc(*m_instance); 
+    const nrd::InstanceDesc& instanceDesc = *nrd::GetInstanceDesc(*m_instance);
 
     constexpr uint32_t maxInFlightFrames = 4;
     const nvrhi::BufferDesc constantBufferDesc = nvrhi::utils::CreateVolatileConstantBufferDesc(
         instanceDesc.constantBufferMaxDataSize,
-        "NrdConstantBuffer", 
+        "NrdConstantBuffer",
         instanceDesc.descriptorPoolDesc.setsMaxNum * maxInFlightFrames);
 
     m_constantBuffer = m_device->createBuffer(constantBufferDesc);
@@ -178,11 +199,13 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
     {
         const nrd::PipelineDesc& nrdPipelineDesc = instanceDesc.pipelines[pipelineIndex];
 
-        std::string fileName = std::string("nrd/Nrd/Shaders/Source/") + nrdPipelineDesc.shaderFileName;
-        std::vector<donut::engine::ShaderMacro> macros = { {"NRD_COMPILER_DXC", "1"}, {"NRD_NORMAL_ENCODING", "2"}, {"NRD_ROUGHNESS_ENCODING", "1"} };
-        
+        std::string shaderFile;
+        std::vector<donut::engine::ShaderMacro> macros;
+        ParseNrdShaderIdentifier(nrdPipelineDesc.shaderIdentifier, shaderFile, macros);
+        std::string fileName = std::string("nrd/") + shaderFile;
+
         NrdPipeline pipeline;
-        pipeline.Shader = shaderFactory.CreateShader(fileName.c_str(), "main", &macros, nvrhi::ShaderType::Compute);
+        pipeline.Shader = shaderFactory.CreateShader(fileName.c_str(), instanceDesc.shaderEntryPoint, &macros, nvrhi::ShaderType::Compute);
 
         if (!pipeline.Shader)
         {
@@ -270,7 +293,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
 nvrhi::BindingLayoutHandle NrdIntegration::CreateConstantsAndSamplersBindingLayout(const nrd::InstanceDesc& instanceDesc)
 {
     nvrhi::BindingLayoutDesc layoutDesc;
-    layoutDesc.registerSpace = instanceDesc.rootSpaceIndex;
+    layoutDesc.registerSpace = instanceDesc.constantBufferAndSamplersSpaceIndex;
     layoutDesc.registerSpaceIsDescriptorSet = true;
     layoutDesc.visibility = nvrhi::ShaderType::Compute;
 
@@ -302,6 +325,7 @@ nvrhi::BindingLayoutHandle NrdIntegration::CreateConstantsAndSamplersBindingLayo
 nvrhi::BindingLayoutHandle NrdIntegration::CreateResourcesBindingLayout(const nrd::InstanceDesc& instanceDesc, const nrd::PipelineDesc& nrdPipelineDesc)
 {
     nvrhi::BindingLayoutDesc layoutDesc;
+    layoutDesc.registerSpace = instanceDesc.resourcesSpaceIndex;
     layoutDesc.registerSpaceIsDescriptorSet = true;
     layoutDesc.visibility = nvrhi::ShaderType::Compute;
 
@@ -414,7 +438,7 @@ void NrdIntegration::RunDenoiserPasses(
     uint32_t dispatchDescNum = 0;
     nrd::GetComputeDispatches(*m_instance, &m_identifier, 1, dispatchDescs, dispatchDescNum);
 
-    const nrd::InstanceDesc& instanceDesc = nrd::GetInstanceDesc(*m_instance);
+    const nrd::InstanceDesc& instanceDesc = *nrd::GetInstanceDesc(*m_instance);
 
     for (uint32_t dispatchIndex = 0; dispatchIndex < dispatchDescNum; dispatchIndex++)
     {
@@ -422,7 +446,7 @@ void NrdIntegration::RunDenoiserPasses(
 
         if (dispatchDesc.name)
         {
-            commandList->beginMarker(dispatchDesc.name);
+            GpuProfiler::Begin(commandList, dispatchDesc.name);
         }
 
         assert(m_constantBuffer);
@@ -537,7 +561,7 @@ void NrdIntegration::RunDenoiserPasses(
 
         if (dispatchDesc.name)
         {
-            commandList->endMarker();
+            GpuProfiler::End(commandList);
         }
     }
 }

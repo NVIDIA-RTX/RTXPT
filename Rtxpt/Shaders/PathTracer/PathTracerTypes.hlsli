@@ -14,18 +14,13 @@
 #include "Config.h"    
 
 #include "Utils/Math/Ray.hlsli"
-#include "Rendering/Materials/TexLODHelpers.hlsli"
-#include "Scene/Material/TextureSampler.hlsli"
-#include "Scene/ShadingData.hlsli"
-#include "Scene/Material/ShadingUtils.hlsli"
-#include "Rendering/Materials/LobeType.hlsli"
-#include "Rendering/Materials/IBSDF.hlsli"
-#include "Rendering/Materials/StandardBSDF.hlsli"
+#include "Utils/TexLODHelpers.hlsli"
+#include "Utils/TextureSampler.hlsli"
 #include "PathState.hlsli"
 #include "PathTracerDebug.hlsli"
 #include "PathTracerHelpers.hlsli"
 #include "PathPayload.hlsli"
-#include "StablePlanes.hlsli"
+#include "DenoisingLayers.hlsli"
 
 #if ACTIVE_LOD_TEXTURE_SAMPLER == LOD_TEXTURE_SAMPLER_EXPLICIT
     #define ActiveTextureSampler ExplicitLodTextureSampler
@@ -45,51 +40,9 @@ namespace PathTracer
         RWTexture2D<float4>     OutputColor;
         PathTracerConstants     PtConsts;
         DebugContext            Debug;
-        StablePlanesContext     StablePlanes;
+        DenoisingLayersContext     DenoisingLayers;
     };
 
-    /** All surface data returned by the Bridge::loadSurface
-    */
-    struct SurfaceData
-    {
-        ShadingData     shadingData;
-        ActiveBSDF      bsdf;
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES  // otherwise motion vectors not needed
-        float3          prevPosW;                           // <-- consider storing delta instead of prevPosW and then fp16 might be enough
-#endif
-        lpfloat         interiorIoR;    // a.k.a. material IoR
-#if !RTXPT_USE_APPROXIMATE_MIS
-#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
-        uint            neeTriangleLightIndex;  // 0xFFFFFFFF if none
-#endif
-#endif
-#if !defined(RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY) || RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY
-        uint            neeAnalyticLightIndex;  // 0xFFFFFFFF if none
-#endif
-        static SurfaceData make( ShadingData shadingData, ActiveBSDF bsdf, 
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
-                                float3 prevPosW, 
-#endif
-                                lpfloat interiorIoR, uint neeTriangleLightIndex, uint neeAnalyticLightIndex )
-        { 
-            SurfaceData ret; 
-            ret.shadingData             = shadingData; 
-            ret.bsdf                    = bsdf; 
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES // otherwise motion vectors not needed
-            ret.prevPosW                = prevPosW; 
-#endif
-            ret.interiorIoR             = interiorIoR; 
-#if !RTXPT_USE_APPROXIMATE_MIS
-#if !defined(RTXPT_MATERIAL_IS_EMISSIVE) || RTXPT_MATERIAL_IS_EMISSIVE
-            ret.neeTriangleLightIndex   = neeTriangleLightIndex;
-#endif
-#endif
-#if !defined(RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY) || RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY
-            ret.neeAnalyticLightIndex   = neeAnalyticLightIndex;
-#endif
-            return ret; 
-        }
-    };
 
     // Info used for figuring out MIS from the path's (BSDF) side
     struct NEEBSDFMISInfo

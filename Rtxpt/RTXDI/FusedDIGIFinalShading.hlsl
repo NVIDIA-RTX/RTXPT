@@ -34,15 +34,15 @@ void main(uint2 dispatchThreadID : SV_DispatchThreadID)
     {
         if (g_Const.ptConsts.denoisingEnabled)
         {
-            uint address = StablePlanesContext::ComputeDominantAddress(pixelPos, u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
-            float4 radiance     = Fp16ToFp32(u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg);
+            uint address = DenoisingLayersContext::ComputeDominantAddress(pixelPos, u_DenoisingLayersHeader, u_DenoisingLayersBuffer, u_StableRadiance, g_Const.ptConsts);
+            float4 radiance     = Fp16ToFp32(u_DenoisingLayersBuffer[address].PackedNoisyRadianceAndSpecAvg);
 
             if (hasDI)
                 radiance   += radianceAndSpecAvgDI;
             if (hasGI)
                 radiance   += radianceAndSpecAvgGI;
 
-            u_StablePlanesBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16( radiance );
+            u_DenoisingLayersBuffer[address].PackedNoisyRadianceAndSpecAvg = Fp32ToFp16( radiance );
         }
         else
         {

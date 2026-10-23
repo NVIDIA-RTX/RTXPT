@@ -26,6 +26,10 @@ namespace ShaderCompilerUtils
     // Size of SHA256 digest in bytes (32 bytes = 256 bits)
     constexpr size_t k_Sha256DigestSize = 32;
     
+    // Hash hex chars in cache file names: 96 bits keeps collisions negligible and the paths short (dxc.exe is not
+    // long-path aware); the full hash is still what detects command changes
+    constexpr size_t k_CacheFileHashHexChars = 24;
+
     // Computes SHA256 hash of a string and returns it as a hex string
     std::string ComputeSha256Hex(const std::string& input);
     
@@ -38,8 +42,7 @@ namespace ShaderCompilerUtils
     {
         std::filesystem::path   ShaderCompilerPath;             // Path to dxc.exe
         std::filesystem::path   ShadersPath;                    // Root path for shader sources
-        std::filesystem::path   ShadersPathExternalIncludes1;   // First external include path
-        std::filesystem::path   ShadersPathExternalIncludes2;   // Second external include path (can be empty)
+        std::vector<std::filesystem::path> IncludePaths;        // Include paths for dynamic shader compilation
         std::filesystem::path   ShaderBinariesPath;             // Output path for compiled binaries
         nvrhi::GraphicsAPI      GraphicsAPI;                    // D3D12 or Vulkan
         
@@ -49,6 +52,9 @@ namespace ShaderCompilerUtils
         
         // Returns the shader compiler executable path as a quoted string for command-line use
         std::string GetCompilerPathQuoted() const;
+
+        // Note to append to shader compile errors when the sources are under a long path; empty otherwise
+        std::string LongPathErrorHint() const;
     };
     
     //////////////////////////////////////////////////////////////////////////
@@ -76,7 +82,7 @@ namespace ShaderCompilerUtils
         bool                    Enable16BitTypes = true;
         bool                    WarningsAsErrors = true;
         bool                    AllResourcesBound = true;
-        bool                    EnableDebugPrint = true;
+        bool                    EnableDebugPrint = true;    // ignored for SPIR-V, see BuildDxcCommand
         
         // Additional macros to define
         std::vector<donut::engine::ShaderMacro> Macros;

@@ -15,7 +15,7 @@
 #include "../Libraries/ShaderDebug/ShaderDebug.hlsl"
 
 #include "PathPayload.hlsli"
-#include "StablePlanes.hlsli"
+#include "DenoisingLayers.hlsli"
 #if !defined(__cplusplus) // shader only!
 #include "PathState.hlsli"
 #endif
@@ -25,24 +25,24 @@
 enum class DebugViewType : int
 {
     Disabled,
-    DominantStablePlaneIndex,
+    DominantDenoisingLayerIndex,
 
-    StablePlane_VirtualRayLength,
-    StablePlane_MotionVectors,
-    StablePlane_Normals,
-    StablePlane_Roughness,
-    StablePlane_SpecAvg,
-    StablePlane_DiffBSDFEstimate,
-    StablePlane_DiffRadiance,
-    StablePlane_SpecBSDFEstimate,
-    StablePlane_SpecRadiance,
-    StablePlane_RelaxedDisocclusion,
-    StablePlane_DiffRadianceDenoised,
-    StablePlane_SpecRadianceDenoised,
-    StablePlane_CombinedRadianceDenoised,
-    StablePlane_ViewZ,
-    StablePlane_Throughput,
-    StablePlane_DenoiserValidation,
+    DenoisingLayer_VirtualRayLength,
+    DenoisingLayer_WorldMotionVectors,
+    DenoisingLayer_Normals,
+    DenoisingLayer_Roughness,
+    DenoisingLayer_SpecAvg,
+    DenoisingLayer_DiffBSDFEstimate,
+    DenoisingLayer_DiffRadiance,
+    DenoisingLayer_SpecBSDFEstimate,
+    DenoisingLayer_SpecRadiance,
+    DenoisingLayer_RelaxedDisocclusion,
+    DenoisingLayer_DiffRadianceDenoised,
+    DenoisingLayer_SpecRadianceDenoised,
+    DenoisingLayer_CombinedRadianceDenoised,
+    DenoisingLayer_ViewZ,
+    DenoisingLayer_Throughput,
+    DenoisingLayer_DenoiserValidation,
     
     StableRadiance,
 
@@ -98,7 +98,7 @@ struct DebugConstants
 	float   debugLineScale;
     bool    showWireframe;
     int     debugViewType;
-    int     debugViewStablePlaneIndex;
+    int     debugViewDenoisingLayerIndex;
     int     exploreDeltaTree;
     int     imageWidth;
     int     imageHeight;
@@ -140,7 +140,7 @@ struct DeltaTreeVizPathVertex
         const               
 #endif
     {
-        return StablePlanesGetParentLobeID(stableBranchID);
+        return DenoisingLayersGetParentLobeID(stableBranchID);
     }
 };
 
@@ -155,14 +155,14 @@ struct DeltaTreeVizHeader
     uint            sampleIndex;
 
      int            searchStackCount;
-    uint            dominantStablePlaneIndex;
+    uint            dominantDenoisingLayerIndex;
     uint            padding1;
     uint            padding2;
 
     uint4           stableBranchIDs;
 
 //#if !defined(__cplusplus) // shader only!
-    static DeltaTreeVizHeader make()            { DeltaTreeVizHeader ret; ret.pixelPos = uint2(0,0); ret.nodeCount = 0; ret.sampleIndex = 0; ret.searchStackCount = 0; ret.dominantStablePlaneIndex = 0xFFFFFFFF; ret.padding1 = 0; ret.padding2 = 0; ret.stableBranchIDs = uint4(cStablePlaneInvalidBranchID,cStablePlaneInvalidBranchID,cStablePlaneInvalidBranchID,cStablePlaneInvalidBranchID); return ret; }
+    static DeltaTreeVizHeader make()            { DeltaTreeVizHeader ret; ret.pixelPos = uint2(0,0); ret.nodeCount = 0; ret.sampleIndex = 0; ret.searchStackCount = 0; ret.dominantDenoisingLayerIndex = 0xFFFFFFFF; ret.padding1 = 0; ret.padding2 = 0; ret.stableBranchIDs = uint4(cDenoisingLayerInvalidBranchID,cDenoisingLayerInvalidBranchID,cDenoisingLayerInvalidBranchID,cDenoisingLayerInvalidBranchID); return ret; }
 //#endif
 };
 
@@ -217,7 +217,11 @@ struct DebugContext
 
     bool IsDebugPixel( uint2 pixelPos )
     {
+#if RTXPT_SHARC_TRAIN   // training paths land on a random pixel of their block; they'd reset and overwrite the picked pixel's output
+        return false;
+#else
         return all( pixelPos == uint2(constants.pickX, constants.pickY) );
+#endif
         //isDebugPixel        = all( pixelPos >= uint2(constants.pickX-1, constants.pickY-1) & pixelPos <= uint2(constants.pickX+1, constants.pickY+1) );
     }
 
@@ -343,50 +347,54 @@ struct DebugContext
         return false;
 #endif
     }
-    void DeltaTreeStoreStablePlaneID(uint stablePlaneIndex, uint stableBranchID)
+    void DeltaTreeStoreDenoisingLayerID(uint denoisingLayerIndex, uint stableBranchID)
     {
 #if ENABLE_DEBUG_VIZUALISATIONS
-        feedbackBufferUAV[0].deltaPathTree.stableBranchIDs[stablePlaneIndex] = stableBranchID;
+        feedbackBufferUAV[0].deltaPathTree.stableBranchIDs[denoisingLayerIndex] = stableBranchID;
 #endif
     }
-    void DeltaTreeStoreDominantStablePlaneIndex(uint dominantStablePlaneIndex)
+    void DeltaTreeStoreDominantDenoisingLayerIndex(uint dominantDenoisingLayerIndex)
     {
 #if ENABLE_DEBUG_VIZUALISATIONS
-        feedbackBufferUAV[0].deltaPathTree.dominantStablePlaneIndex = dominantStablePlaneIndex;
+        feedbackBufferUAV[0].deltaPathTree.dominantDenoisingLayerIndex = dominantDenoisingLayerIndex;
 #endif
     }
 #endif // #if ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
 
 #if ENABLE_DEBUG_VIZUALISATIONS
-    void StablePlanesDebugViz(uint2 pixelPos, StablePlanesContext stablePlanes)
+    void DenoisingLayersDebugViz(uint2 pixelPos, DenoisingLayersContext denoisingLayers)
     {
-        if( (constants.debugViewType == (int)DebugViewType::Disabled || constants.debugViewType > (int)DebugViewType::StablePlane_SpecRadiance) && constants.debugViewType != (int)DebugViewType::StableRadiance )
+        if( (constants.debugViewType == (int)DebugViewType::Disabled || constants.debugViewType > (int)DebugViewType::DenoisingLayer_SpecRadiance) && constants.debugViewType != (int)DebugViewType::StableRadiance )
             return;
 
         float4 outColor = 0;
         
         // debug viz section
         {
-            uint stableBranchID = cStablePlaneInvalidBranchID; 
+            uint stableBranchID = cDenoisingLayerInvalidBranchID; 
         
             uint3 displayPos = uint3(pixelPos, 0);
 
             // split only valid for per-plane data
-            if ( constants.debugViewType >= (int)DebugViewType::StablePlane_VirtualRayLength && constants.debugViewType <= (int)DebugViewType::StablePlane_SpecRadiance )
-                displayPos = StablePlaneDebugVizFourWaySplitCoord(constants.debugViewStablePlaneIndex, pixelPos, uint2(constants.imageWidth, constants.imageHeight));
-            if ( displayPos.z < cStablePlaneCount ) 
-                stableBranchID = stablePlanes.GetBranchID(displayPos.xy, displayPos.z);
+            if ( constants.debugViewType >= (int)DebugViewType::DenoisingLayer_VirtualRayLength && constants.debugViewType <= (int)DebugViewType::DenoisingLayer_SpecRadiance )
+                displayPos = DenoisingLayerDebugVizFourWaySplitCoord(constants.debugViewDenoisingLayerIndex, pixelPos, uint2(constants.imageWidth, constants.imageHeight));
+            if ( displayPos.z < cDenoisingLayerCount ) 
+                stableBranchID = denoisingLayers.GetBranchID(displayPos.xy, displayPos.z);
 
-            if (stableBranchID == cStablePlaneInvalidBranchID)
+            if (stableBranchID == cDenoisingLayerInvalidBranchID)
             {
                 outColor = float4( ((pixelPos.x+pixelPos.y)%2).xxx, 1 );   // just dump checkerboard pattern
             }
             else
             {
-                StablePlane sp = stablePlanes.LoadStablePlane(displayPos.xy, displayPos.z);
+                DenoisingLayer sp = denoisingLayers.LoadDenoisingLayer(displayPos.xy, displayPos.z);
 
-                float3 rayOrigin; float3 rayDir; uint vertexIndex; float sceneLength; float3 thp; float3 motionVectors;
-                StablePlanesContext::UnpackStablePlane( sp, vertexIndex, rayOrigin, rayDir, sceneLength, thp, motionVectors );
+                float3 rayOrigin; float3 rayDir; uint vertexIndex; float sceneLength; float3 thp; float3 worldMotionVectors;
+                vertexIndex     = sp.VertexIndexAndRoughness>>16; // do not change before checking if used elsewhere
+                rayOrigin       = sp.RayOrigin;
+                sceneLength     = sp.SceneLength;
+                rayDir          = sp.RayDir;
+                UnpackTwoFp32ToFp16(sp.PackedThpAndMVs, thp, worldMotionVectors);
 
                 float rangeVizScale = 1.0 / 100.0;   // repeat pattern every 10 units
 
@@ -400,23 +408,23 @@ struct DebugContext
                 float3 rad  = sp.GetNoisyRadiance();
                 float specAvg = sp.GetNoisyRadianceAndSpecRA().a;
 
-                uint dominantSP = stablePlanes.LoadDominantIndex(pixelPos);
+                uint dominantSP = denoisingLayers.LoadDominantIndex(pixelPos);
 
-                float3 stableRadiance = stablePlanes.LoadStableRadiance(pixelPos);
+                float3 stableRadiance = denoisingLayers.LoadStableRadiance(pixelPos);
 
                 switch (constants.debugViewType)
                 {
-                case ((int)DebugViewType::DominantStablePlaneIndex):            outColor = float4( StablePlaneDebugVizColor(dominantSP), 1); break;
-                case ((int)DebugViewType::StablePlane_VirtualRayLength):        outColor = float4( sceneLengthCol, 1 ); break;
-                case ((int)DebugViewType::StablePlane_MotionVectors):           outColor = float4( 0.5 + motionVectors.xyz * float3(0.2, 0.2, 10), 1 ); break;
-                case ((int)DebugViewType::StablePlane_Normals):                 outColor = float4( DbgShowNormalSRGB(sp.GetNormal()), 1 ); break;
-                case ((int)DebugViewType::StablePlane_Roughness):               outColor = float4( sp.GetRoughness().xxx, 1 ); break;
-                case ((int)DebugViewType::StablePlane_SpecAvg):                 outColor = float4( specAvg.xxx, 1 ); break;
-                case ((int)DebugViewType::StablePlane_DiffBSDFEstimate):        outColor = float4( diffBSDFEstimate, 1 ); break;
-                case ((int)DebugViewType::StablePlane_DiffRadiance):            outColor = float4( diff.rgb, 1 ); break;
-                case ((int)DebugViewType::StablePlane_SpecBSDFEstimate):        outColor = float4( specBSDFEstimate, 1 ); break;
-                case ((int)DebugViewType::StablePlane_SpecRadiance):            outColor = float4( spec.rgb, 1 ); break;
-                case ((int)DebugViewType::StableRadiance):                      outColor = float4( sqrt(stablePlanes.LoadStableRadiance(pixelPos)), 1 ); break; // note: sqrt there is a cheap debug tonemapper :D
+                case ((int)DebugViewType::DominantDenoisingLayerIndex):         outColor = float4( DenoisingLayerDebugVizColor(dominantSP), 1); break;
+                case ((int)DebugViewType::DenoisingLayer_VirtualRayLength):     outColor = float4( sceneLengthCol, 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_WorldMotionVectors):   outColor = float4( 0.5 + 0.5 * Reinhard(20.0 * worldMotionVectors), 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_Normals):              outColor = float4( DbgShowNormalSRGB(sp.GetNormal()), 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_Roughness):            outColor = float4( sp.GetRoughness().xxx, 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_SpecAvg):              outColor = float4( specAvg.xxx, 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_DiffBSDFEstimate):     outColor = float4( diffBSDFEstimate, 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_DiffRadiance):         outColor = float4( diff.rgb, 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_SpecBSDFEstimate):     outColor = float4( specBSDFEstimate, 1 ); break;
+                case ((int)DebugViewType::DenoisingLayer_SpecRadiance):         outColor = float4( spec.rgb, 1 ); break;
+                case ((int)DebugViewType::StableRadiance):                      outColor = float4( sqrt(denoisingLayers.LoadStableRadiance(pixelPos)), 1 ); break; // note: sqrt there is a cheap debug tonemapper :D
                 }
             }
         }
@@ -425,18 +433,18 @@ struct DebugContext
         {
             uint2 mousePos = float2(constants.mouseX, constants.mouseY);
             uint3 mouseSrcPos = uint3(pixelPos, 0);
-            if ( constants.debugViewType >= (int)DebugViewType::StablePlane_VirtualRayLength && constants.debugViewType <= (int)DebugViewType::StablePlane_SpecRadiance )
-                mouseSrcPos = StablePlaneDebugVizFourWaySplitCoord(constants.debugViewStablePlaneIndex, mousePos, uint2(constants.imageWidth, constants.imageHeight));
+            if ( constants.debugViewType >= (int)DebugViewType::DenoisingLayer_VirtualRayLength && constants.debugViewType <= (int)DebugViewType::DenoisingLayer_SpecRadiance )
+                mouseSrcPos = DenoisingLayerDebugVizFourWaySplitCoord(constants.debugViewDenoisingLayerIndex, mousePos, uint2(constants.imageWidth, constants.imageHeight));
 
-            uint stableBranchID = cStablePlaneInvalidBranchID; 
-            if ( mouseSrcPos.z < cStablePlaneCount ) 
-                stableBranchID = stablePlanes.GetBranchID(mouseSrcPos.xy, mouseSrcPos.z);
+            uint stableBranchID = cDenoisingLayerInvalidBranchID; 
+            if ( mouseSrcPos.z < cDenoisingLayerCount ) 
+                stableBranchID = denoisingLayers.GetBranchID(mouseSrcPos.xy, mouseSrcPos.z);
 
-            if (stableBranchID != cStablePlaneInvalidBranchID)
+            if (stableBranchID != cDenoisingLayerInvalidBranchID)
             {
                 int detailInfoDigits = 0;
                 float4 detailInfoValue = 0;
-                StablePlane sp = stablePlanes.LoadStablePlane(mouseSrcPos.xy, mouseSrcPos.z);
+                DenoisingLayer sp = denoisingLayers.LoadDenoisingLayer(mouseSrcPos.xy, mouseSrcPos.z);
 
                 float3 diff = sp.GetNoisyDiffRadiance();
                 float3 spec = sp.GetNoisySpecRadiance();

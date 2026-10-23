@@ -10,6 +10,7 @@
 
 #include "Config.h"
 #include "Lighting/LightingTypes.hlsli"
+#include "../Libraries/SHaRC/SharcConstants.h"     // SharcConstants, embedded in PathTracerConstants
 
 #ifndef __PATH_TRACER_SHARED_H__
 #define __PATH_TRACER_SHARED_H__
@@ -18,7 +19,10 @@
 #pragma pack_matrix(row_major)
 #endif
 
-#define PATH_TRACER_MAX_PAYLOAD_SIZE     4*4*5    // PathPayload is 80 at the moment
+// with SM 6.7+ with PAQs enabled, this is ignored by the driver
+#define PATH_TRACER_MAX_PAYLOAD_SIZE     4*4*5    // PathPayload is 80 in every mode - the SHaRC training pass used
+                                                  // to push this to 176, but its per-path state is now in a scratch
+                                                  // buffer instead of the payload (see PathTracerSHaRC.hlsli)
 
 // Condensed version of ..\Falcor\Source\Falcor\Scene\Camera\CameraData.hlsli
 struct PathTracerCameraData
@@ -64,17 +68,17 @@ struct PathTracerConstants
     uint    useReSTIRGI;
     uint    _padding5;
 
-    float   stablePlanesSplitStopThreshold;
+    float   denoisingLayersSplitStopThreshold;
     float   _padding3;
     uint    _padding4;
-    float   stablePlanesSuppressPrimaryIndirectSpecularK;
+    float   denoisingLayersSuppressPrimaryIndirectSpecularK;
 
     float   denoiserRadianceClampK;
     float   DLSSRRBrightnessClampK;
-    float   stablePlanesAntiAliasingFallthrough;
-    uint    _activeStablePlaneCount;
+    float   denoisingLayersAntiAliasingFallthrough;
+    uint    _activeDenoisingLayerCount;
 
-    uint    maxStablePlaneVertexDepth;
+    uint    maxDenoisingLayerVertexDepth;
     uint    allowPrimarySurfaceReplacement;
     uint    genericTSLineStride;  // used for u_SurfaceData - might be a candidate for macro optimization
     uint    genericTSPlaneStride; // used for u_SurfaceData - might be a candidate for macro optimization
@@ -92,13 +96,14 @@ struct PathTracerConstants
     PathTracerCameraData camera;
     PathTracerCameraData prevCamera;
 
+    SharcConstants       sharc;
 
-    uint    GetActiveStablePlaneCount()
+    uint    GetActiveDenoisingLayerCount()
     {
-#if defined(RTXPT_ACTIVE_STABLE_PLANE_COUNT)
-        return RTXPT_ACTIVE_STABLE_PLANE_COUNT;
+#if defined(RTXPT_ACTIVE_DENOISING_LAYER_COUNT)
+        return RTXPT_ACTIVE_DENOISING_LAYER_COUNT;
 #else
-        return _activeStablePlaneCount;
+        return _activeDenoisingLayerCount;
 #endif
     }
 };
@@ -140,10 +145,5 @@ inline PathTracerCameraData BridgeCamera( uint viewportWidth, uint viewportHeigh
     return data;
 }
 #endif // __cplusplus
-
-inline float3  DbgShowNormalSRGB(float3 normal)
-{
-    return pow(abs(normal * 0.5f + 0.5f), 2.2f);
-}
 
 #endif // __PATH_TRACER_SHARED_H__

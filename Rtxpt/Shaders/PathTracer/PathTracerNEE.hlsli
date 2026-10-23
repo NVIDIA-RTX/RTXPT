@@ -36,7 +36,7 @@ float3 EnvironmentQuadLight::SampleLocalSpace(float3 localDir)
 namespace PathTracer
 {
     // switch this off to compile out entire NEE codepath!
-#if (1 && PT_NEE_ENABLED) || defined(__INTELLISENSE__)
+#if (PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD && PT_NEE_ENABLED) || defined(__INTELLISENSE__)
 
     inline float EvalSampleWeight( const LightSample lightSample, const ShadingData shadingData, const ActiveBSDF bsdf )
     {
@@ -85,13 +85,9 @@ namespace PathTracer
     };
 
     // Generates a light sample from all the available lights.
-    inline LightSample GenerateLightSample(const WorkingContext workingContext, const ShadingData shadingData, const ActiveBSDF bsdf, const uint candidateSampleCount, inout UniformSampleSequenceGenerator sampleGenerator, const LightSampler lightSampler)
+    inline LightSample GenerateLightSample(const WorkingContext workingContext, const ShadingData shadingData, const ActiveBSDF bsdf, const uint candidateSampleCount, uint localCount, uint globalCount, inout UniformSampleSequenceGenerator sampleGenerator, const LightSampler lightSampler)
     {
-        // NvReorderThread(0, 32);
         NEEWeightedReservoirSampler wrs = NEEWeightedReservoirSampler::make();
-        
-        uint localCount, globalCount;
-        lightSampler.GetCandidateSampleCounts(candidateSampleCount, localCount, globalCount);
         
         for (uint i = 0; i < candidateSampleCount; i++ )
         {
@@ -104,12 +100,23 @@ namespace PathTracer
             else
                 lightIndex = lightSampler.SampleGlobal( rnd, selectionPdf );
 
-            const PolymorphicLightInfoFull packedLightInfo = lightSampler.LoadLight(lightIndex);
-
-            // TODO: for LD sampling try the "reuse/recycle" trick
             const float2 interiorSampleRnd = sampleNext2D(sampleGenerator);
 
-            // NvReorderThread(PolymorphicLight::DecodeType(packedLightInfo), 32);
+#if POLYLIGHT_LIGHT_CLUSTER
+#if RTXPT_SHADER_DEBUG
+            const uint clusterLightIndex = lightIndex;
+            // The samplers must never hand out a light inside an active cluster, nor an inactive cluster (see ComputeProxyCounts, FillTile)
+            if( !LightCluster::IsDirectlySampleable(lightSampler.LightsBuffer[lightIndex]) )
+                BREAKPOINT();
+#endif
+            LightCluster::MaybeUnwrap(lightSampler.LightsBuffer, lightIndex, selectionPdf, sampleNext1D(sampleGenerator));
+#if RTXPT_SHADER_DEBUG
+            if( lightIndex != clusterLightIndex && PolymorphicLight::DecodeType(lightSampler.LightsBuffer[lightIndex]) == PolymorphicLightType::kLightCluster )
+                BREAKPOINT();   // clusters don't nest
+#endif
+#endif
+            const PolymorphicLightInfoFull packedLightInfo = lightSampler.LoadLight(lightIndex);
+
             PolymorphicLightSample lightSample = PolymorphicLight::CalcSample( packedLightInfo, interiorSampleRnd, shadingData.posW );
 
 			// an example on printf-debugging specific light type
@@ -171,7 +178,7 @@ namespace PathTracer
         float faceSide = dot(surfaceShadingNormal, lightSample.Direction) >= 0 ? 1 : -1;
 
         float3 surfaceFaceNormal = shadingData.faceNCorrected * faceSide;
-        float3 surfaceWorldPos = ComputeRayOrigin(shadingData.posW, surfaceFaceNormal);
+        float3 surfaceWorldPos = ComputeRayOrigin(shadingData.posW, surfaceFaceNormal, shadingData.PosErrorScale());
 
         RayDesc ret; 
         ret.Origin = surfaceWorldPos; 
@@ -182,7 +189,7 @@ namespace PathTracer
     }
 
     // This will ray cast and, if light visible, accumulate radiance properly, including doing weighted sum for 
-    void ProcessLightSample(inout NEEResult accum, LightSample lightSample, uint candidateSampleCount, uint fullSamples,
+    void ProcessLightSample(inout NEEResult accum, LightSample lightSample, uint candidateSampleCount, uint fullSamples, uint localCount, uint globalCount,
                                 const ShadingData shadingData, const ActiveBSDF bsdf, const PathState preScatterPath, LightSampler lightSampler,
                                 inout UniformSampleSequenceGenerator sampleGenerator, const WorkingContext workingContext)
     {
@@ -191,26 +198,22 @@ namespace PathTracer
         /*[branch]*/ if (lightSample.Valid())   // if sample's bad, skip; we tried casting the ray anyway but ignoring the results - didn't yield better perf
         {
             RayDesc ray = ComputeVisibilityRay(lightSample, shadingData);
-            visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), workingContext.Debug);
+            visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), preScatterPath.GetPixelPos(), workingContext.Debug);
         }
 
         // if( workingContext.Debug.IsDebugPixel() )
         //     DebugLine( shadingData.posW, shadingData.posW+lightSample.Direction*lightSample.Distance, float4(!visible,visible,0,1.0) );
 
 #if 0 && SER_USE_SORTING
-#if USE_NVAPI_REORDER_THREADS
-        NvReorderThread(visible?(1):(0), 16);
-#elif USE_DX_MAYBE_REORDER_THREADS
-        dx::MaybeReorderThread(visible?(1):(0), 16);
+        SER_REORDER( visible?(1):(0), 1 );
 #endif
-#endif
+
         /*[branch]*/ if (visible)
         {
             // add compute grazing angle fadeout
-            float fadeOut = (shadingData.shadowNoLFadeout>0)?(ComputeLowGrazingAngleFalloff( lightSample.Direction, shadingData.vertexN, shadingData.shadowNoLFadeout, 2.0 * shadingData.shadowNoLFadeout )):(1.0);
-
-            float localCount, globalCount;
-            lightSampler.GetCandidateSampleCounts(candidateSampleCount, localCount, globalCount);
+            float fadeOut = 1.0;
+            [branch] if( shadingData.ShadowTerminatorK()>0 )
+                fadeOut = ComputeLowGrazingAngleFalloff( lightSample.Direction, shadingData.GeometryNormal(), shadingData.ShadowTerminatorK(), 2.0 * shadingData.ShadowTerminatorK() );
 
             // Inner (WRS) MIS is essential for mixing samples from two pdf-s, one of which (Local) is mostly 0 except for the most important light sources contained by it
 #if !LATE_WRS_MIS
@@ -240,16 +243,19 @@ namespace PathTracer
             // compute radiance with MIS and other modifiers
             float3 radiance = bsdfThp.rgb * lightSample.Li;
             float radianceAvg = Average(radiance);
+            float luminance = Luminance(radiance);
             float specAvg = bsdfThp.w * Average(lightSample.Li);
 
-#if RTXPT_FIREFLY_FILTER && PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES  // firefly filter has cost - only enable if denoiser REALLY requires it
+#if RTXPT_FIREFLY_FILTER && PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD  // firefly filter has cost - only enable if denoiser REALLY requires it
             if( workingContext.PtConsts.fireflyFilterThreshold != 0 )
             {
                 const float pdf = lightSample.SelectionPdf * lightSample.SolidAnglePdf;
                 float neeFireflyFilterK = ComputeNewScatterFireflyFilterK(preScatterPath.GetFireflyFilterK(), pdf, 1.0);
                 const float ffDampening = FireflyFilterShort(radianceAvg, workingContext.PtConsts.fireflyFilterThreshold, neeFireflyFilterK);
                 radiance *= ffDampening;
-                // radianceAvg *= ffDampening; // radianceAvg used for NEE weight later - testing suggests it's same or better if not firefly-filtered
+                // specAvg *= ffDampening; // KNOWN ERROR, intentionally not fixed: without it filtered NEE samples skew the diffuse/specular
+                //                         // split toward specular, but specAvg will be removed in the future
+                // luminance *= ffDampening; // luminance used for NEE feedback weight later - testing suggests it's same or better if not firefly-filtered
             }
 #endif
 
@@ -258,18 +264,21 @@ namespace PathTracer
             float preScatterPathThpAvg = Average(preScatterThp);
             radiance *= preScatterThp;
             specAvg *= preScatterPathThpAvg;
-            radianceAvg *= preScatterPathThpAvg;
+            luminance *= preScatterPathThpAvg;
 
             // accumulate radiances
             accum.AccumulateRadiance( radiance, specAvg );
             
             // sample feedback for NEE-AT if needed!
-            if( lightSample.LightIndex != RTXPT_INVALID_LIGHT_INDEX && lightSampler.IsTemporalFeedbackRequired() )
+            if( lightSample.LightIndex != NEEAT_INVALID_LIGHT_INDEX && lightSampler.IsTemporalFeedbackRequired() )
             {
                 // compute light weigh as in "how much we want this light" - so include path throughput, BSDF and light; 
-                float feedbackWeight = radianceAvg;
+                float feedbackWeight = luminance;
 
-                lightSampler.InsertFeedbackFromNEE(lightSample.LightIndex, feedbackWeight, sampleNext1D(sampleGenerator));
+                // The sampled light even if drawn through a cluster: its pdf (cluster's / count) and boost keep its feedback on par with
+                // unclustered lights; ProcessFeedbackHistoryP0 diverts it to its cluster if that is still active next frame.
+                const float globalPdf = lightSample.FromLocalDistribution ? otherPdf : thisPdf;    // == SampleGlobalPDF(lightSample.LightIndex)
+                lightSampler.InsertFeedbackFromNEE(lightSample.LightIndex, globalPdf, feedbackWeight, sampleNext1D(sampleGenerator));
             }
         }
     }
@@ -283,18 +292,21 @@ namespace PathTracer
         const uint candidateSampleCount = workingContext.PtConsts.NEECandidateSamples;
         #endif
 
+        uint localCount, globalCount;
+        lightSampler.GetCandidateSampleCounts(candidateSampleCount, localCount, globalCount);
+
         NEEResult result = NEEResult::empty();
         result.BSDFMISInfo.LightSamplingEnabled = true;
         result.BSDFMISInfo.LightSamplingIsSSC   = lightSampler.IsScreenSpaceCoherent;
         result.BSDFMISInfo.CandidateSamples     = candidateSampleCount;
         result.BSDFMISInfo.FullSamples          = fullSamples;
-        
-        for (uint sampleIndex = 0; sampleIndex < fullSamples; sampleIndex++)
+
+        [unroll] for (uint sampleIndex = 0; sampleIndex < fullSamples; sampleIndex++)
         {
-            LightSample lightSample = GenerateLightSample(workingContext, shadingData, bsdf, candidateSampleCount, sampleGenerator, lightSampler);
+            LightSample lightSample = GenerateLightSample(workingContext, shadingData, bsdf, candidateSampleCount, localCount, globalCount, sampleGenerator, lightSampler);
 
             // this computes the BSDF throughput and (if throughput>0) then casts shadow ray and handles radiance summing up & weighted averaging for 'sample distance' used by denoiser
-            ProcessLightSample(result, lightSample, candidateSampleCount, fullSamples, shadingData, bsdf, preScatterPath, lightSampler, sampleGenerator, workingContext);
+            ProcessLightSample(result, lightSample, candidateSampleCount, fullSamples, localCount, globalCount, shadingData, bsdf, preScatterPath, lightSampler, sampleGenerator, workingContext);
         }
         
         return result;
@@ -316,8 +328,8 @@ namespace PathTracer
         const uint lobes = bsdf.getLobes(shadingData);
         const bool hasNonDeltaLobes = ((lobes & (uint) LobeType::NonDelta) != 0);
 
-        const bool onDominantBranch = preScatterPath.hasFlag(PathFlags::stablePlaneOnDominantBranch);
-        const bool onStablePlane = preScatterPath.hasFlag(PathFlags::stablePlaneOnPlane);
+        const bool onDominantBranch = preScatterPath.hasFlag(PathFlags::denoisingLayerOnDominantBranch);
+        const bool onDenoisingLayer = preScatterPath.hasFlag(PathFlags::denoisingLayerOnPlane);
 
         // Check if we should apply NEE.
         bool applyNEE = hasNonDeltaLobes;
@@ -327,10 +339,10 @@ namespace PathTracer
             return NEEResult::empty();
 
         // Check if sample from RTXDI should be applied instead of NEE.
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES && PT_USE_RESTIR_DI
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL && PT_USE_RESTIR_DI
         // When ReSTIR DI is handling lighting, we skip NEE; at the moment RTXDI handles only reflection; in the case of first bounce transmission we still don't attemp to use
         // NEE due to complexity, and also the future where ReSTIR DI might handle transmission.
-        if (hasNonDeltaLobes && onDominantBranch && onStablePlane)
+        if (hasNonDeltaLobes && onDominantBranch && onDenoisingLayer)
         {
             NEEResult result = NEEResult::empty();
             result.BSDFMISInfo.SkipEmissiveBRDF = true;

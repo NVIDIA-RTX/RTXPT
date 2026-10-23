@@ -25,7 +25,6 @@ using namespace donut::math;
 
 ZoomTool::ZoomTool( nvrhi::IDevice* device, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory )
     : m_device(device)
-    , m_bindingCache(device)
 { 
 
     nvrhi::BindingLayoutDesc layoutDesc;
@@ -78,7 +77,7 @@ bool ZoomTool::MouseButtonUpdate(int button, int action, int mods)
     return false;
 }
 
-void ZoomTool::Render( nvrhi::ICommandList * commandList, nvrhi::TextureHandle colorInOut )
+void ZoomTool::Render( nvrhi::ICommandList * commandList, donut::engine::BindingCache & bindingCache, nvrhi::TextureHandle colorInOut )
 {
     if( !m_settings.Enabled )
         return;
@@ -89,14 +88,14 @@ void ZoomTool::Render( nvrhi::ICommandList * commandList, nvrhi::TextureHandle c
     consts.ZoomFactor = m_settings.ZoomFactor;
 
     {
-        RAII_SCOPE(commandList->beginMarker("ZoomTool");, commandList->endMarker(); );
+        RTXPT_GPU_SCOPE(commandList, "ZoomTool");
 
         commandList->writeBuffer(m_constantBuffer, &consts, sizeof(consts));
         nvrhi::BindingSetDesc bindingSetDesc; bindingSetDesc.bindings = {
             nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
             nvrhi::BindingSetItem::Texture_UAV(0, colorInOut, nvrhi::Format::RGBA8_UNORM) };
 
-        nvrhi::BindingSetHandle bindingSet = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_bindingLayout);
+        nvrhi::BindingSetHandle bindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_bindingLayout);
 
         int threadGroupCountX = (colorInOut->getDesc().width + 16 - 1) / 16;
         int threadGroupCountY = (colorInOut->getDesc().height + 16 - 1) / 16;

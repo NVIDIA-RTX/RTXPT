@@ -1,0 +1,21 @@
+; Reference PSNR vs GOLD (two runs of the same build) - used by RegressionTesting-COMPARE.bat
+bistro-cam0-16384spp-denoised         43.3521
+bistro-cam1-16384spp-denoised         45.0772
+bistro-cam3-16384spp-denoised         44.7561
+convergence-test-16384spp-denoised    57.6616
+kitchen-16384spp-denoised             50.7276
+bistro-cam0-32spp-DLSSRR        38.748
+bistro-cam0-1spp-DLSSRR         33.081
+bistro-cam1-32spp-DLSSRR        42.1062
+bistro-cam1-1spp-DLSSRR         37.2694
+bistro-cam3-32spp-DLSSRR        39.8443
+bistro-cam3-1spp-DLSSRR         34.8476
+convergence-test-32spp-DLSSRR   51.9859
+convergence-test-1spp-DLSSRR    45.1415
+kitchen-32spp-DLSSRR            46.0458
+kitchen-1spp-DLSSRR             38.3725
+
+
+
+
+

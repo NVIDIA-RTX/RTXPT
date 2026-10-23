@@ -8,16 +8,15 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
-#include "PathTracer/Config.h" // must always be included first
+#include "../PathTracer/Config.h" // must always be included first
 
-#include "PathTracer/PathTracerTypes.hlsli"
+#include "../PathTracer/PathTracerTypes.hlsli"
 
-#include "Bindings/ShaderResourceBindings.hlsli"
-#include "Bindings/GBufferBindings.hlsli"
+#include "../Bindings/ShaderResourceBindings.hlsli"
+#include "../Bindings/GBufferBindings.hlsli"
 
-#include "PathTracerBridgeDonut.hlsli"
-#include "PathTracer/PathTracer.hlsli"
-#include "Bindings/GBufferBindings.hlsli"
+#include "IntroBridge.hlsli"
+#include "../Bindings/GBufferBindings.hlsli"
 #include "IntroCommon.hlsli"
 
 [shader("raygeneration")]
@@ -38,19 +37,22 @@ void RAYGEN_ENTRY()
     
     // Process Bounce
     PackedGBufferSurface gBuffer; // Intentionally uninitialized to save registers
-    gBuffer.SetBaseColor(0);
     
     // Dummy. Need to read this so we can share hit shaders with introPathTracer without payload qualifiers complaining.
     // This is suboptimal, but this populateGBuuffer pass is just a stand in for your regular G-Buffer raster.
-    gBuffer.SetBaseColor(payload.worldPos * payload.ambientOcclusion);
+    gBuffer.SetBaseColor(payload.worldPos);
     
+    float3 motionVector = 0;
     if (payload.hitDistance >= 0)
     {
         // Read material info
         gBuffer.SetBaseColor(payload.baseColor);
         gBuffer.SetSpecNormal(payload.normal);
         gBuffer.SetRoughnessMetal(payload.roughness, payload.metal);
-        gBuffer.packedMaterialInfo = payload.shaderId;
+        gBuffer.SetMaterialInfo(payload.shaderId, payload.opacity, payload.diffTx);
+        gBuffer.SetMaterialAO(payload.ao); // combined with screen-space AO later in the AO upscale pass
+        //gBuffer.SetMaterialAO(1.0 + 0 * payload.ao); // combined with screen-space AO later in the AO upscale pass
+        motionVector = payload.motionVector;
     }
     else
     {
@@ -59,10 +61,10 @@ void RAYGEN_ENTRY()
         gBuffer.SetBaseColor(0);
         gBuffer.SetSpecNormal(float3(0, 0, 1));
         gBuffer.SetRoughnessMetal(0, 0);
-        gBuffer.packedMaterialInfo = ShaderIdInvalid;
+        gBuffer.SetMaterialInfo(ShaderIdInvalid, 1);
+        gBuffer.SetMaterialAO(1.0);
     }
-
-    gBuffer.SetMaterialInfo(payload.shaderId, payload.ambientOcclusion);
+    
     gBuffer.StoreIntoRenderTargets(pixelPos);
     
     // Convert world position to NDC depth for SSR and other passes
@@ -76,7 +78,7 @@ void RAYGEN_ENTRY()
         u_Depth[pixelPos] = 0;
     }
     
-    u_MotionVectors[pixelPos] = float4(payload.motionVector, 0);
+    u_MotionVectors[pixelPos] = float4(motionVector, 0);
 }
 
 [shader("miss")]

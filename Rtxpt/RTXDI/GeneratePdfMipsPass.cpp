@@ -9,6 +9,7 @@
 */
 
 #include "GeneratePdfMipsPass.h"
+#include "../SampleCommon/GpuProfiler.h"
 #include <donut/engine/ShaderFactory.h>
 #include <nvrhi/utils.h>
 
@@ -76,7 +77,7 @@ GenerateMipsPass::~GenerateMipsPass(){}
 
 void GenerateMipsPass::Process(nvrhi::ICommandList* commandList)
 {
-    commandList->beginMarker("GenerateMips");
+    GpuProfiler::Begin(commandList, "GenerateMips");
     
     const auto& destDesc = m_destinationTexture->getDesc();
 
@@ -105,5 +106,5 @@ void GenerateMipsPass::Process(nvrhi::ICommandList* commandList)
         commandList->clearState(); // make sure nvrhi inserts a barrier
     }
 
-    commandList->endMarker();
+    GpuProfiler::End(commandList);
 }

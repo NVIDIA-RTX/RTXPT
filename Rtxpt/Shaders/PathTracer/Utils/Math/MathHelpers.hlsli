@@ -281,6 +281,23 @@ float3 sample_hemisphere(float2 u)
     return w;
 }
 
+/** Uniform sampling of the unit hemisphere centered along a unit direction
+    \param[in] u Uniform random numbers in [0,1)^2.
+    \param[in] unitDir Hemisphere center direction
+    \return Sampled point on the unit hemisphere.
+*/
+float3 sample_hemisphere(float2 u, float3 unitDir)
+{   
+    // Generate point on unit sphere
+    float3 dir = sample_sphere(u);
+    
+    // Ensure it's in the hemisphere around normal
+    if (dot(dir, unitDir) < 0.0)
+        dir = -dir;
+    
+    return dir;
+}
+
 /** Uniform sampling of the unit disk using Shirley's concentric mapping.
     \param[in] u Uniform random numbers in [0,1)^2.
     \return Sampled point on the unit disk.

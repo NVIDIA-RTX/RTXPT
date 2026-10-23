@@ -19,26 +19,22 @@
 #include "Utils/Math/Ray.hlsli"
 #include "Utils/ColorHelpers.hlsli"
 
-// NOTE: there is a better variant in https://github.com/NVIDIAGameWorks/dxvk-remix/blob/main/src/dxvk/shaders/rtx/concept/ray/ray_utilities.h  
-// It is more correct with regards to how the GPU performs ray triangle intersection, and the resulting errors (which aren't fully handled 
-// by the current ComputeRayOrigin below)
-//
-// Computes new ray origin based on hit position to avoid self-intersections. 
-// The function assumes that the hit position has been computed by barycentric interpolation, and not from the ray t which is less accurate.
-// Described in Ray Tracing Gems, Chapter 6, "A Fast and Robust Method for Avoiding Self-Intersection" by Carsten Wächter and Nikolaus Binder.
-float3 ComputeRayOrigin(float3 worldPosition, float3 faceNormal)  // expects triangle faceNormal pointing towards the intended ray direction
+// Computes new ray origin based on hit position to avoid self-intersections: offsets along faceNormal by a few fp32 ulps of
+// positionErrorScale, the world-space magnitude the position's rounding error scales with (see Bridge::loadSurface). Per-component
+// offsets (Ray Tracing Gems, Chapter 6, Wächter and Binder) slide the origin sideways when position components differ in magnitude,
+// leaking through corners and creases. Based on calculateRayOffset in https://github.com/NVIDIAGameWorks/dxvk-remix/blob/main/src/dxvk/shaders/rtx/concept/ray/ray_utilities.h
+// More principled solution exists here: https://developer.nvidia.com/blog/solving-self-intersection-artifacts-in-directx-raytracing/ ( https://github.com/NVIDIA/self-intersection-avoidance )
+float3 ComputeRayOrigin(float3 worldPosition, float3 faceNormal, float positionErrorScale)  // expects triangle faceNormal pointing towards the intended ray direction
 {
-    const float origin = 1.f / 16.f;
-    const float fScale = 3.f / 65536.f;
-    const float iScale = 3 * 256.f;
+    const float kOrigin = 1.f / 1024.f;
+    const float kOffsetScale = 4.f;   // ulps; self-intersection measurably starts at 1-2
+    return worldPosition + faceNormal * (max(kOrigin, positionErrorScale) * (kOffsetScale / 8388608.f));   // 2^23
+}
 
-    // Per-component integer offset to bit representation of fp32 position.
-    int3 iOff = int3(faceNormal * iScale);
-    float3 iPos = asfloat(asint(worldPosition) + select(worldPosition < 0.f, -iOff, iOff));
-
-    // Select per-component between small fixed offset or above variable offset depending on distance to origin.
-    float3 fOff = faceNormal * fScale;
-    return select(abs(worldPosition) < origin, worldPosition + fOff, iPos);
+// For world-space geometry (no instance transform), where the position alone sets the error scale.
+float3 ComputeRayOrigin(float3 worldPosition, float3 faceNormal)
+{
+    return ComputeRayOrigin(worldPosition, faceNormal, max(abs(worldPosition.x), max(abs(worldPosition.y), abs(worldPosition.z))));
 }
 
 // When applying direct lighting to opaque low poly geometry, there will be areas where triangle face is facing away from the light
@@ -77,8 +73,9 @@ float3 ComputeNonNormalizedRayDirPinhole( PathTracerCameraData data, uint2 pixel
 {
     // Compute sample position in screen space in [0,1] with origin at the top-left corner.
     // The camera jitter offsets the sample by +-0.5 pixels from the pixel center.
-    float2 p = (pixel + float2(0.5f, 0.5f) + jitter) / (float2)data.ViewportSize;
-    // if (applyJitter) p += float2(-data.jitterX, data.jitterY);
+    // BridgeCamera stores Jitter = pixelOffset * (1, -1), so this samples at center - pixelOffset: the point
+    // the jittered projection rasterizes at the pixel center. ComputeRayThinlens builds its direction here too.
+    float2 p = (pixel + float2(0.5f, 0.5f) + float2(-jitter.x, jitter.y)) / (float2)data.ViewportSize;
     float2 ndc = float2(2, -2) * p + float2(-1, 1);
 
     // Compute the non-normalized ray direction assuming a pinhole camera.
@@ -127,14 +124,9 @@ Ray ComputeRayThinlens( PathTracerCameraData data, uint2 pixel, float2 jitter, f
 {
     Ray ray;
 
-    // Sample position in screen space in [0,1] with origin at the top-left corner.
-    // The camera jitter offsets the sample by +-0.5 pixels from the pixel center.
-    float2 p = (pixel + float2(0.5f, 0.5f) + float2(-jitter.x, jitter.y)) / (float2)data.ViewportSize;
-    float2 ndc = float2(2, -2) * p + float2(-1, 1);
-
     // Compute the normalized ray direction assuming a thin-lens camera.
     ray.origin  = data.PosW;
-    ray.dir     = ndc.x * data.CameraU + ndc.y * data.CameraV + data.CameraW;
+    ray.dir     = ComputeNonNormalizedRayDirPinhole( data, pixel, jitter );
     float2 apertureSample = sample_disk(sample2D); // Sample lies in the unit disk [-1,1]^2
     float3 rayTarget = ray.origin + ray.dir;
     ray.origin  += data.ApertureRadius * (apertureSample.x * normalize(data.CameraU) + apertureSample.y * normalize(data.CameraV));
@@ -203,10 +195,10 @@ lpfloat ComputeNewScatterFireflyFilterK(const lpfloat currentK, float bouncePDF,
 }
 
 // Experimental: Biased cap to maximum radiance based on current vs starting ray cone spread angle, used as a rough estimate of probability of the path.
-lpfloat3 FireflyFilter(lpfloat3 signalIn, const lpfloat threshold, const lpfloat fireflyFilterK)
+float3 FireflyFilter(float3 signalIn, const float threshold, const lpfloat fireflyFilterK)
 {
-    lpfloat fireflyFilterThreshold = threshold * fireflyFilterK;
-    lpfloat maxR = Average( signalIn );   // we used to use 'luminance', but that will actually result in hue shift towards blue!
+    float fireflyFilterThreshold = threshold * fireflyFilterK;
+    float maxR = Average( signalIn );   // we used to use 'luminance', but that will actually result in hue shift towards blue!
     if( maxR > fireflyFilterThreshold )
         signalIn = signalIn / maxR * fireflyFilterThreshold;
     return signalIn;

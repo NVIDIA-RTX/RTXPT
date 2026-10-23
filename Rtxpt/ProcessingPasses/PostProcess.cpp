@@ -32,8 +32,8 @@ PostProcess::PostProcess( nvrhi::IDevice* device, std::shared_ptr<donut::engine:
         std::vector<donut::engine::ShaderMacro> shaderMacros;
         switch ((ComputePassType)i)
         {
-        case(ComputePassType::StablePlanesDebugViz):
-            shaderMacros.push_back(donut::engine::ShaderMacro({ "STABLE_PLANES_DEBUG_VIZ", "1" }));
+        case(ComputePassType::DenoisingLayersDebugViz):
+            shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISING_LAYERS_DEBUG_VIZ", "1" }));
             break;
         case(ComputePassType::RELAXDenoiserPrepareInputs):
             shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISER_PREPARE_INPUTS", "1" }));
@@ -50,10 +50,6 @@ PostProcess::PostProcess( nvrhi::IDevice* device, std::shared_ptr<donut::engine:
         case(ComputePassType::REBLURDenoiserFinalMerge): 
             shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISER_FINAL_MERGE", "1" }));
             shaderMacros.push_back(donut::engine::ShaderMacro({ "USE_RELAX", "0" }));
-            break;
-        case(ComputePassType::DLSSRRDenoiserPrepareInputs):
-            shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISER_PREPARE_INPUTS", "1" }));
-            shaderMacros.push_back(donut::engine::ShaderMacro({ "DENOISER_DLSS_RR", "1" }));
             break;
         case(ComputePassType::NoDenoiserFinalMerge):
             shaderMacros.push_back(donut::engine::ShaderMacro({ "NO_DENOISER_FINAL_MERGE", "1" }));
@@ -139,7 +135,7 @@ void PostProcess::Apply( nvrhi::ICommandList* commandList, ComputePassType passT
             nvrhi::BindingSetItem::Texture_SRV(5, (renderTargets.DenoiserOutValidation!=nullptr)?(renderTargets.DenoiserOutValidation):((nvrhi::TextureHandle)m_commonPasses->m_WhiteTexture.Get())),
             nvrhi::BindingSetItem::Texture_SRV(6, renderTargets.DenoiserViewspaceZ),
             nvrhi::BindingSetItem::Texture_SRV(7, renderTargets.DenoiserDisocclusionThresholdMix),
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(10, renderTargets.StablePlanesBuffer),
+            nvrhi::BindingSetItem::StructuredBuffer_SRV(10, renderTargets.DenoisingLayersBuffer),
             nvrhi::BindingSetItem::Sampler(0, (true) ? m_linearSampler : m_pointSampler),
             nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_shaderDebug->GetGPUWriteBuffer()),
             nvrhi::BindingSetItem::Texture_UAV(SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX, m_shaderDebug->GetDebugVizTexture()),

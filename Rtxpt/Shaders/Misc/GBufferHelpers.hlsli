@@ -12,11 +12,12 @@
 #define __GBUFFER_HELPERS_HLSLI__
 
 #include "../PathTracer/PathTracerTypes.hlsli"
+#include "../PathTracer/Surface/Surface.hlsli"
 
 struct PathTracerCollectedSurfaceData
 {
 	// Only store these (plus more, potentially)
-	MaterialHeader _mtl; // (2x uint)
+	ShadingFlags _mtl; // (2x uint)
 
 	// misc (mostly subset of struct ShadingData)
 	float3 _T;
@@ -25,10 +26,12 @@ struct PathTracerCollectedSurfaceData
 	float3 _V;
 	float3 _posW;
 	float3 _faceNCorrected;
+    float _posErrorScale;           // see ShadingData::PosErrorScale and ComputeRayOrigin
 	bool _frontFacing;
 	bool _isEmpty;
 	float _viewDepth;
 	uint _planeHash;
+    float _eta;
 
 	StandardBSDFData _data;      ///< BSDF parameters.
 
@@ -84,7 +87,7 @@ struct PathTracerCollectedSurfaceData
 		float3 wiLocal = _ToLocal(_V);
 		float3 woLocal = _ToLocal(wo);
 
-		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
+		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data, _eta);
 
 		return bsdf.eval(wiLocal, woLocal);
 	}
@@ -97,7 +100,7 @@ struct PathTracerCollectedSurfaceData
 		float3 wiLocal = _ToLocal(_V);
 		float3 woLocal = _ToLocal(wo);
 
-		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, roughBsdf);
+		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, roughBsdf, _eta);
 
 		return bsdf.eval(wiLocal, woLocal);
 	}
@@ -130,7 +133,7 @@ struct PathTracerCollectedSurfaceData
 		float3 wiLocal = _ToLocal(_V);
 		float3 woLocal = _ToLocal(wo);
 
-		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
+		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data, _eta);
 
 		return bsdf.evalPdf(wiLocal, woLocal);
 	}
@@ -158,7 +161,7 @@ struct PathTracerCollectedSurfaceData
 			if (min(wiLocal.z, woLocal.z) < kMinCosTheta || result.pdf == 0.f) return false;
 		}
 
-		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
+		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data, _eta);
 
 		result.wo = _FromLocal(woLocal);
         result.weight = bsdf.eval(wiLocal, woLocal).rgb / result.pdf;
@@ -174,7 +177,7 @@ struct PathTracerCollectedSurfaceData
 		float3 wiLocal = _ToLocal(_V);
 		float3 woLocal = float3(0, 0, 0);
 
-		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data);
+		FalcorBSDF bsdf = FalcorBSDF::make(_mtl, _N, _V, _data, _eta);
 #if RecycleSelectSamples
         bool valid = bsdf.sample(wiLocal, woLocal, result.pdf, result.weight, result.lobe, result.lobeP, sampleNext3D(sampleGenerator));
 #else
@@ -187,7 +190,7 @@ struct PathTracerCollectedSurfaceData
 
 	float3 ComputeNewRayOrigin(bool viewside = true)
 	{
-		return ComputeRayOrigin(_posW, (viewside) ? _faceNCorrected : -_faceNCorrected);
+        return ComputeRayOrigin(_posW, (viewside) ? _faceNCorrected : -_faceNCorrected, _posErrorScale);
 	}
 
 	float3 _ToLocal(float3 v)
@@ -203,17 +206,20 @@ struct PathTracerCollectedSurfaceData
 	static PathTracerCollectedSurfaceData create
 	(
 		 // FalcorBSDF
-		const MaterialHeader mtl,
+		const ShadingFlags mtl,
 		float3 T,
 		float3 B,
 		float3 N,
 		float3 V,
 		float3 posW,
 		float3 faceNCorrected,
+        float posErrorScale,
 		bool frontFacing,
 
 		float viewDepth,
 		const uint planeHash,
+
+        const float eta,
 
 		const StandardBSDFData data
 	)
@@ -231,11 +237,12 @@ struct PathTracerCollectedSurfaceData
 
 		surface._posW = posW;
 		surface._faceNCorrected = faceNCorrected;
+        surface._posErrorScale = posErrorScale;
 		surface._frontFacing = frontFacing;
 		surface._viewDepth = viewDepth;
 		surface._isEmpty = false;
 		surface._planeHash = planeHash;
-		//surface.dummy = 0;
+		surface._eta = eta;
 
 		return surface;
 	}
@@ -292,7 +299,7 @@ PackedPathTracerSurfaceData RunCompress(PathTracerCollectedSurfaceData d)
 {
 	PackedPathTracerSurfaceData c;
 
-	c._mtl = uint2(d._mtl.packedData, 0);
+    c._mtl = uint2(d._mtl.packedData, asuint(d._posErrorScale));
 	c._T = Fp32ToFp16(Encode_Oct(d._T));
 	c._N = Fp32ToFp16(Encode_Oct(d._N));
     float btNormal = -sign(dot( cross(d._T, d._N), d._B ));
@@ -304,7 +311,7 @@ PackedPathTracerSurfaceData RunCompress(PathTracerCollectedSurfaceData d)
 
 	c._diffuse = Encode_R11G11B10_FLOAT(d._data.Diffuse());
 	c._specular = Encode_R11G11B10_FLOAT(d._data.Specular());
-	c._roughnessMetallicEta = Encode_R11G11B10_FLOAT(float3(d._data.Roughness(), d._data.Metallic(), d._data.Eta()));
+	c._roughnessMetallicEta = Encode_R11G11B10_FLOAT(float3(d._data.Roughness(), d._data.Metallic(), d._eta));
 	c._transmission = Encode_R11G11B10_FLOAT(d._data.Transmission());
 	c._diffuseSpecularTransmission = Fp32ToFp16(float2(d._data.DiffuseTransmission(), d._data.SpecularTransmission()));
 
@@ -316,6 +323,7 @@ PathTracerCollectedSurfaceData RunDecompress(PackedPathTracerSurfaceData c)
 	PathTracerCollectedSurfaceData d;
 
 	d._mtl.packedData = c._mtl.x;
+    d._posErrorScale = asfloat(c._mtl.y);
     float4 VandTW = Fp16ToFp32(c._V);
 	d._T = Decode_Oct(Fp16ToFp32(c._T));
 	d._N = Decode_Oct(Fp16ToFp32(c._N));
@@ -360,12 +368,14 @@ PathTracerCollectedSurfaceData RunDecompress(PackedPathTracerSurfaceData c)
 	bsdfDataMetallic = roughnessMetallicEta.y;
 	bsdfDataEta = roughnessMetallicEta.z;
 
-    d._data = StandardBSDFData::make( bsdfDataDiffuse, bsdfDataSpecular, bsdfDataRoughness, bsdfDataMetallic, bsdfDataEta, bsdfDataTransmission, bsdfDataDiffuseTransmission, bsdfDataSpecularTransmission );
+    d._eta = bsdfDataEta;
+
+    d._data = StandardBSDFData::make( bsdfDataDiffuse, bsdfDataSpecular, bsdfDataRoughness, bsdfDataMetallic, bsdfDataTransmission, bsdfDataDiffuseTransmission, bsdfDataSpecularTransmission );
 
 	return d;
 }
 
-PathTracerCollectedSurfaceData CollectGBufferSurface(PathState path, PathTracer::SurfaceData surfaceData, const Ray cameraRay)
+PathTracerCollectedSurfaceData CollectGBufferSurface(PathState path, PathTracer::Surface surface, const Ray cameraRay)
 {
 	DebugContext debug;
 	debug.Init(g_Const.debug, u_FeedbackBuffer, u_DebugLinesBuffer, u_DebugDeltaPathTree, u_DeltaPathSearchStack);
@@ -382,24 +392,26 @@ PathTracerCollectedSurfaceData CollectGBufferSurface(PathState path, PathTracer:
         float viewDepth = mul(float4(virtualWorldPos, 1), g_Const.view.matWorldToView).z;
 #endif
 
-    const ShadingData shadingData   = surfaceData.shadingData;
-    const ActiveBSDF bsdf           = surfaceData.bsdf;
+    const ShadingData shadingData   = surface.shadingData;
+    const ActiveBSDF bsdf           = surface.bsdf;
 
 	uint lobes = bsdf.getLobes(shadingData);
 	if ((lobes & (uint)LobeType::NonDeltaReflection) != 0)
 	{
 		PathTracerCollectedSurfaceData surface = PathTracerCollectedSurfaceData::create(
-			shadingData.mtl,
-			shadingData.T,
-			shadingData.B,
+			shadingData.shadingFlags,
+			shadingData.T(),
+			shadingData.B(),
 			shadingData.N,
 			shadingData.V,
 			shadingData.posW,
 			shadingData.faceNCorrected,
+            shadingData.PosErrorScale(),
 			shadingData.frontFacing,
 				
 			viewDepth,
 			0,
+            shadingData.GetEta(),
 			
 			bsdf.data
 		);

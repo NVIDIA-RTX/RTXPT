@@ -87,7 +87,6 @@ namespace game
     struct ScreenGUISel
     {
         float2  ScreenPos       = {0,0};
-        float   ScreenRadius    = 0.0f;
         float   RangeToCamera   = FLT_MAX;
         bool    Selected        = false;
     };

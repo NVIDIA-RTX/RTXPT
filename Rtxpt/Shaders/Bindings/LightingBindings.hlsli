@@ -20,7 +20,7 @@
 TextureCube<float4> t_EnvironmentMap                                                : register(t10);
 Texture2D<float>    t_EnvironmentMapImportanceMap                                   : register(t11);
 
-StructuredBuffer<LightingControlData>       t_LightsCB                              : register(t12);
+StructuredBuffer<NEEAT::ControlData>        t_LightsCB                              : register(t12);
 StructuredBuffer<PolymorphicLightInfo>      t_Lights                                : register(t13);
 StructuredBuffer<PolymorphicLightInfoEx>    t_LightsEx                              : register(t14);
 
@@ -28,6 +28,7 @@ Buffer<uint>                                t_LightProxyCounters                
 Buffer<uint>                                t_LightProxyIndices                     : register(t16);
 Buffer<uint>                                t_LightLocalSamplingBuffer              : register(t17);
 Texture2D<uint>                             t_EnvLookupMap                          : register(t18);
+Buffer<float>                               t_LightWeightsBoost                     : register(t19);    // read-only view of LightsBaker's u_lightWeightsBoost; current frame only, so indexed directly by light index
 
 RWTexture2D<float>                          u_LightFeedbackTotalWeight              : register(u20);
 RWTexture2D<uint>  u_LightFeedbackCandidates               : register(u21);

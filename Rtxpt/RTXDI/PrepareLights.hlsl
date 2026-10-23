@@ -99,7 +99,7 @@ void main(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_G
         InstanceData instance = t_InstanceData[(task.instanceAndGeometryIndex >> 12) & 0x7FFFF];
         GeometryData geometry = t_GeometryData[instance.firstGeometryIndex + (task.instanceAndGeometryIndex & 0xfff)];
 
-        uint materialIndex = t_SubInstanceData[instance.firstGeometryInstanceIndex + (task.instanceAndGeometryIndex & 0xfff)].GlobalGeometryIndex_PTMaterialDataIndex & 0xFFFF;
+        uint materialIndex = t_SubInstanceData[instance.firstGeometryInstanceIndex + (task.instanceAndGeometryIndex & 0xfff)].AlphaTextureIndex_PTMaterialDataIndex & 0xFFFF;
         PTMaterialData material = t_PTMaterialData[materialIndex];
 
         // DebugPrint( "RTXDI: ii {0}; gi {1}, gii {2}, ti {3}, T0{4}, T1{5}, T2{6}", instanceIndex, geometryIndex, geometryInstanceIndex, triangleIdx, instance.transform[0], instance.transform[1], instance.transform[2] );
@@ -209,7 +209,7 @@ void main(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_G
         }
         triLight.radiance = radiance;
         
-        lightInfo = triLight.Store(0);
+        lightInfo = triLight.Store();
     }
     else
     {

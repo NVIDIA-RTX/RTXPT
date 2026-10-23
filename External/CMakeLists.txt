@@ -47,25 +47,21 @@ function(util_generate_shader_config_file OUT_FILE_NAME DIR DEFINES)
     file(WRITE ${OUT_FILE_NAME} ${out_content})
 endfunction()
 
-##########################################################################
-########################### Mathlib ###########################
-##########################################################################
-# Note: Fetching mathlib manually to bypass NRD trying to fetch an invalid
-# tag. This is fixed in latest NRD, so we can remove the workaround after
-# we update NRD again.
 
-if(NOT TARGET MathLib)
-    # MathLib
-    FetchContent_Declare(
-        mathlib
-        GIT_REPOSITORY https://github.com/NVIDIA-RTX/MathLib.git
-        GIT_TAG v7
-        GIT_SHALLOW 1
-    )
-    message("Downloading Mathlib")
+##########################################################################
+########################### Tracy ###########################
+##########################################################################
+option(TRACY_ENABLE "" ON)      # Tracy >= 0.14 defaults this to OFF
+option(TRACY_ON_DEMAND "" ON)   # only profile when viewer connects
+FetchContent_Declare (
+    tracy
+    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+    GIT_TAG v0.14.1
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS TRUE
+)
+FetchContent_MakeAvailable ( tracy )
 
-    FetchContent_MakeAvailable(mathlib)
-endif()
 
 ##########################################################################
 ########################### Nrd ###########################
@@ -89,24 +85,36 @@ option(NRD_DISABLE_SHADER_COMPILATION "" ON)
 option(NRD_USE_PRECOMPILED_SHADERS "" OFF)
 
 add_subdirectory("Nrd")
+# Debug and Release share bin/, so give the Debug DLL its own name (as RtxptD) rather than overwrite the Release one
+set_target_properties(NRD PROPERTIES DEBUG_POSTFIX "D")
 
-# Let CMake generate the nrd_shaders.cfg file 
-util_generate_shader_config_file(
-    "Nrd.cfg" 
-    "Nrd/Shaders/Source"
-    "-D NRD_COMPILER_DXC=1 -D NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING} -D NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING}"
-)
+# NRD's own Shaders.cfg already encodes the permutation macros (NRD_SIGNAL, NRD_MODE, ...) natively
+# understood by ShaderMake, and NRD.hlsli auto-includes the CMake-generated NRDConfig.hlsli (which
+# already bakes in NRD_NORMAL_ENCODING/NRD_ROUGHNESS_ENCODING) and auto-detects NRD_COMPILER_DXC,
+# so no custom config generation or extra defines are needed here anymore. NRD_INTERNAL still needs
+# to be passed explicitly (NRD's own CMakeLists.txt does the same for its embedded-shaders build,
+# see SHADERMAKE_GENERAL_ARGS in External/Nrd/CMakeLists.txt) - it gates the DIFF/SPEC/BOTH and
+# NRD_DIFF/NRD_SPEC permutation macros that Shaders.cfg's "-D NRD_SIGNAL={DIFF,SPEC,BOTH}" relies on.
+set(nrd_shadermake_options "-D NRD_INTERNAL")
 
-# Compile all shaders in nrd_shaders.cfg 
+# ShaderMake emits -Zi only when --PDB or --embedPDB is given, so without this NRD's shaders carry no
+# debug info at all and a profiler cannot resolve them - in Debug as well as Release, since nothing here
+# varies by configuration. Embedded rather than separate PDBs so the symbols cannot be the wrong build.
+# NRD's own CMakeLists never passes either flag, and its shader build is disabled above
+# (NRD_DISABLE_SHADER_COMPILATION), so this target is the only place it can be set.
+if(DONUT_WITH_AFTERMATH OR DONUT_EMBED_SHADER_PDBS)
+    string(APPEND nrd_shadermake_options " --embedPDB")
+endif()
+
 donut_compile_shaders(
     TARGET nrd_shaders
-    CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/Nrd.cfg
-    SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Include
+    CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Shaders.cfg
+    SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders
     FOLDER "NRD"
     DXIL ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/nrd/dxil
     SPIRV_DXC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderPrecompiled/nrd/spirv
-    CFLAGS "-WX -O3 -enable-16bit-types -all_resources_bound"
-    INCLUDES ${CMAKE_BINARY_DIR}/_deps/mathlib-src ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Include ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders/Resources
+    SHADERMAKE_OPTIONS "${nrd_shadermake_options}"
+    INCLUDES ${CMAKE_BINARY_DIR}/_deps/mathlib-src ${CMAKE_CURRENT_SOURCE_DIR}/Nrd/Shaders
 )
 
 ##########################################################################
@@ -119,9 +127,12 @@ option(OMM_ENABLE_PRECOMPILED_SHADERS_SPIRV "" OFF)
 option(OMM_ENABLE_BENCHMARK "" OFF)
 option(OMM_ENABLE_TESTS "" OFF)
 option(OMM_BUILD_VIEWER "" OFF)
+# OpenMP only serves the OMM CPU baker, which RTXPT doesn't use at the moment; FORCE as existing caches already hold ON
+set(OMM_ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
 
 set(OMM_PROJECT_FOLDER "Omm")
 add_subdirectory("Omm")
+set_target_properties(omm-lib PROPERTIES DEBUG_POSTFIX "D")    # see NRD above
 
 # Let CMake generate the omm_shaders.cfg file 
 util_generate_shader_config_file(

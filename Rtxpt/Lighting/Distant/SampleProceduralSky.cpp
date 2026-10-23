@@ -32,11 +32,16 @@ SampleProceduralSky::SampleProceduralSky( nvrhi::IDevice* device, std::shared_pt
 {
     auto path = GetLocalPath(c_AssetsFolder);
 
-    m_transmittanceTexture  = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/transmittance_earth.dds", false, commonPasses.get(), commandList);
-    m_scatterringTexture    = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/inscatter_earth.dds", false, commonPasses.get(), commandList);
-    m_irradianceTexture     = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/irradiance_earth.dds", false, commonPasses.get(), commandList);
-    m_cloudsTexture         = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/clouds.dds", false, commonPasses.get(), commandList);
-    m_noiseTexture          = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/RGBANoiseMedium.png", false, commonPasses.get(), commandList);
+    // Default-constructed TextureLoadOptions is SRGBMode::FromFile, which is what the old 'false' argument here
+    // actually did: leave whatever transfer function the container declares alone. Note this is NOT the same as
+    // SRGBModeFromBool(false) == SRGBMode::ForceLinear, which actively demotes an sRGB-declaring DDS to UNORM.
+    const TextureLoadOptions loadOptions;
+
+    m_transmittanceTexture  = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/transmittance_earth.dds", loadOptions, commonPasses.get(), commandList);
+    m_scatterringTexture    = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/inscatter_earth.dds", loadOptions, commonPasses.get(), commandList);
+    m_irradianceTexture     = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/irradiance_earth.dds", loadOptions, commonPasses.get(), commandList);
+    m_cloudsTexture         = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/q2rtx_env/clouds.dds", loadOptions, commonPasses.get(), commandList);
+    m_noiseTexture          = textureCache->LoadTextureFromFile(path.string() + "/StandaloneTextures/RGBANoiseMedium.png", loadOptions, commonPasses.get(), commandList);
 
     // Make sure the texture is loaded
      commandList->close();

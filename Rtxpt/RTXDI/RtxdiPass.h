@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "../Shaders/PathTracer/Config.h"
+
 #include <nvrhi/nvrhi.h>
 #include <donut/core/math/math.h>
 #include <memory>
@@ -45,18 +47,20 @@ struct RtxdiUserSettings
 	struct
 	{
 		rtxdi::ReSTIRDI_ResamplingMode resamplingMode = GetReSTIRDI_ResamplingMode();
-		ReSTIRDI_InitialSamplingParameters initialSamplingParams = getReSTIRDIInitialSamplingParams();
-		ReSTIRDI_TemporalResamplingParameters temporalResamplingParams = getReSTIRDITemporalResamplingParams();
-		ReSTIRDI_SpatialResamplingParameters spatialResamplingParams = getReSTIRDISpatialResamplingParams();
-		ReSTIRDI_ShadingParameters shadingParams = getReSTIRDIShadingParams();
+		RTXDI_DIInitialSamplingParameters initialSamplingParams = getReSTIRDIInitialSamplingParams();
+		RTXDI_DITemporalResamplingParameters temporalResamplingParams = getReSTIRDITemporalResamplingParams();
+		RTXDI_BoilingFilterParameters boilingFilterParams = getReSTIRDIBoilingFilterParams();
+		RTXDI_DISpatialResamplingParameters spatialResamplingParams = getReSTIRDISpatialResamplingParams();
+		RTXDI_ShadingParameters shadingParams = getReSTIRDIShadingParams();
 	} restirDI;
 
 	struct  
 	{
 		rtxdi::ReSTIRGI_ResamplingMode resamplingMode = GetReSTIRGI_ResamplingMode();
-		ReSTIRGI_TemporalResamplingParameters temporalResamplingParams = getReSTIRGITemporalResamplingParams();
-		ReSTIRGI_SpatialResamplingParameters spatialResamplingParams = getReSTIRGISpatialResamplingParams();
-		ReSTIRGI_FinalShadingParameters finalShadingParams = getReSTIRGIFinalShadingParams();
+		RTXDI_GITemporalResamplingParameters temporalResamplingParams = getReSTIRGITemporalResamplingParams();
+		RTXDI_BoilingFilterParameters boilingFilterParams = getReSTIRGIBoilingFilterParams();
+		RTXDI_GISpatialResamplingParameters spatialResamplingParams = getReSTIRGISpatialResamplingParams();
+		RTXDI_GIFinalShadingParameters finalShadingParams = getReSTIRGIFinalShadingParams();
 	} restirGI;
 
 	struct 
@@ -181,8 +185,8 @@ private:
 
 	void FillConstants(nvrhi::CommandListHandle commandList);
 	void FillSharedConstants(struct RtxdiBridgeConstants& bridgeConstants) const;
-	void FillDIConstants(ReSTIRDI_Parameters& diParams);
-	void FillGIConstants(ReSTIRGI_Parameters& giParams);
+	void FillDIConstants(RTXDI_Parameters& diParams);
+	void FillGIConstants(RTXDI_GIParameters& giParams);
 	void FillReGIRConstant(ReGIR_Parameters& regirParams);
 	void FillReGirIndirectConstants(ReGirIndirectConstants& regirIndirectConstants);
 

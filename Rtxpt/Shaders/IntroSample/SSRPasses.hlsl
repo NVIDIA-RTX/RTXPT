@@ -16,46 +16,20 @@
 #ifndef __SSR_PASSES_HLSL__
 #define __SSR_PASSES_HLSL__
 
+#define IGNORE_RAY_PAYLOAD 1
+
 #include <donut/shaders/utils.hlsli>
+#include "IntroSampleCommon.hlsli"
 
 #define SSR_THREADS 8
 
-// SSR Push Constants (96 bytes) - self-contained, no constant buffer needed
-// Contains packed 3x3 view matrix, projection params, screen size, and SSR params
-struct SSRPushConstants
-{
-    // View matrix 3x3 (row major) packed with projection diagonal
-    float4 viewRow0_P00;      // viewRow0.xyz, proj[0][0]
-    float4 viewRow1_P11;      // viewRow1.xyz, proj[1][1]
-    float4 viewRow2_P22;      // viewRow2.xyz, proj[2][2]
-    
-    // Projection and reconstruction params
-    float4 projParams;        // rcpP00, rcpP11, P32, nearZ
-    
-    // Screen size and additional params
-    float4 screenAndParams;   // screenWidth, screenHeight, farZ, maxRayDistance
-    
-    // SSR-specific params (maxSteps and maxMipLevel stored as float bits)
-    float4 ssrParams;         // maxSteps (asuint), thickness, jitter, maxMipLevel (asuint)
-};
-
-struct SSRBlurConstants
-{
-    uint2   SrcSize;
-    uint2   DstSize;
-    uint    SrcMipLevel;
-    uint    DstMipLevel;
-    uint    Padding0;
-    uint    Padding1;
-};
-
 // Mark as non-path-tracing pass to avoid ray payload qualifier issues in compute shaders
-#define NON_PATH_TRACING_PASS 1
+#define IGNORE_RAY_PAYLOAD 1
 
 // Use global bindings for shared resources
-#include "Bindings/ShaderResourceBindings.hlsli"
-#include "Bindings/GBufferBindings.hlsli"
-#include "Bindings/SamplerBindings.hlsli"
+#include "../Bindings/ShaderResourceBindings.hlsli"
+#include "../Bindings/GBufferBindings.hlsli"
+#include "../Bindings/SamplerBindings.hlsli"
 
 //==================================================================================================
 // Single-Pass Depth Hierarchy Generation (using LDS reduction)
@@ -375,8 +349,8 @@ Texture2D<float>    t_SSR_Depth             : register(t1);  // Full-res depth
 Texture2D<uint>     t_SSR_Normal            : register(t2);  // Packed normal (R32_UINT)
 Texture2D<float2>   t_SSR_RoughnessMetal    : register(t3);  // Roughness/metallic
 Texture2D<float4>   t_SSR_BaseColor        : register(t4);  // Scene color for sampling
-TextureCube<float4> t_SSR_CubemapGGX        : register(t5);  // GGX-filtered local cubemap
-TextureCube<float4> t_SSR_IrradianceCube    : register(t6);  // Diffuse irradiance cubemap
+TextureCube<float4> t_SSR_PrefilteredEnvCube : register(t5);  // GGX-prefiltered environment (specular)
+TextureCube<float4> t_SSR_EnvIrradianceCube : register(t6);  // Diffuse irradiance cubemap
 Texture2D<float2>   t_SSR_BRDFLUT           : register(t7);  // Split-sum BRDF LUT
 RWTexture2D<float4> u_SSR_Result            : register(u0);  // Output
 SamplerState        s_SSR_LinearClamp       : register(s0);  // For depth hierarchy sampling
@@ -400,7 +374,7 @@ float SSR_GetP32() { return g_SSR.projParams.z; }
 float SSR_GetRcpP00() { return g_SSR.projParams.x; }
 float SSR_GetRcpP11() { return g_SSR.projParams.y; }
 float SSR_GetNearZ()  { return g_SSR.projParams.z; }
-float SSR_GetFarZ()   { return g_SSR.screenAndParams.z; }
+float SSR_GetEnvGGXMaxMip() { return g_SSR.screenAndParams.z; }
 
 uint2 SSR_GetScreenSize() { return uint2(g_SSR.screenAndParams.xy); }
 
@@ -413,7 +387,7 @@ uint  SSR_GetMaxMipLevel()    { return asuint(g_SSR.ssrParams.w); }
 float3 SSR_GetViewPosition(uint2 pixel, float depth)
 {
     float2 screenSize = float2(SSR_GetScreenSize());
-    float2 uv = (float2(pixel) + 0.5) / screenSize;
+    float2 uv = (float2(pixel) + 0.5) / screenSize; // TODO: Subpixel jitter
     float2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     
@@ -457,7 +431,7 @@ float stepToEdge(float2 startUV, float2 dir, float curT, uint2 curMipResolution)
     return curT + min(curToEdge.x / dir.x, curToEdge.y / dir.y); // No need for abs. curToEdge and dir already have the same signs.
 }
 
-// Fresnel-Schlick with roughness for IBL (same as in RasterDeferredLighting.hlsl)
+// Fresnel-Schlick with roughness for IBL (same as in DeferredLightingCombine.hlsl)
 float3 SSR_FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
 {
     return F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(saturate(1.0 - cosTheta), 5.0);
@@ -482,15 +456,25 @@ void SSRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         
     // Get view-space position
     float3 viewPos = SSR_GetViewPosition(pixel, depth);
+    float3 cameraRelativePos = mul(SSR_GetViewMatrix3x3(), viewPos);
     
     // Load and transform normal to view space
     uint packedNormal = t_SSR_Normal[pixel];
+    float roughness = 0.8*t_SSR_RoughnessMetal[pixel].x; // lower roughness to compensate for mipchain blur
     float3 worldNormal = octToNdirUnorm32(packedNormal);
     float3 viewNormal = mul(worldNormal, SSR_GetViewMatrix3x3());
     
     // Calculate reflection direction in view space
-    float3 viewDir = normalize(viewPos);
-    float3 reflectDir = reflect(viewDir, viewNormal);
+    float3 wsViewDir = -normalize(cameraRelativePos);
+    RNGState rng;
+    rng.initRngSeed(pixel, g_SSR.frameIndex);
+    float2 u = rng.getNextUniformRand2();
+
+    float3 halfVector = SampleVNDF(u, wsViewDir, worldNormal, roughness * roughness);
+    float3 reflectDir = reflect(-wsViewDir, halfVector);
+    float invPdfVNDF = VNDF_SpecularBRDF(roughness, worldNormal, halfVector, wsViewDir, reflectDir);
+    
+    reflectDir = mul(reflectDir, SSR_GetViewMatrix3x3()); // Transform reflection back to view space
     
     // Don't trace rays going towards camera
     // Should probably just blend these out
@@ -590,10 +574,9 @@ void SSRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 
             packedNormal = t_SSR_Normal[hitPixel];
             float3 hitNormal = octToNdirUnorm32(packedNormal);
-            float3 viewNormal = mul(hitNormal, SSR_GetViewMatrix3x3());
 
-            // IBL lighting at the hit point using local cubemaps
-            float3 hitBaseColor = t_SSR_BaseColor[hitPixel].xyz;
+            // IBL lighting at the hit point using the prefiltered environment
+            float3 hitBaseColor = saturate(t_SSR_BaseColor[hitPixel].xyz);
             float2 hitRM = t_SSR_RoughnessMetal[hitPixel];
             float hitRoughness = hitRM.x;
             float hitMetallic = hitRM.y;
@@ -611,13 +594,15 @@ void SSRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
             float3 F0 = lerp(float3(0.04, 0.04, 0.04), hitBaseColor, hitMetallic);
 
             // Diffuse IBL
-            float3 irradiance = t_SSR_IrradianceCube.SampleLevel(s_SSR_LinearClamp, hitNormal, 0).rgb;
+            float3 irradiance = t_SSR_EnvIrradianceCube.SampleLevel(s_SSR_LinearClamp, hitNormal, 0).rgb;
             float3 kD = (1.0 - F0) * (1.0 - hitMetallic);
             float3 diffuse = kD * hitBaseColor * irradiance;
 
-            // Specular IBL (split-sum approximation)
-            float ggxMip = hitRoughness * 7.0;
-            float3 prefiltered = t_SSR_CubemapGGX.SampleLevel(s_SSR_LinearClamp, hitReflDir, ggxMip).rgb;
+            // Specular IBL (split-sum approximation).
+            // SSR_GetEnvGGXMaxMip() returns the max sampleable mip of t_SSR_PrefilteredEnvCube
+            // (set on the CPU via SSRPushConstants::screenAndParams.z).
+            float ggxMip = hitRoughness * SSR_GetEnvGGXMaxMip();
+            float3 prefiltered = t_SSR_PrefilteredEnvCube.SampleLevel(s_SSR_LinearClamp, hitReflDir, ggxMip).rgb;
             float2 brdf = t_SSR_BRDFLUT.SampleLevel(s_SSR_LinearClamp, float2(hitNdotV, hitRoughness), 0).rg;
             float3 specular = prefiltered * (F0 * brdf.x + brdf.y);
 
@@ -628,16 +613,16 @@ void SSRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
             confidence = 0;
         }
     }
-        
-    u_SSR_Result[pixel] = float4(reflectionColor, confidence);
+
+    u_SSR_Result[pixel] = float4(reflectionColor * invPdfVNDF, confidence);
 }
 
 //==================================================================================================
 // SSR Blur Mip Chain Generation
-// Note: This pass still needs a dedicated binding set for per-mip UAV bindings
+// Uses push constants for per-mip parameters and a per-mip binding set for UAV bindings
 //==================================================================================================
 
-ConstantBuffer<SSRBlurConstants>    g_SSRBlurConst      : register(b0);
+ConstantBuffer<SSRBlurConstants>    g_SSRBlurConst      : register(b0);  // Backed by push constants
 Texture2D<float4>                   t_SSRSrc            : register(t0);
 RWTexture2D<float4>                 u_SSRBlurDst        : register(u0);
 
@@ -668,6 +653,7 @@ void SSRBlurCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     {
         float2 sampleUV = uv + float2(offsets[i]) * texelSize;
         float4 sample = t_SSRSrc.SampleLevel(s_MaterialSampler, sampleUV, g_SSRBlurConst.SrcMipLevel);
+        sample.xyz = saturate(sample.xyz);
         sample.xyz *= sample.w;
         result += sample * weights[i];
         totalWeight += weights[i];

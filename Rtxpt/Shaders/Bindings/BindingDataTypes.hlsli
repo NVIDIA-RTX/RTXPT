@@ -15,7 +15,7 @@ struct PackedPathTracerSurfaceData
 {
     float3 _posW;
     uint _faceNCorrected;                   // fp16[3]
-    uint2 _mtl;                             // Falcor::MaterialDefinition
+    uint2 _mtl;                             // x: ShadingFlags, y: posErrorScale (asuint, see ComputeRayOrigin)
     uint2 _V;                               // fp16[3]
 
     // misc (mostly subset of struct ShadingData)

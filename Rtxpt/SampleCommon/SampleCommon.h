@@ -21,6 +21,8 @@
 #include <nvrhi/utils.h>
 #include <donut/core/math/math.h>
 
+#include <tracy/Tracy.hpp>
+#include "GpuProfiler.h"
 
 #define UI_SCOPED_INDENT(indent) RAII_SCOPE(ImGui::Indent(indent); , ImGui::Unindent(indent); )
 #define UI_SCOPED_DISABLE(cond) RAII_SCOPE(ImGui::BeginDisabled(cond); , ImGui::EndDisabled(); )
@@ -118,6 +120,8 @@ bool CompressTextures(std::map<std::shared_ptr<donut::engine::LoadedTexture>, Te
 
 void HelpersRegisterActiveWindow(); // call this from process main thread to grab current main window; this is optional and only used for progress bar to appear centered in the main window
 void HelpersSetNonInteractive();
+bool HelpersIsNonInteractive();
+[[noreturn]] void HelpersExitProcess(int exitCode); // immediate exit from inside the frame loop; skips DLL detach (see .cpp)
 int  ProgressBarStart(const char * windowText);
 void ProgressBarStop(int slotIndex);
 void ProgressBarUpdate(int slotIndex, int percentage);
@@ -145,12 +149,12 @@ public:
     ScopedPerfMarker(const char* label, nvrhi::CommandListHandle cmdList)
         : m_cmdList(cmdList)
     {
-        cmdList->beginMarker(label);
+        GpuProfiler::Begin(cmdList, label);
     }
 
     ~ScopedPerfMarker()
     {
-        m_cmdList->endMarker();
+        GpuProfiler::End(m_cmdList);
     }
 
 private:

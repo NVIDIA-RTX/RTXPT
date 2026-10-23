@@ -185,53 +185,43 @@ ToneMappingPass::ToneMappingPass(
 
 void ToneMappingPass::PreRender(const ToneMappingParameters& params)
 {
+    ZoneScoped;
     SetParameters(params);
     UpdateExposureValue();
     UpdateWhiteBalanceTransform();
-    UpdateColorTransform();
+    UpdateUserExposure();
+    UpdateExposure();
     m_FrameParamsSet = true;
 }
 
 bool ToneMappingPass::Render(
-    nvrhi::ICommandList* commandList, 
+    nvrhi::ICommandList* commandList,
+    donut::engine::BindingCache& bindingCache,
     const donut::engine::ICompositeView& compositeView,
     nvrhi::ITexture* sourceTexture, bool enabled)
 {
+    ZoneScoped;
+
     assert( m_FrameParamsSet ); // forgot to call PreRender before this?
     m_FrameParamsSet = false;
 
     bool commandListWasClosed = false; // to track the need to re-create volatile constant buffers
 
-    for (uint viewIndex = 0; viewIndex < compositeView.GetNumChildViews(ViewType::PLANAR); viewIndex++)
-    {
-        PerViewData& viewData = m_PerView[viewIndex];
-
-        if (viewData.sourceTexture != sourceTexture)
-        {
-            // Make sure that our cached binding sets represent the right source texture.
-            viewData.luminanceBindingSet = nullptr;
-            viewData.colorBindingSet = nullptr;
-            viewData.sourceTexture = sourceTexture;
-        }
-    }
-
     if(m_AutoExposure) 
     {
-		commandList->beginMarker("Luminance");
+        ZoneScopedN("AutoExposure");
+
+        GpuProfiler::Begin(commandList, "Luminance");
 		for (uint viewIndex = 0; viewIndex < compositeView.GetNumChildViews(ViewType::PLANAR); viewIndex++)
 		{
             PerViewData & viewData = m_PerView[viewIndex];
 
-            nvrhi::BindingSetHandle& bindingSet = viewData.luminanceBindingSet;
-			if (!bindingSet)
-			{
-				nvrhi::BindingSetDesc bindingSetDesc;
-				bindingSetDesc.bindings = {
-					nvrhi::BindingSetItem::Texture_SRV(0, sourceTexture),
-					nvrhi::BindingSetItem::Sampler(1, m_linearSampler)
-				};
-				bindingSet = m_device->createBindingSet(bindingSetDesc, m_LuminanceBindingLayout);
-			}
+            nvrhi::BindingSetDesc bindingSetDesc;
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::Texture_SRV(0, sourceTexture),
+                nvrhi::BindingSetItem::Sampler(1, m_linearSampler)
+            };
+            nvrhi::BindingSetHandle bindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_LuminanceBindingLayout);
 
 			const IView* view = compositeView.GetChildView(ViewType::PLANAR, viewIndex);
 
@@ -254,18 +244,21 @@ bool ToneMappingPass::Render(
 
 #if TONEMAPPING_AUTOEXPOSURE_CPU
             {
-                nvrhi::BindingSetDesc bindingSetDesc; bindingSetDesc.bindings = {
-                        nvrhi::BindingSetItem::Texture_SRV(0, viewData.luminanceTexture),
-                        nvrhi::BindingSetItem::TypedBuffer_UAV(0, viewData.avgLuminanceBufferGPU),
-                        nvrhi::BindingSetItem::Sampler(0, (true) ? m_linearSampler : m_pointSampler) };
-                nvrhi::BindingSetHandle cbindingSet = m_device->createBindingSet(bindingSetDesc, m_CaptureLumBindingLayout);
+                ZoneScopedN("AutoExposureCPU");
+
+                nvrhi::BindingSetDesc bindingSetDesc;
+                bindingSetDesc.bindings = {
+                    nvrhi::BindingSetItem::Texture_SRV(0, viewData.luminanceTexture),
+                    nvrhi::BindingSetItem::TypedBuffer_UAV(0, viewData.avgLuminanceBufferGPU),
+                    nvrhi::BindingSetItem::Sampler(0, (true) ? m_linearSampler : m_pointSampler) };
+                nvrhi::BindingSetHandle cbindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_CaptureLumBindingLayout);
                 nvrhi::ComputeState cstate;
                 cstate.bindings = { cbindingSet };
                 cstate.pipeline = m_CaptureLumPso;
                 commandList->setComputeState(cstate);
                 commandList->dispatch(1, 1);
 
-                if (viewData.avgLuminanceLastWritten == -1)  // first time init, we want correct data so wait & sync
+                if (viewData.avgLuminanceLastWritten == -1)  // first use or AE re-enabled: prefill all slots so the next PreRenders read valid data (this frame keeps the previous exposure)
                 {
                     for (int i = 0; i < PerViewData::cReadbackLag; i++)
                         commandList->copyBuffer( viewData.avgLuminanceBufferReadback[i], 0, viewData.avgLuminanceBufferGPU, 0, viewData.avgLuminanceBufferReadback[i]->getDesc().byteSize);
@@ -278,84 +271,64 @@ bool ToneMappingPass::Render(
                 viewData.avgLuminanceLastWritten = (viewData.avgLuminanceLastWritten + 1) % PerViewData::cReadbackLag;
                 commandList->copyBuffer(viewData.avgLuminanceBufferReadback[viewData.avgLuminanceLastWritten], 0, viewData.avgLuminanceBufferGPU, 0,
                     viewData.avgLuminanceBufferReadback[viewData.avgLuminanceLastWritten]->getDesc().byteSize);
-                {   // map/read/unmap CPU readable buffer
-                    assert( viewData.avgLuminanceLastWritten >= 0 );
-                    int toReadIndex = (viewData.avgLuminanceLastWritten + 1)%PerViewData::cReadbackLag;
-                    void* pData = m_device->mapBuffer(viewData.avgLuminanceBufferReadback[toReadIndex], nvrhi::CpuAccessMode::Read);
-                    assert(pData);
-                    viewData.avgLuminanceLastCaptured = std::exp2f( *static_cast<float*>(pData) );
-                    m_device->unmapBuffer(viewData.avgLuminanceBufferReadback[toReadIndex]);
-                }
+                // the map/read happens in UpdateExposure (PreRender), so the path tracer and the tonemap use the same value
             }
 #endif
 		}
-		commandList->endMarker();
+        GpuProfiler::End(commandList);
     }
 
-    commandList->beginMarker("ToneMapping");
-    for (uint viewIndex = 0; viewIndex < compositeView.GetNumChildViews(ViewType::PLANAR); viewIndex++)
+    GpuProfiler::Begin(commandList, "ToneMapping");
     {
-		nvrhi::BindingSetHandle& bindingSet = m_PerView[viewIndex].colorBindingSet;
-		if (!bindingSet)
-		{
-			nvrhi::BindingSetDesc bindingSetDesc;
-			bindingSetDesc.bindings = {
-				nvrhi::BindingSetItem::ConstantBuffer(0, m_ToneMappingCB),
-				nvrhi::BindingSetItem::Texture_SRV(0, sourceTexture),                       //Color texture
-				nvrhi::BindingSetItem::Texture_SRV(1, m_PerView[viewIndex].luminanceTexture),                    //Luminance Texture
-				nvrhi::BindingSetItem::Sampler(0, m_linearSampler),    //Luminance sampler
-				nvrhi::BindingSetItem::Sampler(1, m_pointSampler)      //Color sampler
-			};
-			bindingSet = m_device->createBindingSet(bindingSetDesc, m_ToneMapBindingLayout);
-		}
-        const IView* view = compositeView.GetChildView(ViewType::PLANAR, viewIndex);
+        ZoneScopedN("ToneMapping");
 
-        nvrhi::GraphicsState state;
-        state.pipeline = m_ToneMapPso;
-        state.framebuffer = m_FramebufferFactory->GetFramebuffer(*view);
-        state.bindings = { bindingSet };
-        state.viewport = view->GetViewportState();
-
-        ToneMappingConstants toneMappingConsts = {};
-        toneMappingConsts.whiteScale = m_WhiteScale;
-        toneMappingConsts.whiteMaxLuminance = m_WhiteMaxLuminance;
-        toneMappingConsts.clamped = m_Clamped;
-        toneMappingConsts.toneMapOperator = (uint32_t)m_ToneMapOperator;
-        toneMappingConsts.autoExposure = m_AutoExposure;
-#if TONEMAPPING_AUTOEXPOSURE_CPU
-        toneMappingConsts.avgLuminance = m_PerView[viewIndex].avgLuminanceLastCaptured;
-#else
-        toneMappingConsts.avgLuminance = 0; // unused
-#endif
-        if(m_AutoExposure)
+        for (uint viewIndex = 0; viewIndex < compositeView.GetNumChildViews(ViewType::PLANAR); viewIndex++)
         {
-            toneMappingConsts.autoExposureLumValueMin = std::exp2f( m_ExposureValueMin );
-            toneMappingConsts.autoExposureLumValueMax = std::exp2f( m_ExposureValueMax );
+            nvrhi::BindingSetDesc bindingSetDesc;
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::ConstantBuffer(0, m_ToneMappingCB),
+                nvrhi::BindingSetItem::Texture_SRV(0, sourceTexture),                       //Color texture
+                nvrhi::BindingSetItem::Texture_SRV(1, m_PerView[viewIndex].luminanceTexture),//Luminance Texture
+                nvrhi::BindingSetItem::Sampler(0, m_linearSampler),    //Luminance sampler
+                nvrhi::BindingSetItem::Sampler(1, m_pointSampler)      //Color sampler
+            };
+            nvrhi::BindingSetHandle bindingSet = bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_ToneMapBindingLayout);
+            const IView* view = compositeView.GetChildView(ViewType::PLANAR, viewIndex);
+
+            nvrhi::GraphicsState state;
+            state.pipeline = m_ToneMapPso;
+            state.framebuffer = m_FramebufferFactory->GetFramebuffer(*view);
+            state.bindings = { bindingSet };
+            state.viewport = view->GetViewportState();
+
+            ToneMappingConstants toneMappingConsts = {};
+            toneMappingConsts.whiteScale = m_WhiteScale;
+            toneMappingConsts.whiteMaxLuminance = m_WhiteMaxLuminance;
+            toneMappingConsts.clamped = m_Clamped;
+            toneMappingConsts.toneMapOperator = (uint32_t)m_ToneMapOperator;
+
+            // Exposure is per view (auto exposure is), so it's folded in here rather than into a shared transform
+            const float3x3 colorTransform = m_WhiteBalanceTransform * m_PerView[viewIndex].exposure;
+
+            // Copy 3x3 to 3x4 Is there a better way to do this?
+           /* affine3 transform(colorTransform, float3(0,0,0));
+            affineToColumnMajor(transform, toneMappingConsts.colorTransform);*/ //incorrect output, why?
+            toneMappingConsts.colorTransform = float3x4::identity();
+            toneMappingConsts.colorTransform[0] = float4(colorTransform.col(0), 0);
+            toneMappingConsts.colorTransform[1] = float4(colorTransform.col(1), 0);
+            toneMappingConsts.colorTransform[2] = float4(colorTransform.col(2), 0);
+            toneMappingConsts.enabled = enabled;
+            commandList->writeBuffer(m_ToneMappingCB, &toneMappingConsts, sizeof(ToneMappingConstants));
+
+            commandList->setGraphicsState(state);
+
+            nvrhi::DrawArguments args;
+            args.instanceCount = 1;
+            args.vertexCount = 4;
+            commandList->draw(args);
         }
-        else
-        {
-            toneMappingConsts.autoExposureLumValueMin = std::exp2f( -16.0 );
-            toneMappingConsts.autoExposureLumValueMax = std::exp2f( 16.0 );
-        }
-
-        // Copy 3x3 to 3x4 Is there a better way to do this?
-       /* affine3 transform(m_ColorTransform, float3(0,0,0));
-        affineToColumnMajor(transform, toneMappingConsts.colorTransform);*/ //incorrect output, why?
-		toneMappingConsts.colorTransform = float3x4::identity();
-		toneMappingConsts.colorTransform[0] = float4(m_ColorTransform.col(0), 0);
-		toneMappingConsts.colorTransform[1] = float4(m_ColorTransform.col(1), 0);
-		toneMappingConsts.colorTransform[2] = float4(m_ColorTransform.col(2), 0);
-        toneMappingConsts.enabled = enabled;
-        commandList->writeBuffer(m_ToneMappingCB, &toneMappingConsts, sizeof(ToneMappingConstants));
-
-        commandList->setGraphicsState(state);
-
-        nvrhi::DrawArguments args;
-        args.instanceCount = 1;
-        args.vertexCount = 4;
-        commandList->draw(args);
     }
-    commandList->endMarker();
+    GpuProfiler::End(commandList);
     return commandListWasClosed;
 }
 
@@ -426,40 +399,71 @@ void ToneMappingPass::UpdateExposureValue()
     }
 }
 
-void ToneMappingPass::UpdateColorTransform()
+void ToneMappingPass::UpdateUserExposure()
 {
-	//Exposure scale due to exposure compensation 
-	float exposureScale = pow(2.f, m_ExposureCompensation);
-	float manualExposureScale = 1.f;
+    // Exposure compensation, plus the manual camera exposure when auto exposure is off
+    float manualExposureScale = 1.f;
+    if (!m_AutoExposure)
+    {
+        float normConstant = 1.f / 100.f;
+        manualExposureScale = (normConstant * m_FilmSpeed) / (m_Shutter * m_FNumber * m_FNumber);
+    }
+    m_UserExposureLog2 = m_ExposureCompensation + std::log2(manualExposureScale);
+}
 
-	if (!m_AutoExposure)
-	{
-       	float normConstant = 1.f / 100.f;
-		manualExposureScale = (normConstant * m_FilmSpeed) / (m_Shutter * m_FNumber * m_FNumber);
-	}
-	m_ColorTransform = m_WhiteBalanceTransform * exposureScale * manualExposureScale;
+void ToneMappingPass::UpdateExposure()
+{
+    for (PerViewData & viewData : m_PerView)
+    {
+#if TONEMAPPING_AUTOEXPOSURE_CPU
+        if (!m_AutoExposure)
+            viewData.avgLuminanceLastWritten = -1;  // readbacks go stale while off; Render re-syncs them once re-enabled
+        else if (viewData.avgLuminanceLastWritten >= 0)
+        {
+            // Written cReadbackLag-1 frames ago (Render() overwrites it next frame) - the slot Render() used to read, so no added latency and no stall
+            const int toReadIndex = (viewData.avgLuminanceLastWritten + 2) % PerViewData::cReadbackLag;
+            void* pData = m_device->mapBuffer(viewData.avgLuminanceBufferReadback[toReadIndex], nvrhi::CpuAccessMode::Read);
+            assert(pData);
+            const float avgLogLuminance = *static_cast<float*>(pData);
+            m_device->unmapBuffer(viewData.avgLuminanceBufferReadback[toReadIndex]);
+            if (std::isfinite(avgLogLuminance))
+                viewData.autoExposureLog2 = std::log2((float)TONEMAPPING_EXPOSURE_KEY) - avgLogLuminance;
+        }
+        // else no data yet (first frame after creation or re-enabling): keep the previous or inherited value
+#endif
+        ToneMappingExposureInfo & info = viewData.exposureInfo;
+        info.AutoLog2   = m_AutoExposure ? clamp(viewData.autoExposureLog2, m_ExposureValueMin, m_ExposureValueMax) : 0.0f;
+        info.UserLog2   = m_UserExposureLog2;
+        const float totalLog2 = info.AutoLog2 + info.UserLog2;
+        info.TotalLog2  = clamp(totalLog2, TONEMAPPING_EXPOSURE_LOG2_MIN, TONEMAPPING_EXPOSURE_LOG2_MAX);
+        info.Clamped    = info.TotalLog2 != totalLog2;
+        viewData.exposure = std::exp2(info.TotalLog2);
+    }
+}
+
+void ToneMappingPass::InheritAutoExposure(const ToneMappingPass & other)
+{
+    for (size_t i = 0; i < std::min(m_PerView.size(), other.m_PerView.size()); i++)
+        m_PerView[i].autoExposureLog2 = other.m_PerView[i].autoExposureLog2;
 }
 
 #if TONEMAPPING_AUTOEXPOSURE_CPU
-float3 ToneMappingPass::GetPreExposedGray(uint viewIndex) 
-{ 
+float3 ToneMappingPass::GetPreExposedGray(uint viewIndex)
+{
     assert(m_FrameParamsSet); // forgot to call PreRender before this?
-    assert(viewIndex < m_PerView.size()); 
-    if (viewIndex >= m_PerView.size()) 
-        return float3(0,0,0); 
+    assert(viewIndex < m_PerView.size());
+    if (viewIndex >= m_PerView.size())
+        return float3(0,0,0);
 
     // should probably sync to be exact https://en.wikipedia.org/wiki/Middle_gray in the future but it does the trick for now
-    float3 result = inverse(m_ColorTransform) * float3(0.18f, 0.18f, 0.18f);
-    if (m_AutoExposure)
-    {
-        result /= float3((float)TONEMAPPING_EXPOSURE_KEY / m_PerView[viewIndex].avgLuminanceLastCaptured);
-    }
-    return result;
+    return inverse(m_WhiteBalanceTransform) * float3(0.18f, 0.18f, 0.18f) / m_PerView[viewIndex].exposure;
 }
 #endif
 
 void ToneMappingPass::GenerateMips(nvrhi::ICommandList* commandList, uint32_t numberOfViews)
 {
+    ZoneScopedN("GenerateMIPs");
+
     for (uint32_t i = 0; i < numberOfViews; i++)
     {
         m_PerView[i].mipMapPass->Dispatch(commandList);

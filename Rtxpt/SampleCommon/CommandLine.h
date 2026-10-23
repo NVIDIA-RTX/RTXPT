@@ -19,9 +19,11 @@ struct CommandLineOptions
 	bool nonInteractive = false;
 	bool noWindow = false;
 	bool debug = false;
+	bool gpuValidation = false;
 	uint32_t width = 1920;
 	uint32_t height = 1080;
 	bool fullscreen = false;
+	bool borderless = false;
 	std::string adapter;
     int adapterIndex = -1;
 	bool useVulkan = false;
@@ -29,6 +31,7 @@ struct CommandLineOptions
 	bool disableSER = false;
 
     std::string capturePath = "";
+    std::string captureSuffix = "";
     bool captureSimple = false;
     bool captureSequence = false;
     float sequenceWarmupStart = 0;
@@ -55,6 +58,16 @@ struct CommandLineOptions
     
     bool DisableFireflyFilters      = false;
     bool DisablePostProcessFilters  = false;
+    bool AsyncPrefix                = true;
+
+    int  OverrideRadianceCacheMode  = -1;   // -1 keeps the default
+
+    int  OverrideSubSamplingMode    = -1;   // -1 keeps the performance preset's; 0 - disabled, 1 - three quarters, 2 - half, 3 - quarter
+    int  SubSamplingPattern         = 3;    // SubSamplingPattern in SampleUI.h
+    int  SubSamplingBlockSize       = 8;    // N for SubSamplingPattern::BlockStratified and ::SobolBlock
+
+    int  OverrideDLSSMode           = -1;   // -1 keeps the preset's / UI's; otherwise forces StreamlineInterface::DLSSMode every frame
+    std::string PerfLogPath         = "";   // if set, per-frame GPU timings of the path tracing passes are appended there as CSV
 
     std::string PropShowTags        = "";
     std::string PropCameraAttach    = "";

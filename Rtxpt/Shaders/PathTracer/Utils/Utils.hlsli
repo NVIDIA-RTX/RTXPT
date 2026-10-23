@@ -66,6 +66,18 @@ inline lpfloat Average(lpfloat3 rgb)
 }
 #endif
 
+// Radiance to lpfloat3. In fp16, values above HLF_MAX would become inf (then NaN in FireflyFilter), so scale them down
+// uniformly: that keeps the hue, and FireflyFilter, being scale-invariant, then gives the same result as in fp32.
+#if (RTXPT_LP_TYPES_USE_16BIT_PRECISION != 0)
+inline lpfloat3 ToLpRadiance(float3 radiance)
+{
+    const float maxComponent = max(radiance.x, max(radiance.y, radiance.z));
+    return (lpfloat3)((maxComponent > HLF_MAX) ? (radiance * (HLF_MAX / maxComponent)) : (radiance));
+}
+#else
+#define ToLpRadiance(radiance)  lpfloat3(radiance)      // a macro so fp32 compiles to the same DXIL as the plain cast did
+#endif
+
 // Clamp .rgb by luminance
 float3 LuminanceClamp(float3 signalIn, const float luminanceThreshold)
 {
@@ -109,6 +121,11 @@ float3 GradientHeatMap( float greyValue )
 float3 ColorFromHash( uint hash )
 {
     return saturate(Unpack_R11G11B10_FLOAT(hash));
+}
+
+float3 DbgShowNormalSRGB(float3 normal)
+{
+    return pow(abs(normal * 0.5f + 0.5f), 2.2f);
 }
 
 // *************************************************************************************************************************************
@@ -334,7 +351,7 @@ inline uint GenericTSComputeStorageElementCount(const uint imageWidth, const uin
 { 
     return imageDepth * GenericTSComputePlaneStride(imageWidth, imageHeight);
 }
-inline uint GenericTSPixelToAddress(const uint2 pixelPos, const uint planeIndex, const uint lineStride, const uint planeStride) // <- pass ptConstants or StablePlane constants in...
+inline uint GenericTSPixelToAddress(const uint2 pixelPos, const uint planeIndex, const uint lineStride, const uint planeStride) // <- pass ptConstants or DenoisingLayer constants in...
 {
     // coords within tile
     uint xInTile = pixelPos.x % TS_TILE_SIZE;
@@ -349,7 +366,7 @@ inline uint GenericTSPixelToAddress(const uint2 pixelPos, const uint planeIndex,
     uint tileBaseY = pixelPos.y - yInTile;
     return tileBaseX * TS_TILE_SIZE + tileBaseY * lineStride + tilePixelIndex + planeIndex * planeStride;
 }
-inline uint3 GenericTSAddressToPixel(const uint address, const uint lineStride, const uint planeStride) // <- pass ptConstants or StablePlane constants in...
+inline uint3 GenericTSAddressToPixel(const uint address, const uint lineStride, const uint planeStride) // <- pass ptConstants or DenoisingLayer constants in...
 {
     const uint planeIndex = address / planeStride;
     const uint localAddress = address % planeStride;

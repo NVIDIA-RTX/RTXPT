@@ -17,11 +17,14 @@
 #include "Utils/Math/Ray.hlsli"
 #include "Utils/Utils.hlsli"
 #include "Utils/SampleGenerators.hlsli"
-#include "Scene/HitInfo.hlsli"
-#include "Rendering/Materials/InteriorList.hlsli"
-#include "Rendering/Materials/TexLODHelpers.hlsli"
+#include "BSDFs/InteriorList.hlsli"
+#include "Utils/TexLODHelpers.hlsli"
 #include "Lighting/LightingTypes.hlsli"
 #include "PathTracerHelpers.hlsli"
+
+#if RTXPT_SHARC_TRAIN || RTXPT_SHARC_CONSUME
+#include "../Bindings/SharcBindings.hlsli"
+#endif
 
 // Be careful with changing these. PathFlags share 32-bit uint with vertexIndex. For now, we keep 10 bits for vertexIndex.
 // PathFlags take higher bits, VertexIndex takes lower bits.
@@ -29,8 +32,8 @@ static const uint kVertexIndexBitCount = 10u;
 static const uint kVertexIndexBitMask = (1u << kVertexIndexBitCount) - 1u;
 static const uint kPathFlagsBitCount = 32u - kVertexIndexBitCount;
 static const uint kPathFlagsBitMask = ((1u << kPathFlagsBitCount) - 1u) << kVertexIndexBitCount;
-static const uint kStablePlaneIndexBitOffset    = 14+kVertexIndexBitCount; // if changing, must change PathFlags::stablePlaneIndexBit0
-static const uint kStablePlaneIndexBitMask      = ((1u << 2)-1u) << kStablePlaneIndexBitOffset;
+static const uint kDenoisingLayerIndexBitOffset    = 14+kVertexIndexBitCount; // if changing, must change PathFlags::denoisingLayerIndexBit0
+static const uint kDenoisingLayerIndexBitMask      = ((1u << 2)-1u) << kDenoisingLayerIndexBitOffset;
 
 /** Path flags. The path flags are currently stored in kPathFlagsBitCount bits.
 */
@@ -56,13 +59,13 @@ enum class PathFlags
     deltaOnlyPath                   = (1<<12),  ///< There was no non-delta events along the path so far.
 
     deltaTreeExplorer               = (1<<13),  ///< Debug exploreDeltaTree enabled and this path selected for debugging
-    stablePlaneIndexBit0            = (1<<14),  ///< StablePlaneIndex, bit 0 -- just reserving space for kStablePlaneIndexBitOffset & kStablePlaneIndexBitMask which must be 14
-    stablePlaneIndexBit1            = (1<<15),  ///< StablePlaneIndex, bit 1 -- just reserving space for kStablePlaneIndexBitOffset & kStablePlaneIndexBitMask which must be 14
-    stablePlaneOnPlane              = (1<<16),  ///< Current vertex is on a stable plane; this is where we update stablePlaneBaseScatterDiff
-    stablePlaneOnBranch             = (1<<17),  ///< Current vertex is on a stable plane or stable branch; all emission is stable and was already collected
-    stablePlaneBaseScatterDiff      = (1<<18),  ///< When stepping off the last stable plane & branch, we had a diffuse scatter event (this determines if the radiance is diffuse or specular for denoising purposes)
+    denoisingLayerIndexBit0            = (1<<14),  ///< DenoisingLayerIndex, bit 0 -- just reserving space for kDenoisingLayerIndexBitOffset & kDenoisingLayerIndexBitMask which must be 14
+    denoisingLayerIndexBit1            = (1<<15),  ///< DenoisingLayerIndex, bit 1 -- just reserving space for kDenoisingLayerIndexBitOffset & kDenoisingLayerIndexBitMask which must be 14
+    denoisingLayerOnPlane              = (1<<16),  ///< Current vertex is on a denoising layer; this is where we update denoisingLayerBaseScatterDiff
+    denoisingLayerOnBranch             = (1<<17),  ///< Current vertex is on a denoising layer or stable branch; all emission is stable and was already collected
+    denoisingLayerBaseScatterDiff      = (1<<18),  ///< When stepping off the last denoising layer & branch, we had a diffuse scatter event (this determines if the radiance is diffuse or specular for denoising purposes)
     exportSpecHitTQueued            = (1<<19),  ///< Export specular hitT distance on first next non-specular scatter (or sky) and clear the flag.
-    stablePlaneOnDominantBranch     = (1<<20),  ///< Are we on the dominant stable plane or one of its branches (landing on a new stable branch will re-set this flag accordingly)
+    denoisingLayerOnDominantBranch     = (1<<20),  ///< Are we on the dominant denoising layer or one of its branches (landing on a new stable branch will re-set this flag accordingly)
 
     // Bits to kPathFlagsBitCount are still unused.
     // ^no more flag space! consider moving vertexIndex counter to PackedCounters
@@ -74,7 +77,7 @@ enum class PackedCounters // each packed to 8 bits, 4 max fits in 32bit uint
 {
     DiffuseBounces              = 0,    ///< Diffuse reflection.
     RejectedHits                = 1,    ///< Number of false intersections rejected along the path. This is used as a safeguard to avoid deadlock in pathological cases.
-    BouncesFromStablePlane      = 2,    ///< Number of bounces after the last stable plane the path was on (path.vertexIndex - currentStablePlaneVertexIndex)
+    BouncesFromDenoisingLayer      = 2,    ///< Number of bounces after the last denoising layer the path was on (path.vertexIndex - currentDenoisingLayerVertexIndex)
     //SubSampleIndex              = 3     ///< Used when doing multiple (sub)samples per pixels: when the path gets terminated, this counter is incremented, and if still < 
 };
 
@@ -95,7 +98,7 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
     // 3rd 16 bytes
     //float3      thp;                                      ///< Path throughput.
     uint2       pack23  /*PAYLOAD_FIELD_RW_ALL*/;               ///< packed Thp
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD
     uint2       imageXformPacked PAYLOAD_FIELD_RW_ALL;      ///< Accumulated rotational image transform along the path. Use PackOrthoMatrix / UnpackOrthoMatrix to extract
 #else
     //float4      L;                    ///< .rgb - accumulated path contribution; .a - specularness (weighted average)
@@ -107,7 +110,7 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
     InteriorList interiorList   PAYLOAD_FIELD_RW_ALL;       ///< Interior list. Keeping track of a stack of materials with medium properties. Size depends on INTERIOR_LIST_SLOT_COUNT. 2 slots (8 bytes) by default.
 #endif
     uint        packedCounters  /*PAYLOAD_FIELD_RW_ALL*/;       ///< Packed counters for different types of bounces and etc., see PackedCounters.
-    uint        stableBranchID  /*PAYLOAD_FIELD_RW_ALL*/;       ///< Path 'stable delta tree' branch ID for finding matching StablePlane; Gets updated on scatter while path isDeltaOnlyPath;
+    uint        stableBranchID  /*PAYLOAD_FIELD_RW_ALL*/;       ///< Path 'stable delta tree' branch ID for finding matching DenoisingLayer; Gets updated on scatter while path isDeltaOnlyPath;
 
     // 5th 16 bytes
     RayCone     rayCone         /*PAYLOAD_FIELD_RW_ALL*/;                ///< 4 or 8 bytes depending on USE_RAYCONES_WITH_FP16_IN_RAYPAYLOAD (on, so 4 bytes by default). 
@@ -119,6 +122,9 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
     uint        pack1           /*PAYLOAD_FIELD_RW_ALL*/;       ///< packed packedMISInfo and thpRuRuCorrection
     uint        flagsAndVertexIndex /*PAYLOAD_FIELD_RW_ALL*/;   ///< Higher kPathFlagsBitCount bits: Flags indicating the current status. This can be multiple PathFlags flags OR'ed together.
                                                             ///< Lower kVertexIndexBitCount bits: Current vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
+
+    // NOTE: the SHaRC per-path propagation state used to live here and be packed into the ray payload. It is now
+    // held in a per-thread scratch buffer keyed on DispatchRaysIndex() - see PathTracerSHaRC.hlsli.
 
     // Accessors
     #define PS_CONST
@@ -135,12 +141,12 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
     float       GetSceneLength() PS_CONST       { return asfloat(PackDirSceneLength.w); }
     void        SetSceneLength(float sceneLength) { PackDirSceneLength.w = asuint(sceneLength); }
 
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD
     float3x3 GetImageXform() PS_CONST           { return UnpackOrthoMatrix(imageXformPacked); }
     void     SetImageXform(float3x3 p)          { imageXformPacked = PackOrthoMatrix(p); }
 #endif
 
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
     void    SetFireflyFilterK_BsdfScatterPdf(float fireflyFilterK, float bsdfScatterPdf)            { pack0 = ((f32tof16(clamp(fireflyFilterK, 0, HLF_MAX))) << 16) | (f32tof16(clamp(bsdfScatterPdf, 0, HLF_MAX))); }
     lpfloat GetFireflyFilterK() PS_CONST        { return lpfloat(f16tof32(pack0 >> 16)); }
     lpfloat GetBsdfScatterPdf() PS_CONST        { return lpfloat(f16tof32(pack0 & 0xFFFF)); }
@@ -154,17 +160,17 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
     float   GetMotionVectorSceneLength()        { return asfloat(pack0); }
     //void    SetMotionVectorBounceNormal(float3 n) { pack1 = NDirToOctUnorm30(n); }        // too complex
     //float3  GetMotionVectorBounceNormal()         { return OctToNDirUnorm30(pack1); }     // too complex
-    // there's no NEE while building stable planes as we're on delta branches only!
+    // there's no NEE while building denoising layers as we're on delta branches only!
     lpuint  GetPackedMISInfo() PS_CONST         { return 0; }    // by convention, NEEBSDFMISInfo::empty().Pack16bit() is 0
     lpfloat GetBsdfScatterPdf() PS_CONST        { return 0.0; }
-    // there's no RR while building stable planes!
+    // there's no RR while building denoising layers!
     lpfloat GetThpRuRuCorrection() PS_CONST     { return 1.0f; }
 #endif
 
     void    SetThp(float3 thp)                  { thp = clamp( thp, 0.xxx, HLF_MAX.xxx ); pack23 = Fp32ToFp16NoClamp(float4(thp,0)); }
     float3  GetThp() PS_CONST                   { return Fp16ToFp32( pack23 ).xyz; }
 
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
     void    SetL(float4 l)                      { l = clamp( l, 0.xxxx, HLF_MAX.xxxx ); pack45 = Fp32ToFp16NoClamp(l); }
     float4  GetL() PS_CONST                     { return Fp16ToFp32( pack45 ); }
 #endif
@@ -262,8 +268,8 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
         return Ray::make(GetOrigin(), GetDir(), 0.f, kMaxRayTravel);
     }
 
-    uint getStablePlaneIndex()                  { return (flagsAndVertexIndex & kStablePlaneIndexBitMask) >> kStablePlaneIndexBitOffset; }
-    void setStablePlaneIndex(uint index)        { flagsAndVertexIndex &= ~kStablePlaneIndexBitMask; flagsAndVertexIndex |= index << kStablePlaneIndexBitOffset; }
+    uint getDenoisingLayerIndex()                  { return (flagsAndVertexIndex & kDenoisingLayerIndexBitMask) >> kDenoisingLayerIndexBitOffset; }
+    void setDenoisingLayerIndex(uint index)        { flagsAndVertexIndex &= ~kDenoisingLayerIndexBitMask; flagsAndVertexIndex |= index << kDenoisingLayerIndexBitOffset; }
 };                                         
 
 #endif // __PATH_STATE_HLSLI__

@@ -1,0 +1,3 @@
+Initially you will have no _GOLD.png-s on your system: run RegressionTesting-RUN.bat before your changes (e.g. on an unmodified checkout), then RegressionTesting-COPY-TO-GOLD.bat to set its results as the GOLD reference.
+
+Then run RegressionTesting-RUN.bat with the changes - results are self-explanatory.
