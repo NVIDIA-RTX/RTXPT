@@ -5,10 +5,10 @@
 ## What's new in 1.9.0
 
  * Performance optimizations (~20% perf gain over 1.8.1 with comparable or better quality), including optional sub-sampling (sub-1spp), async compute overlap of DLSS-RR with the next frame's path tracing, GPU-side TLAS instance generation and large CPU-side savings
- * New [Design](https://github.com/NVIDIA-RTX/RTXPT/blob/main/Docs/Design.md) document describing the real-time path tracing pipeline
+ * New [Design](Docs/Design.md) document describing the real-time path tracing pipeline
  * SHaRC radiance cache is now part of the real-time path tracer and on by default, bringing more indirect lighting into DLSS-RR at about the same cost
  * NEE-AT now handles up to 2 million lights (was 512K), and clusters emissive triangles into light LODs for scenes with dense emissive geometry
- * Windows on ARM64 is now supported (see [README](https://github.com/NVIDIA-RTX/RTXPT#windows-arm64))
+ * Windows on ARM64 is now supported (see [Windows ARM64](#windows-arm64))
  * Updated Streamline (2.14.16), NRD (4.17.3), RTXDI (3.0), OMM (1.10) and DirectX Agility SDK (1.619.6); CMake 4.1 is now required
  * Various code fixes, optimizations and improvements
  
