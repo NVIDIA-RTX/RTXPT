@@ -234,6 +234,8 @@ void CaptureScriptManager::PreRender()
 
 void CaptureScriptManager::PostRender(const std::function<bool(const char*)>& dumpScreenshotCallback)
 {
+    ZoneScoped;
+
     if (m_active && !m_screenshotFileName.empty() && !(m_resetAndWarmup && m_resetAndWarmupCounter > 0) && (m_ui.RealtimeMode || m_app.AccumulationCompleted()) )
     {
         std::filesystem::path screenshotFile = m_screenshotFileName;
@@ -254,6 +256,9 @@ void CaptureScriptManager::PostRender(const std::function<bool(const char*)>& du
             m_sequenceRecordCounter--;
         }
 
+        if (!m_cmdLine.captureSuffix.empty())   // frame.png -> frame_B.png, frame_000.png -> frame_000_B.png
+            screenshotFile.replace_filename(screenshotFile.stem().string() + "_" + m_cmdLine.captureSuffix + screenshotFile.extension().string());
+
         m_captureSuccess = dumpScreenshotCallback(screenshotFile.string().c_str());
 
         if (m_type == 0 || (m_type == 1 && m_sequenceRecordCounter == 0) || !m_captureSuccess)
@@ -266,15 +271,16 @@ void CaptureScriptManager::PostRender(const std::function<bool(const char*)>& du
 
     if (m_exitAfterCapture && !m_active && !m_start)
     {
+        m_app.BeforeCaptureExit();
         if (m_captureSuccess)
         {
             donut::log::info("Capture of '%s' finished successfully. Exiting.", m_screenshotFileName.string().c_str());
-            std::exit(0);
+            HelpersExitProcess(0);
         }
         else
         {
-            donut::log::fatal("Unable capture '%s'. Exiting.", m_screenshotFileName.string().c_str());
-            std::exit(1);
+            donut::log::error("Unable capture '%s'. Exiting.", m_screenshotFileName.string().c_str());
+            HelpersExitProcess(1);
         }
     }
 }

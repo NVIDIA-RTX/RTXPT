@@ -148,48 +148,24 @@ protected:
         ScreenGUISel sel;
 
         box3 bbox = m_prop.GetNode()->GetGlobalBoundingBox();
-        float3 bcenter = bbox.center();
-        float4x4 viewProj = view->GetViewProjectionMatrix();
-
-        static constexpr float2 invalidPos = float2(FLT_MAX, FLT_MAX);
-        auto projectToScreen = [&viewProj, &view, &displaySize](const float3 & worldPos)
-        {
-            float4 projv = float4(worldPos, 1) * viewProj;
-            projv /= projv.w;
-            if( projv.z < 0 )
-                return invalidPos;
-            projv.xy() = projv.xy() * float2(0.5,-0.5) + float2(0.5,0.5);
-            projv.xy() *= displaySize;
-            if (projv.x < 0 || projv.x > displaySize.x || projv.y < 0 || projv.y > displaySize.y)
-                return invalidPos;
-            return projv.xy();
-        };
-
-        float2 sCenter = projectToScreen(bcenter);
-        if (sCenter.x == FLT_MAX)
+        if (bbox.isempty())
             return sel;
 
-        float sRadius = 0.0;
-        for( int i = 0; i < 8; i++ )
-        {
-            float2 sCorner = projectToScreen(bbox.getCorner(i));
-            if (sCorner.x == FLT_MAX) 
-                continue;
-            sRadius = max( sRadius, length(sCenter - sCorner) );
-        }
+        // Mouse ray through a point unprojected at NDC z = 0.5, which is finite for both regular and reversed (infinite) Z
+        const float2 ndc = float2(mousePos.x / displaySize.x * 2.0f - 1.0f, 1.0f - mousePos.y / displaySize.y * 2.0f);
+        const float4 rayPt = float4(ndc, 0.5f, 1.0f) * view->GetInverseViewProjectionMatrix();
+        const float3 rayOrigin = view->GetViewOrigin();
+        const float3 rayDir = normalize(rayPt.xyz() / rayPt.w - rayOrigin);
 
-        if ( sRadius > 0 )
-        {
-            sRadius += 10.0f;
+        // Slab test; tEnter < 0 also rejects a box containing the camera, which would otherwise win over every prop inside or beyond it
+        const float3 t0 = (bbox.m_mins - rayOrigin) / rayDir, t1 = (bbox.m_maxs - rayOrigin) / rayDir;
+        const float tEnter = maxComponent(min(t0, t1)), tExit = minComponent(max(t0, t1));
+        if (tEnter > tExit || tEnter < 0)
+            return sel;
 
-            if ( length(mousePos - sCenter) < sRadius)
-            {
-                sel.ScreenPos = sCenter;
-                sel.ScreenRadius = sRadius + 10.0f;
-                sel.Selected = true;
-                sel.RangeToCamera = length(bcenter - view->GetViewOrigin());
-            }
-        }
+        sel.ScreenPos = mousePos;
+        sel.Selected = true;
+        sel.RangeToCamera = tEnter;
         return sel;
     }
 };

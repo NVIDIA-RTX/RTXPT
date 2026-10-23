@@ -49,7 +49,11 @@ namespace ShaderCompilerUtils
         
         GraphicsAPI = device->getGraphicsAPI();
         
-        std::string platformName = "x64"; // add "arm64" for ARM
+#if defined(_M_ARM64) || defined(__aarch64__)
+        std::string platformName = "arm64";
+#else
+        std::string platformName = "x64";
+#endif
         
         ShaderCompilerPath = std::filesystem::absolute(
             donut::app::GetDirectoryWithExecutable() / "ShaderDynamic/Tools" / graphicsAPIName / platformName / "dxc.exe");
@@ -80,17 +84,20 @@ namespace ShaderCompilerUtils
             }
             
             ShadersPath = shaderSourcePathRuntime;
-            ShadersPathExternalIncludes1 = 
-                donut::app::GetDirectoryWithExecutable() / "ShaderDynamic/Source/External";
-            ShadersPathExternalIncludes2 = std::filesystem::path();
+            IncludePaths = {
+                donut::app::GetDirectoryWithExecutable() / "ShaderDynamic/Source/External/Donut/Include",
+                donut::app::GetDirectoryWithExecutable() / "ShaderDynamic/Source/External/Rtxdi/Include",
+                donut::app::GetDirectoryWithExecutable() / "ShaderDynamic/Source/External"
+            };
         }
         else
         {
             ShadersPath = shaderSourcePathDevelopment;
-            ShadersPathExternalIncludes1 = 
-                donut::app::GetDirectoryWithExecutable() / "../External/Donut/Include";
-            ShadersPathExternalIncludes2 = 
-                donut::app::GetDirectoryWithExecutable() / "../External";
+            IncludePaths = {
+                donut::app::GetDirectoryWithExecutable() / "../External/Donut/Include",
+                donut::app::GetDirectoryWithExecutable() / "../External/Rtxdi/Include",
+                donut::app::GetDirectoryWithExecutable() / "../External"
+            };
         }
         
         ShaderBinariesPath = donut::app::GetDirectoryWithExecutable() / binarySubfolder / 
@@ -99,16 +106,14 @@ namespace ShaderCompilerUtils
         // Convert all paths to absolute
         ShaderCompilerPath = std::filesystem::absolute(ShaderCompilerPath);
         ShadersPath = std::filesystem::absolute(ShadersPath);
-        ShadersPathExternalIncludes1 = std::filesystem::absolute(ShadersPathExternalIncludes1);
-        if (!ShadersPathExternalIncludes2.empty())
-            ShadersPathExternalIncludes2 = std::filesystem::absolute(ShadersPathExternalIncludes2);
+        for (auto& includePath : IncludePaths)
+            includePath = std::filesystem::absolute(includePath);
         ShaderBinariesPath = std::filesystem::absolute(ShaderBinariesPath);
         
         donut::log::info("Shader compiler: '%s'", ShaderCompilerPath.string().c_str());
-        donut::log::info("Shader sources: '%s' (includes: '%s', '%s')", 
-            ShadersPath.string().c_str(), 
-            ShadersPathExternalIncludes1.string().c_str(), 
-            ShadersPathExternalIncludes2.string().c_str());
+        donut::log::info("Shader sources: '%s'", ShadersPath.string().c_str());
+        for (const auto& includePath : IncludePaths)
+            donut::log::info("Shader include path: '%s'", includePath.string().c_str());
         donut::log::info("Shader binaries output: '%s'", ShaderBinariesPath.string().c_str());
         
         return true;
@@ -117,6 +122,20 @@ namespace ShaderCompilerUtils
     std::string ShaderCompilerConfig::GetCompilerPathQuoted() const
     {
         return "\"" + ShaderCompilerPath.string() + "\"";
+    }
+
+    std::string ShaderCompilerConfig::LongPathErrorHint() const
+    {
+        // dxc.exe is not long-path aware and keeps '../' in include paths; the longest one is 94 chars past
+        // ShadersPath (FILL/SHARC path tracer variants, measured 2026-10), plus a margin as includes change
+        constexpr size_t kLongestIncludeTail = 104;
+        constexpr size_t kMaxPath = 260;
+        const size_t length = ShadersPath.native().size();
+        if (length + kLongestIncludeTail < kMaxPath)
+            return "";
+        return StringFormat("\n\nNote: the shader sources are under a long path (%d chars) and dxc.exe is not long-path aware, so the error above "
+            "('file not found', 'cannot find the path', or even an internal compiler error) may come from the 260 char path limit. "
+            "Try a shorter install folder.", (int)length);
     }
     
     //////////////////////////////////////////////////////////////////////////
@@ -194,18 +213,24 @@ namespace ShaderCompilerUtils
         if (options.Profile == ShaderProfile::Library_6_6)
             command += " -enable-payload-qualifiers";
         
-        // Debug print macro
-        if (options.EnableDebugPrint)
+        // Debug print macro; not for SPIR-V, where DebugPrint crashes dxc (same as SHADERMAKE_OPTIONS_SPIRV in Rtxpt/CMakeLists.txt)
+        if (options.EnableDebugPrint && config.GraphicsAPI != nvrhi::GraphicsAPI::VULKAN)
             command += " -D ENABLE_DEBUG_PRINT";
+
+        // Mirrors the same injection in PTPipelineBaker - see the comment there and Libraries/ShaderDebug/ShaderDebug.hlsl.
+#if defined(_DEBUG)
+        command += " -D RTXPT_SHADER_DEBUG=1";
+#else
+        command += " -D RTXPT_SHADER_DEBUG=0";
+#endif
         
         // User-defined macros
         for (const auto& macro : options.Macros)
             command += " -D " + macro.name + "=" + macro.definition;
         
         // Include paths - config's external includes
-        command += " -I \"" + config.ShadersPathExternalIncludes1.string() + "\"";
-        if (!config.ShadersPathExternalIncludes2.empty())
-            command += " -I \"" + config.ShadersPathExternalIncludes2.string() + "\"";
+        for (const auto& includePath : config.IncludePaths)
+            command += " -I \"" + includePath.string() + "\"";
         
         // Additional include paths
         for (const auto& includePath : options.AdditionalIncludes)
@@ -231,6 +256,7 @@ namespace ShaderCompilerUtils
             command += " -fspv-target-env=vulkan1.2";
             command += " -fspv-extension=SPV_EXT_descriptor_indexing";
             command += " -fspv-extension=KHR";
+            command += " -fvk-bind-resource-heap 0 2";  // ResourceDescriptorHeap: the mutable heap layout is the third (set 2) - see Bindless.hlsli
             
             nvrhi::VulkanBindingOffsets cBindingOffsets;
             for (int i = 0; i < 7; i++)
@@ -245,8 +271,8 @@ namespace ShaderCompilerUtils
         
         result.CommandBase = command;
         
-        // Compute hash of command (which includes all macros) but NOT the full file path
-        // This avoids recompiling if just moving folders around
+        // Compute hash of command, which includes all macros and the absolute source and include paths
+        // (so moving the install recompiles everything)
         result.HashHex = ComputeSha256Hex(command);
         
         // Build suggested output filename

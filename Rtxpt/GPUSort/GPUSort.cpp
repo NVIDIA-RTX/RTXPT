@@ -172,7 +172,7 @@ uint32_t CeilLog2(uint32_t n)   { assert(n > 0); return n == 1 ? 0 : FloorLog2(n
 
 void GPUSort::Sort(nvrhi::ICommandList * commandList, nvrhi::BufferHandle controlBuffer, uint32_t itemCountByteOffset, nvrhi::BufferHandle bufferKeys, nvrhi::BufferHandle bufferIndices, uint32_t maxItemCount, bool resetIndices)
 {
-    RAII_SCOPE( commandList->beginMarker("GPUSort");, commandList->endMarker(); );
+    RTXPT_GPU_SCOPE(commandList, "GPUSort");
 
     ReCreateWorkingBuffers(maxItemCount);
 

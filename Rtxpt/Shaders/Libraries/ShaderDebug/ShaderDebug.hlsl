@@ -18,6 +18,24 @@
 #include "../../PathTracer/Utils/Math/MathHelpers.hlsli"
 #endif
 
+// ===================================================================================================================
+// RTXPT_SHADER_DEBUG
+// ===================================================================================================================
+//
+// 1 in a Debug build of the sample, 0 in Release. Inserted automatically on the command line by PTPipelineBaker and
+// ComputePipelineBaker (the two runtime compilation paths), so shader code can gate debug-only work on the C++ build
+// configuration without a separate UI toggle or a recompile of anything else.
+//
+// Shaders compiled offline by ShaderMake (Rtxpt/shaders.cfg) never receive it and therefore always take the 0 path.
+// That is intentional - those are the precompiled blobs, they are not the ones you iterate on.
+//
+// The fallback below must define a VALUE. A bare "#define RTXPT_SHADER_DEBUG" would turn every
+// "#if RTXPT_SHADER_DEBUG" into a preprocessor error ("expected value in expression") instead of evaluating false.
+//
+#ifndef RTXPT_SHADER_DEBUG
+#define RTXPT_SHADER_DEBUG 0
+#endif
+
 // text print based on https://therealmjp.github.io/posts/hlsl-printf/
 // NOTE: at the moment, DXC SPIRV compile errors make formatting for DebugPrint impossible, but arguments will still be displayed
 
@@ -25,8 +43,8 @@ struct ShaderDebugHeader
 {
     int         PrintItemsCounterInBytes;
     int         TrianglesCounterInBytes;
-    int         Padding0;
-    int         Padding1;
+    int         BreakpointSentinel;     // BREAKPOINT() (below) stores SHADER_DEBUG_BREAKPOINT_SENTINEL here
+    int         CopyGroupCount;         // main_cs dispatch size: one group per SHADER_DEBUG_COPY_ENTRIES_PER_GROUP triangles/lines
 
     // Draw Indirect arguments (for drawing triangles)
     int         VertexCountPerInstance; // should be fixed to 3
@@ -43,18 +61,30 @@ struct ShaderDebugHeader
 };
 
 #define SHADER_DEBUG_BUFFER_UAV_INDEX               (125)               // make sure it matches u_ShaderDebugBuffer register below...
+// BREAKPOINT() (below) stores this into ShaderDebugHeader::BreakpointSentinel; ShaderDebug::EndFrame reads
+// it back and reports. The byte offset is spelled out because the shader side writes it through
+// RWByteAddressBuffer::Store, which takes a byte offset rather than a struct member.
+#define SHADER_DEBUG_BREAKPOINT_SENTINEL            (0xB3EAC0DEu)
+#define SHADER_DEBUG_BREAKPOINT_SENTINEL_OFFSET     (8)                 // offsetof(ShaderDebugHeader, BreakpointSentinel)
+// Never written by anything. It exists only to give the optional hang loop in BREAKPOINT() a data dependent exit
+// that the DXIL validator accepts - see the note there.
+#define SHADER_DEBUG_BREAKPOINT_SENTINEL_RELEASE    (0xB3EAF8EDu)
 #define SHADER_DEBUG_VIZ_TEXTURE_UAV_INDEX          (126)               // make sure it matches u_ShaderDebugBuffer register below
 #define SHADER_DEBUG_HEADER_IN_BYTES                (96)                // header containing counter for debug prints and triangles and etc
 #define SHADER_DEBUG_PRINT_BUFFER_IN_BYTES          (256*1024)          // going above this will make Debug Output in debugger unresponsive
 #define SHADER_PRINTF_MAX_DEBUG_PRINT_ARGS          (8)                 // if changing, make sure to add more AppendArgs
-#define SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES       (100*1024*1024)     // <shrug> this is a lot - consider compressing ShaderDebugTriangle
+#define SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES       (50*1024*1024)      // NOTE: Consider compressing ShaderDebugTriangle - it might solve the storage problem!!!!
 #define SHADER_DEBUG_BUFFER_IN_BYTES                (SHADER_DEBUG_HEADER_IN_BYTES+SHADER_DEBUG_PRINT_BUFFER_IN_BYTES+SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES)
 #define SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES   (SHADER_DEBUG_HEADER_IN_BYTES+SHADER_DEBUG_PRINT_BUFFER_IN_BYTES)
+#define SHADER_DEBUG_COPY_GROUP_COUNT_OFFSET        (12)                // offsetof(ShaderDebugHeader, CopyGroupCount)
+#define SHADER_DEBUG_COPY_ENTRIES_PER_GROUP         (16)                // main_cs (COPY_GEOMETRY_FOR_OUTPUT) copies 16 entries of 64 bytes per group
 //#define SHADER_DEBUG_MAX_TRIANGLES              (SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES / (4*4*4) ) //  SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES / sizeof(ShaderDebugTriangle))
 
 
 #if defined(__cplusplus)
 static_assert( sizeof(ShaderDebugHeader) == SHADER_DEBUG_HEADER_IN_BYTES );
+// Whole copy groups, and CopyGroupCount stays a valid dispatch size (64 = sizeof(ShaderDebugTriangle))
+static_assert( SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES % (64 * SHADER_DEBUG_COPY_ENTRIES_PER_GROUP) == 0 && SHADER_DEBUG_TRIANGLE_BUFFER_IN_BYTES / (64 * SHADER_DEBUG_COPY_ENTRIES_PER_GROUP) <= 65535 );
 #endif
 
 // Buffer layout in memory is:
@@ -108,6 +138,68 @@ RWTexture2D<float4> u_ShaderDebugVizTextureBuffer : register(u126);      // make
 #ifdef REGISTER_WAS_DEFINED
 #define register
 #endif
+
+// ===================================================================================================================
+// BREAKPOINT
+// ===================================================================================================================
+//
+// HLSL has no debug break, so this is the closest equivalent: it writes a sentinel into the shader debug buffer, and
+// optionally hangs the offending thread so a GPU debugger has something to catch.
+//
+// Usage:
+//      if ( somethingIsWrong )
+//          BREAKPOINT();
+//
+// Compiles to nothing at all when RTXPT_SHADER_DEBUG is 0.
+//
+// TWO THINGS ARE LOAD-BEARING HERE, both learned the hard way:
+//
+//  1) The UAV store is not optional. The bakers always compile with -O3 (PIPELINE_BAKER_USE_OPTIMIZATIONS is
+//     hardcoded to 1 - a Debug build of the sample still gets optimized shaders), and a trap with no observable side
+//     effect is dead-code-eliminated. Worse, DCE then walks back through the condition and removes whatever the
+//     caller loaded to decide it had a problem, so the check silently stops existing while still compiling clean.
+//
+//  2) If you enable the hang, its loop must have a break the DXIL validator can see. A plain "while(true) {}" fails
+//     validation outright with "Loop must have break." Hence the bounded loop with a data-dependent exit below,
+//     which can never actually be taken (SHADER_DEBUG_BREAKPOINT_SENTINEL_RELEASE is never written back) but is
+//     opaque enough to the compiler to satisfy both the validator and the optimizer.
+//
+// Do NOT implement this on top of DebugPrint(): a single DebugPrint call crashes the SPIR-V DXC with an internal
+// compiler error ("access violation"), and both runtime bakers define ENABLE_DEBUG_PRINT unconditionally, including
+// for Vulkan. A header reachable from every shader must not contain one.
+//
+// NOTE: the sentinel is a single word with no source location, so ShaderDebug::EndFrame cannot report WHICH
+// BREAKPOINT() fired - grep for the macro to see the candidates.
+
+// Set to 1 to make BREAKPOINT() additionally hang the thread that hit it, which will usually end in a TDR. Off by
+// default because a wedged GPU in the middle of a debugging session is rarely what you want - the sentinel in the
+// debug buffer already tells you it fired.
+#ifndef RTXPT_BREAKPOINT_HANG
+#define RTXPT_BREAKPOINT_HANG 0
+#endif
+
+#if RTXPT_SHADER_DEBUG
+
+#if RTXPT_BREAKPOINT_HANG
+#define BREAKPOINT()                                                                                        \
+    do {                                                                                                    \
+        u_ShaderDebugBuffer.Store(SHADER_DEBUG_BREAKPOINT_SENTINEL_OFFSET, SHADER_DEBUG_BREAKPOINT_SENTINEL);\
+        [loop] for ( uint _bpIteration = 0; _bpIteration < 0xFFFFFFFFu; _bpIteration++ )                     \
+            if ( u_ShaderDebugBuffer.Load(SHADER_DEBUG_BREAKPOINT_SENTINEL_OFFSET) == SHADER_DEBUG_BREAKPOINT_SENTINEL_RELEASE ) \
+                break;                                                                                      \
+    } while( false )
+#else
+#define BREAKPOINT()                                                                                        \
+    do {                                                                                                    \
+        u_ShaderDebugBuffer.Store(SHADER_DEBUG_BREAKPOINT_SENTINEL_OFFSET, SHADER_DEBUG_BREAKPOINT_SENTINEL);\
+    } while( false )
+#endif
+
+#else // !RTXPT_SHADER_DEBUG
+
+#define BREAKPOINT()    do { } while( false )
+
+#endif // RTXPT_SHADER_DEBUG
 
 #if defined(__HLSL_VERSION) && (__HLSL_VERSION >= 2021) 
 
@@ -461,7 +553,8 @@ namespace ShaderDebug
 
 } // namespace ShaderDebug
 
-#ifdef ENABLE_DEBUG_PRINT
+// Like BREAKPOINT(), compiled out unless RTXPT_SHADER_DEBUG (so never in Release or in ShaderMake-precompiled shaders)
+#if defined(ENABLE_DEBUG_PRINT) && RTXPT_SHADER_DEBUG
 
 #define DEBUG_PRINT_DEFINED         1
 
@@ -520,6 +613,9 @@ void DebugTriangle(float3 a, float3 b, float3 c, float4 color)
     // if enough space in buffer, increase the number of instances
     const uint instanceCountOffset = sizeof(uint) * 5;
     debugBuffer.InterlockedAdd(instanceCountOffset, 1);
+    // The first entry of each copy group raises the group count; a max rather than +1 stays within the buffer if the counter wraps
+    if ((offset / numBytesToWrite) % SHADER_DEBUG_COPY_ENTRIES_PER_GROUP == 0)
+        debugBuffer.InterlockedMax(SHADER_DEBUG_COPY_GROUP_COUNT_OFFSET, offset / (numBytesToWrite * SHADER_DEBUG_COPY_ENTRIES_PER_GROUP) + 1);
 
     offset += dataOffset;
 
@@ -549,6 +645,9 @@ void DebugLine(float3 a, float3 b, float4 color)
     // if enough space in buffer, increase the number of instances
     const uint instanceCountOffset = sizeof(uint) * 5;
     debugBuffer.InterlockedAdd(instanceCountOffset, 1);
+    // The first entry of each copy group raises the group count; a max rather than +1 stays within the buffer if the counter wraps
+    if ((offset / numBytesToWrite) % SHADER_DEBUG_COPY_ENTRIES_PER_GROUP == 0)
+        debugBuffer.InterlockedMax(SHADER_DEBUG_COPY_GROUP_COUNT_OFFSET, offset / (numBytesToWrite * SHADER_DEBUG_COPY_ENTRIES_PER_GROUP) + 1);
 
     offset += dataOffset;
 
@@ -808,9 +907,20 @@ float4 main( in float4 pos : SV_Position, in float2 uv : UV ) : SV_Target0
 }
 #endif
 
+#if defined(COPY_GEOMETRY_FOR_OUTPUT)
+RWByteAddressBuffer u_ShaderDebugBufferCopy : register(u0);
+// The triangles and lines this frame added, for the overlay (see ShaderDebug::CopyForOutput); 4 threads per 64 byte entry
+[numthreads(SHADER_DEBUG_COPY_ENTRIES_PER_GROUP * 4, 1, 1)]
+void main_cs( uint dispatchThreadID : SV_DispatchThreadID )
+{
+    const uint offset = SHADER_DEBUG_HEADER_IN_BYTES + SHADER_DEBUG_PRINT_BUFFER_IN_BYTES + dispatchThreadID * 16;
+    u_ShaderDebugBufferCopy.Store4( offset, u_ShaderDebugBuffer.Load4( offset ) );
+}
+#endif
+
 #endif // #if defined(__HLSL_VERSION) && (__HLSL_VERSION >= 2021) 
 
-#if !defined(__HLSL_VERSION) || (__HLSL_VERSION < 2021) || !defined(ENABLE_DEBUG_PRINT)
+#if !defined(__HLSL_VERSION) || (__HLSL_VERSION < 2021) || !defined(ENABLE_DEBUG_PRINT) || !RTXPT_SHADER_DEBUG
 #define DebugPrint(str, ...) do { } while(false)
 #endif
 

@@ -37,16 +37,16 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
             g_RtxdiBridgeConst.restirGI.bufferIndices.spatialResamplingInputBufferIndex);
 
         RTXDI_GISpatialResamplingParameters sparams;
-        sparams.sourceBufferIndex = g_RtxdiBridgeConst.restirGI.bufferIndices.spatialResamplingInputBufferIndex;
-        sparams.depthThreshold = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.spatialDepthThreshold;
-        sparams.normalThreshold = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.spatialNormalThreshold;
-        sparams.numSamples = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.numSpatialSamples;
-        sparams.samplingRadius = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.spatialSamplingRadius;
-        sparams.biasCorrectionMode = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.spatialBiasCorrectionMode;
+        sparams.depthThreshold = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.depthThreshold;
+        sparams.normalThreshold = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.normalThreshold;
+        sparams.numSamples = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.numSamples;
+        sparams.samplingRadius = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.samplingRadius;
+        sparams.biasCorrectionMode = g_RtxdiBridgeConst.restirGI.spatialResamplingParams.biasCorrectionMode;
         
         resultReservoir = RTXDI_GISpatialResampling(
             pixelPosition, 
             surface, 
+            g_RtxdiBridgeConst.restirGI.bufferIndices.spatialResamplingInputBufferIndex,
             inputReservoir,
             rng, 
             g_RtxdiBridgeConst.runtimeParams,

@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "../../Shaders/PathTracer/Config.h"
+
 #include <donut/engine/BindingCache.h>
 #include <nvrhi/nvrhi.h>
 #include <donut/core/math/math.h>

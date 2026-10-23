@@ -17,7 +17,7 @@
 
 #include "LightingTypes.hlsli"
 #include "../Utils/Utils.hlsli"
-#include "LightingConfig.h"
+#include "../../Libraries/NEE-AT/NEEATConfig.h"
 #include "PolymorphicLightPTConfig.h"
 #include "PolymorphicLight.hlsli"
 #include "../Utils/Sampling/Sampling.hlsli"
@@ -28,34 +28,35 @@
 // Note: make sure to check IsEmpty() for case where there are no lights. Sampling when 'IsEmpty( ) == true' will result in undefined behaviour (NaNs and etc.)
 struct LightSampler
 {
-    StructuredBuffer<LightingControlData>       ControlBuffer;              ///< control buffer containts constants like numbers of lights and importance sampling stuff; could be converted to ConstantBuffer
+    StructuredBuffer<NEEAT::ControlData>        ControlBuffer;              ///< control buffer containts constants like numbers of lights and importance sampling stuff; could be converted to ConstantBuffer
     StructuredBuffer<PolymorphicLightInfo>      LightsBuffer;               ///< all scene lights, encoded; NOTE: some can be unused light slots with uninitialized/old data, do not sample directly!
     StructuredBuffer<PolymorphicLightInfoEx>    LightsExBuffer;
     Buffer<uint>                                ProxyCounters;              ///< per light sampling proxy counters
     Buffer<uint>                                ProxyIndices;               ///< indices for proxies pointing to LightsBuffer, sorted 
     Buffer<uint>                                LocalSamplingBuffer;
+    Buffer<float>                               LightWeightsBoost;          ///< per-light importance boost multiplier (>=1) baked this frame; read-only, valid for [0, ControlBuffer[0].TotalLightCount)
     Texture2D<uint>                             EnvLookupMap;
     RWTexture2D<float>                          FeedbackTotalWeight;
-    RWTexture2D<uint>  FeedbackCandidates;
+    RWTexture2D<uint>                           FeedbackCandidates;
 
     lpuint2                                     PixelPos;                   ///< screen pixel being lit (relevant for feedback loop and local sampling)
     uint                                        LocalSamplingTilePos;       ///< tile coord, jitter included, in 2D
     bool                                        IsScreenSpaceCoherent;
 
-    static bool IsScreenSpaceCoherentHeuristic( StructuredBuffer<LightingControlData> controlBuffer, float rayConeWidth, float totalPathLength )
+    static bool IsScreenSpaceCoherentHeuristic( StructuredBuffer<NEEAT::ControlData> controlBuffer, float rayConeWidth, float totalPathLength )
     {
         float rayConeWidthOverTotalPathTravel = rayConeWidth / totalPathLength;
         return rayConeWidthOverTotalPathTravel < controlBuffer[0].ScreenSpaceVsWorldSpaceThreshold;
     }
 
     static LightSampler make(
-          StructuredBuffer<LightingControlData>         controlBuffer
-          // ConstantBuffer<LightingControlData>       constants            // there seems to be a compiler error when using this approach
+          StructuredBuffer<NEEAT::ControlData>         controlBuffer
         , StructuredBuffer<PolymorphicLightInfo>        lightsBuffer
         , StructuredBuffer<PolymorphicLightInfoEx>      lightsExBuffer
         , Buffer<uint>                                  proxyCounters
         , Buffer<uint>                                  proxyIndices
         , Buffer<uint>                                  localSamplingBuffer
+        , Buffer<float>                                 lightWeightsBoost
         , Texture2D<uint>                               envLookupMap
         , RWTexture2D<float>                            feedbackTotalWeight
         , RWTexture2D<uint>                             feedbackCandidates
@@ -72,13 +73,14 @@ struct LightSampler
         lightSampler.ProxyCounters          = proxyCounters;
         lightSampler.ProxyIndices           = proxyIndices;
         lightSampler.LocalSamplingBuffer    = localSamplingBuffer;
+        lightSampler.LightWeightsBoost      = lightWeightsBoost;
         lightSampler.EnvLookupMap           = envLookupMap;
         lightSampler.FeedbackTotalWeight    = feedbackTotalWeight;
         lightSampler.FeedbackCandidates     = feedbackCandidates;
         lightSampler.PixelPos               = (lpuint2)pixelPos;
 
         uint2 jitteredTilePos = (pixelPos+controlBuffer[0].LocalSamplingTileJitter) / RTXPT_LIGHTING_SAMPLING_BUFFER_TILE_SIZE.xx;
-        lightSampler.LocalSamplingTilePos   = LLSB_ComputeBaseAddress(jitteredTilePos, controlBuffer[0].LocalSamplingResolution);
+        lightSampler.LocalSamplingTilePos   = NEEAT::LLSB_ComputeBaseAddress(jitteredTilePos, controlBuffer[0].LocalSamplingResolution);
 
         // // storage for world space sits in somewhere else
         // if ( !lightSampler.IsScreenSpaceCoherent )
@@ -97,12 +99,16 @@ struct LightSampler
 
     bool IsTemporalFeedbackRequired( )
     {
+#if RTXPT_SKIP_NEEAT_FEEDBACK
+        return false;   // this pass must not contribute to the shared feedback reservoirs (maybe it's SHaRC training pass or similar)
+#else
         return ControlBuffer[0].TemporalFeedbackRequired;
+#endif
     }
 
-    LightFeedbackReservoir GetTemporalFeedbackReservoir()
+    NEEAT::FeedbackReservoir GetTemporalFeedbackReservoir()
     {
-        return LightFeedbackReservoir::make( PixelPos, FeedbackTotalWeight, FeedbackCandidates );
+        return NEEAT::FeedbackReservoir::make( PixelPos, FeedbackTotalWeight, FeedbackCandidates );
     }                                                  
     
     // returned value is in [0, ControlBuffer[0].TotalLightCount) range used to read from LightsBuffer
@@ -120,7 +126,7 @@ struct LightSampler
 
     void ReadLocal(uint localIndex, out uint lightIndex, out uint proxyCount)
     {
-        UnpackMiniListLightAndCount( LocalSamplingBuffer[ LocalSamplingTilePos + localIndex ], lightIndex, proxyCount );
+        NEEAT::UnpackMiniListLightAndCount( LocalSamplingBuffer[ LocalSamplingTilePos + localIndex ], lightIndex, proxyCount );
     }
 
     uint SampleLocal(const float rnd, out float pdf)
@@ -139,88 +145,135 @@ struct LightSampler
         return lightIndex;
     }
 
+#if POLYLIGHT_LIGHT_CLUSTER // NOTE: this code is outside of NEE-AT API
+    // A light in an active cluster is only sampled through it (see LightCluster::MaybeUnwrap), so its pdf is the cluster's divided by
+    // the cluster's light count - both packed in its ClusterIndexAndCount. Returns the light index to look the pdf up for.
+    uint ResolveClusterForPdf(uint lightIndex, out float pdfScale)
+    {
+        pdfScale = 1.0;
+        if( !LightsBuffer[lightIndex].IsPartOfLightCluster() )
+            return lightIndex;
+        const uint clusterIndexAndCount = LightsExBuffer[lightIndex].ClusterIndexAndCount;
+        pdfScale = 1.0 / (float)PolymorphicLightInfoEx::UnpackClusterLightCount( clusterIndexAndCount );
+        return PolymorphicLightInfoEx::UnpackClusterIndex( clusterIndexAndCount );
+    }
+#endif
+
     float SampleGlobalPDF(uint lightIndex)
     {
+        float pdfScale = 1.0;
+#if POLYLIGHT_LIGHT_CLUSTER
+        lightIndex = ResolveClusterForPdf(lightIndex, pdfScale);
+#endif
         float proxyCountPerLight = (float)ProxyCounters[lightIndex];
-        return proxyCountPerLight / float(float(ControlBuffer[0].SamplingProxyCount));
+        float pdf = proxyCountPerLight / float(float(ControlBuffer[0].SamplingProxyCount));
+        return pdf * pdfScale;
     }
 
     float SampleLocalPDF(uint lightIndex)
     {
+        float pdfScale = 1.0;
+#if POLYLIGHT_LIGHT_CLUSTER
+        lightIndex = ResolveClusterForPdf(lightIndex, pdfScale);
+#endif
         const uint localProxyCount = RTXPT_LIGHTING_LOCAL_PROXY_COUNT;
 
         uint packedValue = LocalLightBinarySearch( LocalSamplingBuffer, LocalSamplingTilePos, lightIndex, localProxyCount, RTXPT_LIGHTING_LOCAL_PROXY_BINARY_SEARCH_STEPS );
 
         #if 0 // validation
+        bool presentInTile = false;
         for ( int localIndex = 0; localIndex < localProxyCount; localIndex++ )
         {
             uint lightIndexR; uint proxyCountR;
             ReadLocal(localIndex, lightIndexR, proxyCountR);
             if( lightIndex == lightIndexR )
             {
-                if( packedValue == RTXPT_INVALID_LIGHT_INDEX )
+                presentInTile = true;
+                if( packedValue == NEEAT_INVALID_LIGHT_INDEX )
+                {   
                     DebugPrint("Sort validation failed (not found in binary search but exists)");
+                    BREAKPOINT();
+                    break;
+                }
                 else
-                    if( UnpackMiniListLight(packedValue) != lightIndexR )
+                    if( NEEAT::UnpackMiniListLight(packedValue) != lightIndexR )
                     {
                         DebugPrint("Sort validation failed (different found)");
-                        // return float(proxyCountR) / float(localProxyCount);
+                        BREAKPOINT();
                         break;
                     }
             }
         }
+        // The loop only checks lights that are in the tile; a hit on one that isn't would return a pdf the tile can't produce
+        if( !presentInTile && packedValue != NEEAT_INVALID_LIGHT_INDEX )
+        {
+            DebugPrint("Sort validation failed (found but not in tile)");
+            BREAKPOINT();
+        }
         #endif
         
-        if ( packedValue == RTXPT_INVALID_LIGHT_INDEX )
+        if ( packedValue == NEEAT_INVALID_LIGHT_INDEX )
             return 0.0f;
 
         uint lightIndexR; uint proxyCountR;
-        UnpackMiniListLightAndCount(packedValue, lightIndexR, proxyCountR);
-        return float(proxyCountR) / float(localProxyCount);
+        NEEAT::UnpackMiniListLightAndCount(packedValue, lightIndexR, proxyCountR);
+        return (float(proxyCountR) / float(localProxyCount)) * pdfScale;    // same operation order as SampleLocal + MaybeUnwrap
     }
 
-    void InsertFeedbackFromNEE(const uint lightIndex, const float pixelRadianceContributionAvg, const float randomValue)
+    // 'globalPdf' must be SampleGlobalPDF(lightIndex) - callers already have it from MIS
+    void InsertFeedbackFromNEE(const uint lightIndex, const float globalPdf, const float pixelRadianceContributionAvg, const float randomValue)
     {
-        LightFeedbackReservoir feedbackReservoir = GetTemporalFeedbackReservoir();
+        if (ControlBuffer[0].DbgFreezeFeedback)
+            return;
+
+        NEEAT::FeedbackReservoir feedbackReservoir = GetTemporalFeedbackReservoir();
 
         float feedbackWeight = pixelRadianceContributionAvg;
                 
         // could be user option - weight power; add slider, 0.5-2.0?
         // feedbackWeight = pow(feedbackWeight, 0.8);
 
-        // should be user option - give some positive bias [0, 1] for globally improbable lights; this (slightly) helps smaller screen regions feature more prominently in Local sampler (and Global but there it evens out)
-        feedbackWeight /= pow( SampleGlobalPDF(lightIndex), 0.65 );
+        float globalPDFModifier = clamp( globalPdf, 1e-6, 1e6 );	// globalPdf is SampleGlobalPDF(lightIndex)
+        feedbackWeight /= pow( globalPDFModifier, RTXPT_LIGHTING_DAMPEN_GLOBAL_FEEDBACK_EXP );
+
+        feedbackWeight *= pow( LightWeightsBoost[lightIndex], RTXPT_LIGHTING_BOOST_FEEDBACK_EXP );
 
         if (IsScreenSpaceCoherent)
             feedbackWeight *= RTXPT_LIGHTING_SCREEN_SPACE_COHERENT_FEEDBACK_BIAS;
 
+        feedbackWeight = clamp( feedbackWeight, 6.097555160522461e-05F, 6.5504e+4F ); // HLF_MIN, HLF_MAX
+
         feedbackReservoir.Add( randomValue, lightIndex, feedbackWeight, IsScreenSpaceCoherent );
-        feedbackReservoir.CommitToStorage();
     }
 
     // This should probably just be removed as it only adds complexity to code
     void InsertFeedbackFromBSDF(const uint lightIndex, const float pixelRadianceContributionAvgWithoutBsdfMISWeight, const float bsdfMISWeight, const float randomNumber)
     {
 #if RTXPT_LIGHTING_ENABLE_BSDF_FEEDBACK
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES  // <- reconsider this
-        if( !IsTemporalFeedbackRequired() )
+#if PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD  // <- reconsider this
+        if( !IsTemporalFeedbackRequired() || ControlBuffer[0].DbgFreezeFeedback || lightIndex == NEEAT_INVALID_LIGHT_INDEX )
             return;
-        
-        LightFeedbackReservoir feedbackReservoir = LoadFeedback();
+
+        // Skip lights with zero baked radiance (e.g. emissive texels the bake missed): NEE shades with the baked radiance so it gets nothing
+        // from them, but the NEE pdf this feedback would give them lowers the BSDF MIS weight of their actual emission - losing energy.
+        // Without feedback their NEE pdf stays 0 and BSDF hits keep MIS weight 1.
+        if( all( PolymorphicLight::UnpackColor( LightsBuffer[lightIndex] ) == 0 ) )
+            return;
+
+        NEEAT::FeedbackReservoir feedbackReservoir = GetTemporalFeedbackReservoir();
 
         float feedbackWeight = pixelRadianceContributionAvgWithoutBsdfMISWeight;
 
-        feedbackWeight *= 0.3; //< should be user option
+        // scale by "how important this light would be for light sampling, dampened a bit"
+        feedbackWeight *= saturate(1.01 - bsdfMISWeight);
                 
         // // should be user option - give some positive bias [0, 1] for globally improbable lights; this (slightly) helps smaller screen regions feature more prominently in Local sampler
         // feedbackWeight /= pow( SampleGlobalPDF(lightIndex), 0.65 );
         // ^commented out mainly for perf reasons
 
-        feedbackReservoir.Add( randomNumber, lightIndex, feedbackWeight );
+        feedbackReservoir.Add( randomNumber, lightIndex, feedbackWeight, IsScreenSpaceCoherent );   // writes straight to the feedback textures
 
-        StoreFeedback( feedbackReservoir, true );
-            
-#endif // PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES 
+#endif // PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
 #endif
     }
 
@@ -334,11 +387,16 @@ struct LightSampler
     float ComputeBSDFMISForEmissiveTriangle(const uint emissiveTriangleLightIndex, lpfloat bsdfPdf, const float3 viewerPosition, const float3 lightSamplePosition, const uint candidateSampleCount, const uint fullSamples)
     {
         // 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1; no emissive light means missing data - that's fine, also rely on BSDF only
-        if( bsdfPdf == 0 || emissiveTriangleLightIndex == RTXPT_INVALID_LIGHT_INDEX )
+        if( bsdfPdf == 0 || emissiveTriangleLightIndex == NEEAT_INVALID_LIGHT_INDEX )
             return 1;
 
         PolymorphicLightInfoFull lightInfo = LoadLight(emissiveTriangleLightIndex);
         TriangleLight triangleLight = TriangleLight::Create(lightInfo);
+
+        // NEE only sees baked radiance, so it gets nothing from a triangle baked black (emission missed by the bake) even when it can
+        // pick it (an active cluster member has pdf > 0) - BSDF must keep its full weight
+        if( all(triangleLight.radiance == 0) )
+            return 1;
 
         float solidAnglePdf = triangleLight.CalcSolidAnglePdfForMIS(viewerPosition, lightSamplePosition);
         return ComputeLightVsBSDF_MIS_ForBSDF(emissiveTriangleLightIndex, bsdfPdf, solidAnglePdf, candidateSampleCount, fullSamples);
@@ -348,7 +406,7 @@ struct LightSampler
     {
 #if POLYLIGHT_QT_ENV_ENABLE
         // 0 means delta lobe (zero roughness specular) - in that case LightSampling has zero chance of ever selecting a light, only BSDF can, so MIS is 1; no emissive light means missing data - that's fine, also rely on BSDF only
-        if( bsdfPdf == 0 || environmentQuadLightIndex == RTXPT_INVALID_LIGHT_INDEX )
+        if( bsdfPdf == 0 || environmentQuadLightIndex == NEEAT_INVALID_LIGHT_INDEX )
             return 1;
 
         PolymorphicLightInfoFull lightInfo = LoadLight(environmentQuadLightIndex);
@@ -387,7 +445,7 @@ struct LightSampler
                 }
             }
 
-            surfaceEmission += lpfloat3(radiance * mis);
+            surfaceEmission = ToLpRadiance(surfaceEmission + radiance * mis);   // summed in fp32: an fp16 add can overflow too
         }
     }
 
@@ -400,7 +458,7 @@ struct LightSampler
     PolymorphicLightInfoFull LoadLight(uint index)
     {
         PolymorphicLightInfo infoBase = LightsBuffer[index];  // no bounds checking here
-        PolymorphicLightInfoEx infoExtended = (PolymorphicLightInfoEx)0;
+        PolymorphicLightInfoEx infoExtended = PolymorphicLightInfoEx::empty();
         if ( infoBase.HasLightShaping() )
             infoExtended = LightsExBuffer[index];
         return PolymorphicLightInfoFull::make(infoBase, infoExtended);
@@ -414,7 +472,7 @@ struct LightSampler
 #if RTXPT_LIGHTING_NEEAT_ENABLE_WORLDSPACE_LOCAL_LAYER
         localCount = ::ComputeCandidateSampleLocalCount(ControlBuffer[0].LocalToGlobalSampleRatio, totalCandidateSamples);
 #else
-        localCount = IsScreenSpaceCoherent?(::ComputeCandidateSampleLocalCount(ControlBuffer[0].LocalToGlobalSampleRatio, totalCandidateSamples)):(0);
+        localCount = IsScreenSpaceCoherent?(NEEAT::ComputeCandidateSampleLocalCount(ControlBuffer[0].LocalToGlobalSampleRatio, totalCandidateSamples)):(0);
 #endif
         globalCount = totalCandidateSamples - localCount;
     }

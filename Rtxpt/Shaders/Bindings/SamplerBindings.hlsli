@@ -17,5 +17,6 @@
 SamplerState s_MaterialSampler                              : register(s0);
 SamplerState s_EnvironmentMapSampler                        : register(s1);
 SamplerState s_EnvironmentMapImportanceSampler              : register(s2);
+SamplerState s_LinearClampSampler                           : register(s3);   // LUT sampling (e.g. BRDF LUT) that needs clamp, kept off the Wrap env sampler
 
 #endif //__SAMPLER_BINDINGS_HLSLI__

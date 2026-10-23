@@ -1,4 +1,5 @@
 bin/
+bin_arm64/
 build*/
 .vs
 Nrd.cfg
@@ -8,7 +9,14 @@ tests/output/*
 /External/dxc
 /External/AgilitySDK
 /External/Streamline
+/External/Streamline-arm64
+/Support/denoiser_OptiX/Denoiser.exe
 
 # local project files for shader development outside of VS
 *.sublime-*
 compile-shaders.bat
+
+# regression testing and capture sequence outputs (Testing/*.bat)
+/Testing/RegressionTesting/
+/Testing/Sequence*/*
+!/Testing/Sequence*/empty

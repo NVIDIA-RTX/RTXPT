@@ -12,7 +12,7 @@
 
 #include "SERUtils.hlsli"
 
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD
 #define SER_USE_SORTING 0
 #else
 #define SER_USE_SORTING 1
@@ -28,17 +28,20 @@
 #include "PathTracerBridgeDonut.hlsli"
 #include "PathTracer/PathTracer.hlsli"
 
+#include "Libraries/MicroRng.hlsli"
+#include "Misc/SubSampling.h"
+
 // TODO: move this to PathTracer once SER is unified
 // NOTE: this only works correctly (reconstructs the path fully) with primary hit (plus PSR so all mirrors are fine)
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES || defined(__INTELLISENSE__)
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL || defined(__INTELLISENSE__)
 float2 FirstHitFromVBuffer(inout PathState path, const uint basePlaneIndex, const PathTracer::WorkingContext workingContext)
 {
     const uint2 pixelPos = path.GetPixelPos();
 
     float2 tMinMax = float2(0, kMaxRayTravel);
 
-    StablePlane sp = workingContext.StablePlanes.LoadStablePlane(pixelPos, basePlaneIndex);
-    uint stableBranchID = workingContext.StablePlanes.GetBranchID(pixelPos, basePlaneIndex); 
+    DenoisingLayer sp = workingContext.DenoisingLayers.LoadDenoisingLayer(pixelPos, basePlaneIndex);
+    uint stableBranchID = workingContext.DenoisingLayers.GetBranchID(pixelPos, basePlaneIndex); 
     float sceneLength = sp.SceneLength;
     float lastRayTCurrent = sp.LastRayTCurrent;
     uint vertexIndex = sp.VertexIndexAndRoughness>>16; 
@@ -68,15 +71,21 @@ float2 FirstHitFromVBuffer(inout PathState path, const uint basePlaneIndex, cons
     // we're starting from the plane 0 (that's our vbuffer)
     path.SetDir( sp.RayDir );
     path.SetOrigin( sp.RayOrigin );
-    path.setFlag(PathFlags::stablePlaneOnPlane , true);
-    path.setFlag(PathFlags::stablePlaneOnBranch, true);
-    path.setStablePlaneIndex(basePlaneIndex);
+    path.setFlag(PathFlags::denoisingLayerOnPlane , true);
+    path.setFlag(PathFlags::denoisingLayerOnBranch, true);
+    path.setDenoisingLayerIndex(basePlaneIndex);
     path.stableBranchID = stableBranchID;
+
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL && ( (RTXPT_SUB_SAMPLING_SCALE_X > 1) || (RTXPT_SUB_SAMPLING_SCALE_Y > 1) )   // Reset on denoising layers disabled (0) or denoising layers generate (1)
+    path.SetThp( thp * (float(RTXPT_SUB_SAMPLING_SCALE_X*RTXPT_SUB_SAMPLING_SCALE_Y) / RTXPT_SUB_SAMPLING_RATE_NUM) );   // 1 / rate
+#else
     path.SetThp( thp );
+#endif
+
     path.SetL( float4(0,0,0,0) );
-    const uint dominantSPIndex = workingContext.StablePlanes.LoadDominantIndex(pixelPos);
-    path.setFlag(PathFlags::stablePlaneOnDominantBranch, dominantSPIndex == basePlaneIndex ); // dominant plane has been determined in _BUILD_PASS; see if it's basePlaneIndex and set flag
-    path.setCounter(PackedCounters::BouncesFromStablePlane, 0);
+    const uint dominantSPIndex = workingContext.DenoisingLayers.LoadDominantIndex(pixelPos);
+    path.setFlag(PathFlags::denoisingLayerOnDominantBranch, dominantSPIndex == basePlaneIndex ); // dominant plane has been determined in _BUILD_PASS; see if it's basePlaneIndex and set flag
+    path.setCounter(PackedCounters::BouncesFromDenoisingLayer, 0);
     if (PathTracer::HasFinishedSurfaceBounces(path.getVertexIndex()+1, path.getCounter(PackedCounters::DiffuseBounces)))
         path.setTerminateAtNextBounce();
 
@@ -91,21 +100,21 @@ float2 FirstHitFromVBuffer(inout PathState path, const uint basePlaneIndex, cons
     
     return tMinMax;
 }
-#endif // #if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES
+#endif // #if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
 
 void postProcessHit(inout PathState path, const PathTracer::WorkingContext workingContext)
 {
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES   // explore enqueued stable planes, if any
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD   // explore enqueued denoising layers, if any
     int nextPlaneToExplore;
     const uint2 pixelPos = path.GetPixelPos();
-    if (!path.isActive() && (nextPlaneToExplore=workingContext.StablePlanes.FindNextToExplore(pixelPos, path.getStablePlaneIndex()+1))!=-1 )
+    if (!path.isActive() && (nextPlaneToExplore=workingContext.DenoisingLayers.FindNextToExplore(pixelPos, path.getDenoisingLayerIndex()+1))!=-1 )
     {
         PathPayload payload;
-        workingContext.StablePlanes.ExplorationStart(pixelPos, nextPlaneToExplore, payload.packed);
+        workingContext.DenoisingLayers.ExplorationStart(pixelPos, nextPlaneToExplore, payload.packed);
         path = PathPayload::unpack(payload);
 
-		#if 0 // way of debugging contents of stable plane index 1
-        if (path.getStablePlaneIndex()==1)
+		#if 0 // way of debugging contents of denoising layer index 1
+        if (path.getDenoisingLayerIndex()==1)
             workingContext.Debug.DrawDebugViz( float4( DbgShowNormalSRGB(path.dir), 1 ) );
         #endif
     }
@@ -115,7 +124,7 @@ void postProcessHit(inout PathState path, const PathTracer::WorkingContext worki
 void nextHit(inout PathState path, inout float2 tMinMax, const PathTracer::WorkingContext workingContext)
 {
 #if defined(SER_HIT_OBJECT) || defined(__INTELLISENSE__)
-    RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
     Bridge::traceScatterRay(path, rayQuery, tMinMax, workingContext.Debug);   // this outputs ray and rayQuery; if there was a hit, ray.TMax is rayQuery.ComittedRayT
 
     SER_HIT_OBJECT hit;
@@ -147,6 +156,31 @@ void nextHit(inout PathState path, inout float2 tMinMax, const PathTracer::Worki
     }
 #endif
 
+#if 0 // warp based Russian Roulette - just an experiment that doesn't yet work - idea comes from RTX UE5 codebase.
+    // Terminating paths if these are the only few threads left in a warp - this is orthogonal to the main RR.
+    #if PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
+    const uint ActivePathCount = WaveActiveCountBits(true);
+    const uint TotalLaneCount = WaveGetLaneCount();
+    const float ActivePathRatio =(float)ActivePathCount /(float)TotalLaneCount;
+    const float ActivePathRatioThreshold = 1.0f;
+    const float WaveContinuationProb = saturate(ActivePathRatio / ActivePathRatioThreshold + 1e-05);
+
+    //if (path.getVertexIndex()==10)    
+    //    DebugPixel( path.GetPixelPos(), float4( GradientHeatMap(1-0.5*WaveActiveAllEqual(path.getVertexIndex())), 1 ) );
+
+    MicroRng mrng = MicroRng::make(path.GetPixelPos(), Bridge::getSampleIndex(), 0x01);
+    float threadRnd = mrng.NextFloat();
+    float waveSharedRnd = WaveReadLaneFirst(threadRnd);
+    if (waveSharedRnd>WaveContinuationProb)
+    {
+        path.terminate();
+        return;
+    }
+    else
+        PathTracer::UpdatePathThroughput(path, 1.0/WaveContinuationProb);
+    #endif
+#endif
+
     PathPayload payload = PathPayload::pack(path);
     SER_INVOKE_HIT(hit, payload);
     path = PathPayload::unpack(payload);
@@ -171,7 +205,7 @@ void ValidateNaNs(inout PathState path, PathTracer::WorkingContext workingContex
 {
 #if 1   // sanitize NaNs/infinities
     bool somethingWrong = false;
-#if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
     float4 L = path.GetL();
     somethingWrong |= any(isnan(L)) || !all(isfinite(L));
 #endif
@@ -189,7 +223,7 @@ void ValidateNaNs(inout PathState path, PathTracer::WorkingContext workingContex
             workingContext.Debug.DrawDebugViz( pixelPos+uint2(+0,-k), float4(1-(k/2)%2, (k/2)%2, k%5, 1 ) );
         }
 #endif
- #if PATH_TRACER_MODE!=PATH_TRACER_MODE_BUILD_STABLE_PLANES
+ #if PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
         path.SetL(0.xxxx);
  #endif
         path.SetThp(0.xxx);
@@ -201,6 +235,23 @@ void ValidateNaNs(inout PathState path, PathTracer::WorkingContext workingContex
 void RAYGEN_ENTRY()
 {
     uint2 pixelPos = DispatchRaysIndex().xy;
+// Sub-sampled dispatch: only some of the pixels get a path, so remap each thread onto the pixel it
+// traces (see SubSampling.h for the patterns and their thread grids). Two users: the denoising-layers fill pass, and
+// the SHaRC update pass, which is dispatched at renderResolution / SharcSettings::DownScaleFactor and overrides the
+// two SCALE macros for its own pipeline variant (see AdvancedPathTracer::CreateRTPipelines). Only the fill pass sets
+// RTXPT_SUB_SAMPLING_PATTERN (compile time, so the other patterns compile out); SHaRC always uses the block jitter.
+#if ( (defined(RTXPT_SUB_SAMPLING_SCALE_X) && defined(RTXPT_SUB_SAMPLING_SCALE_Y)) && ( (RTXPT_SUB_SAMPLING_SCALE_X > 1) || (RTXPT_SUB_SAMPLING_SCALE_Y > 1) ) )
+#if defined(RTXPT_SUB_SAMPLING_PATTERN)
+    const uint subSamplingPattern = RTXPT_SUB_SAMPLING_PATTERN;
+    const uint subSamplingBlockSize = RTXPT_SUB_SAMPLING_BLOCK_SIZE;
+#else
+    const uint subSamplingPattern = RTXPT_SUB_SAMPLING_PATTERN_BLOCK_JITTER;
+    const uint subSamplingBlockSize = 0;
+#endif
+    if (!SubSampling_ThreadToPixel(pixelPos, uint2(RTXPT_SUB_SAMPLING_SCALE_X, RTXPT_SUB_SAMPLING_SCALE_Y), RTXPT_SUB_SAMPLING_RATE_NUM, subSamplingPattern, subSamplingBlockSize,
+                                   SubSampling_FrameSeed(), g_Const.ptConsts.camera.ViewportSize, pixelPos))
+        return;
+#endif
 
     //float3 lastOrigin = float3(1e30f,1e30f,1e30f);
     PathState path;
@@ -208,12 +259,12 @@ void RAYGEN_ENTRY()
     path = PathTracer::EmptyPathInitialize(pixelPos, g_Const.ptConsts.camera.PixelConeSpreadAngle);
     PathTracer::SetupPathPrimaryRay(path, Bridge::computeCameraRay(pixelPos));  // note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
 
-    PathTracer::WorkingContext workingContext = GetWorkingContext();
+    PathTracer::WorkingContext workingContext = Bridge::GetWorkingContext();
     // clear, initialize any global backing memory, etc
     PathTracer::StartPixel(path, workingContext);
 
     // TODO: move this to PathTracer once DX SER API comes out of Preview and works on Vulkan
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_FILL_STABLE_PLANES    // we're continuing from base stable plane (index 0) here to avoid unnecessary path tracing
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL    // we're continuing from base denoising layer (index 0) here to avoid unnecessary path tracing
     float2 tMinMax = FirstHitFromVBuffer(path, 0, workingContext);
 #else
     float2 tMinMax = float2(0, kMaxRayTravel);
@@ -233,7 +284,7 @@ void RAYGEN_ENTRY()
     // store radiance and any other required data - we're not path tracing anymore
     PathTracer::CommitPixel( path, workingContext );
         
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES && ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD && ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
     DeltaTreeVizExplorePixel(workingContext, 0);
     return;
 #endif
@@ -269,9 +320,9 @@ void DeltaTreeVizExplorePixel(PathTracer::WorkingContext workingContext)
             PathState deltaPathState = PathPayload::unpack( statePacked );
             nextHit(deltaPathState, workingContext, true); <- no longer valid
         }
-        for (int i = 0; i < cStablePlaneCount; i++)
-            workingContext.Debug.DeltaTreeStoreStablePlaneID( i, workingContext.StablePlanes.GetBranchIDCenter(i) );
-        workingContext.Debug.DeltaTreeStoreDominantStablePlaneIndex( workingContext.StablePlanes.LoadDominantIndexCenter() );
+        for (int i = 0; i < cDenoisingLayerCount; i++)
+            workingContext.Debug.DeltaTreeStoreDenoisingLayerID( i, workingContext.DenoisingLayers.GetBranchIDCenter(i) );
+        workingContext.Debug.DeltaTreeStoreDominantDenoisingLayerIndex( workingContext.DenoisingLayers.LoadDominantIndexCenter() );
     }
 }
 #endif
@@ -283,7 +334,7 @@ void MISS_ENTRY(inout PathPayload payload : SV_RayPayload)
 //    // we inline misses in rgs, so this is a no-op.
 //#else
     PathState path = PathPayload::unpack(payload);
-    PathTracer::HandleMiss(path, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), GetWorkingContext());
+    PathTracer::HandleMiss(path, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), Bridge::GetWorkingContext());
     payload = PathPayload::pack(path);
 //#endif
 }

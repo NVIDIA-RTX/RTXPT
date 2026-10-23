@@ -11,6 +11,9 @@
 #ifndef SURFACE_DATA_HLSLI
 #define SURFACE_DATA_HLSLI
 
+// we use static specialization for RTXDI - only StandardBSDF is supported
+#define ActiveBSDF StandardBSDF
+
 #include "../Shaders/Bindings/ShaderResourceBindings.hlsli"
 
 #include "../Shaders/Misc/GBufferHelpers.hlsli"
@@ -41,12 +44,12 @@ bool isValidPixelPosition(int2 pixelPosition)
 // 	    return PathTracerCollectedSurfaceData::makeEmpty();
 // 
 //     // Init globals
-//     StablePlanesContext stablePlanes = StablePlanesContext::make(u_StablePlanesHeader, u_StablePlanesBuffer, u_StableRadiance, g_Const.ptConsts);
+//     DenoisingLayersContext denoisingLayers = DenoisingLayersContext::make(u_DenoisingLayersHeader, u_DenoisingLayersBuffer, u_StableRadiance, g_Const.ptConsts);
 // 
 //     // Figure out the shading plane
-//     uint dominantStablePlaneIndex = stablePlanes.LoadDominantIndex(pixelPosition);
-//     uint stableBranchID = stablePlanes.GetBranchID(pixelPosition, dominantStablePlaneIndex);
-//     return getGBufferSurfaceImpl(pixelPosition, stablePlanes.LoadStablePlane(pixelPosition, dominantStablePlaneIndex), dominantStablePlaneIndex, stableBranchID);
+//     uint dominantDenoisingLayerIndex = denoisingLayers.LoadDominantIndex(pixelPosition);
+//     uint stableBranchID = denoisingLayers.GetBranchID(pixelPosition, dominantDenoisingLayerIndex);
+//     return getGBufferSurfaceImpl(pixelPosition, denoisingLayers.LoadDenoisingLayer(pixelPosition, dominantDenoisingLayerIndex), dominantDenoisingLayerIndex, stableBranchID);
 // }
 
 // Load a surface from the current or previous GBuffer at the specified pixel position.
@@ -73,9 +76,9 @@ PathTracerCollectedSurfaceData getGBufferSurface(int2 pixelPosition, bool previo
 #endif
 }
 
-// PackedPathTracerSurfaceData ExtractPackedGbufferSurfaceData(uint2 pixelPosition, StablePlane sp, uint dominantStablePlaneIndex, uint stableBranchID)
+// PackedPathTracerSurfaceData ExtractPackedGbufferSurfaceData(uint2 pixelPosition, DenoisingLayer sp, uint dominantDenoisingLayerIndex, uint stableBranchID)
 // {
-// 	const PathTracerCollectedSurfaceData data = getGBufferSurfaceImpl(pixelPosition, sp, dominantStablePlaneIndex, stableBranchID);
+// 	const PathTracerCollectedSurfaceData data = getGBufferSurfaceImpl(pixelPosition, sp, dominantDenoisingLayerIndex, stableBranchID);
 // 	return RunCompress(data);
 // }
 

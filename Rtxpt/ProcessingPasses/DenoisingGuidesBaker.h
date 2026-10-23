@@ -13,7 +13,6 @@
 #include <memory>
 #include "../SampleCommon/ComputePass.h"
 #include <donut/core/math/math.h>
-#include <donut/engine/BindingCache.h>
 
 enum class DebugViewType;
 
@@ -35,6 +34,10 @@ public:
 public:
     void                            DenoiseSpecHitT( nvrhi::ICommandList * commandList, nvrhi::BindingSetHandle bindingSet );
     void                            ComputeAvgLayerRadiance( nvrhi::ICommandList * commandList, nvrhi::BindingSetHandle bindingSet );
+    // Writes the DLSS-RR guide buffers (albedo/spec albedo/normals+roughness/spec motion vectors) and the denoiser input
+    // colour. Must be dispatched at the same point in the frame as the old PostProcess DLSSRRDenoiserPrepareInputs pass -
+    // it consumes the denoising layers and writes u_OutputColor, so it is not interchangeable with the passes above.
+    void                            PrepareDLSSRRGuides( nvrhi::ICommandList * commandList, nvrhi::BindingSetHandle bindingSet );
     void                            RenderDebugViz( nvrhi::ICommandList * commandList, DebugViewType debugView, nvrhi::BindingSetHandle bindingSet );
 
     bool                            DebugGUI(float indent);
@@ -45,10 +48,10 @@ private:
     
     ComputePass                     m_csDenoiseSpecHitT;
     ComputePass                     m_csComputeAvgLayerRadiance;
+    ComputePass                     m_csPrepareDLSSRRGuides;
     ComputePass                     m_csDebugViz;
 
     nvrhi::BindingLayoutHandle      m_bindingLayout;
-    donut::engine::BindingCache     m_bindingCache;
 
     const std::unique_ptr<RenderTargets> & m_renderTargets;
     const std::shared_ptr<ShaderDebug> & m_shaderDebug;

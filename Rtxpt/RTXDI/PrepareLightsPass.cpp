@@ -25,6 +25,7 @@ using namespace donut::math;
 #include "ShaderParameters.h"
 #include "../Lighting/Distant/EnvMapBaker.h"
 #include "../Lighting/Distant/EnvMapImportanceSamplingBaker.h"
+#include "../SampleCommon/PackingUtils.h"
 #include "../SampleCommon/RenderTargets.h"
 
 #include "../Misc/ShaderDebug.h"
@@ -159,7 +160,7 @@ void PrepareLightsPass::CountLightsInScene(uint32_t& numEmissiveMeshes, uint32_t
         for (const auto& geometry : instance->GetMesh()->geometries)
         {
             PTMaterial & materialPT = *PTMaterial::SafeCast(geometry->material);
-            if (materialPT.IsEmissive())
+            if (materialPT.IsEmissiveSurfaceLightSampling() && !materialPT.SkipRender)
             {
                 numEmissiveMeshes += 1;
                 numEmissiveTriangles += geometry->numIndices / 3;
@@ -168,180 +169,16 @@ void PrepareLightsPass::CountLightsInScene(uint32_t& numEmissiveMeshes, uint32_t
     }
 }
 
-static inline uint floatToUInt(float _V, float _Scale)
-{
-    return (uint)floor(_V * _Scale + 0.5f);
-}
-
-static inline uint FLOAT3_to_R8G8B8_UNORM(float unpackedInputX, float unpackedInputY, float unpackedInputZ)
-{
-    return (floatToUInt(saturate(unpackedInputX), 0xFF) & 0xFF) |
-        ((floatToUInt(saturate(unpackedInputY), 0xFF) & 0xFF) << 8) |
-        ((floatToUInt(saturate(unpackedInputZ), 0xFF) & 0xFF) << 16);
-}
-
-static void packLightColor(const float3& color, PolymorphicLightInfoFull& lightInfo)
-{
-    float maxRadiance = std::max(color.x, std::max(color.y, color.z));
-
-    if (maxRadiance <= 0.f)
-        return;
-
-    float logRadiance = (::log2f(maxRadiance) - kPolymorphicLightMinLog2Radiance) / (kPolymorphicLightMaxLog2Radiance - kPolymorphicLightMinLog2Radiance);
-    logRadiance = saturate(logRadiance);
-    uint32_t packedRadiance = std::min(uint32_t(ceilf(logRadiance * 65534.f)) + 1, 0xffffu);
-    float unpackedRadiance = ::exp2f((float(packedRadiance - 1) / 65534.f) * (kPolymorphicLightMaxLog2Radiance - kPolymorphicLightMinLog2Radiance) + kPolymorphicLightMinLog2Radiance);
-
-    lightInfo.Base.ColorTypeAndFlags |= FLOAT3_to_R8G8B8_UNORM(color.x / unpackedRadiance, color.y / unpackedRadiance, color.z / unpackedRadiance);
-    lightInfo.Base.LogRadiance |= packedRadiance;
-}
-
-static float2 OctWrap(float2 v)
-{
-    return float2( ( 1.0f - abs(v.y)) * ((v.x >= 0.0)?1.0f:-1.0f), 
-                   ( 1.0f - abs(v.x)) * ((v.y >= 0.0)?1.0f:-1.0f) );
-}
-
-static float2 Encode_Oct(float3 n3)
-{
-    n3 /= (abs(n3.x) + abs(n3.y) + abs(n3.z));
-    float2 n = n3.xy();
-    n = n3.z >= 0.0 ? n : OctWrap(n);
-    n = n * 0.5f + 0.5f;
-    return n;
-}
-
-static uint NDirToOctUnorm32(float3 n)
-{
-    float2 p = Encode_Oct(n);
-    p = saturate(p * 0.5f + 0.5f);
-    return uint(p.x * 0xfffe) | (uint(p.y * 0xfffe) << 16);
-}
-
-// Modified from original, based on the method from the DX fallback layer sample
-static uint16_t fp32ToFp16(float v)
-{
-    // Multiplying by 2^-112 causes exponents below -14 to denormalize
-    static const union FU {
-        uint ui;
-        float f;
-    } multiple = { 0x07800000 }; // 2**-112
-
-    FU BiasedFloat;
-    BiasedFloat.f = v * multiple.f;
-    const uint u = BiasedFloat.ui;
-
-    const uint sign = u & 0x80000000;
-    uint body = u & 0x0fffffff;
-
-    return (uint16_t)(sign >> 16 | body >> 13) & 0xFFFF;
-}
-
 static bool ConvertLight(const donut::engine::Light& light, PolymorphicLightInfoFull& polymorphic, bool enableImportanceSampledEnvironmentLight, EnvMapBaker* environmentMap)
 {
+    if (PackingUtils::IsAnalyticLight(light))
+    {
+        polymorphic = PackingUtils::ConvertLight(light);
+        return true;
+    }
+
     switch (light.GetLightType())
     {
-#if 0 // we're now baking these into the environment map!
-    case LightType_Directional: {
-        auto& directional = static_cast<const donut::engine::DirectionalLight&>(light);
-        float clampedAngularSize = clamp(directional.angularSize, 0.f, 90.f);
-        float halfAngularSizeRad = 0.5f * dm::radians(clampedAngularSize);
-        float solidAngle = float(2 * dm::PI_d * (1.0 - cos(halfAngularSizeRad)));
-        float3 radiance = directional.color * directional.irradiance / solidAngle;
-
-        polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kDirectional << kPolymorphicLightTypeShift;
-        packLightColor(radiance, polymorphic);
-        polymorphic.Base.Direction1 = NDirToOctUnorm32(float3(normalize(directional.GetDirection())));
-        // Can't pass cosines of small angles reliably with fp16
-        polymorphic.Base.Scalars = fp32ToFp16(halfAngularSizeRad) | (fp32ToFp16(solidAngle) << 16);
-        return true;
-    }
-#endif
- 
-	case LightType_Spot: {
-		auto& spot = dynamic_cast<const SpotLight&>(light);
-
-        // Sphere lights not supported in the RTXPT currently
-        if (spot.radius == 0.f)
-        {
-			float3 flux = spot.color * spot.intensity;
-
-			polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kPoint << kPolymorphicLightTypeShift | ((spot.outerAngle < 0)?(kPolymorphicLightShapingUseMinFalloff):(0));
-			packLightColor(flux, polymorphic);
-			polymorphic.Base.Center = float3(spot.GetPosition());
-            polymorphic.Base.Direction1 = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
-            polymorphic.Base.Direction2 = fp32ToFp16(dm::radians(abs(spot.outerAngle)));
-			polymorphic.Base.Direction2 |= fp32ToFp16(dm::radians(spot.innerAngle)) << 16;
-        }
-        else
-        {
-
-            float projectedArea = dm::PI_f * square(spot.radius);
-            float3 radiance = spot.color * spot.intensity / projectedArea;
-            float softness = saturate(1.f - spot.innerAngle / abs(spot.outerAngle));
-
-            polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift | ((spot.outerAngle < 0)?(kPolymorphicLightShapingUseMinFalloff):(0));
-            polymorphic.Base.ColorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
-            packLightColor(radiance, polymorphic);
-            polymorphic.Base.Center = float3(spot.GetPosition());
-            polymorphic.Base.Scalars = fp32ToFp16(spot.radius);
-            polymorphic.Extended.PrimaryAxis = NDirToOctUnorm32(float3(normalize(spot.GetDirection())));
-            polymorphic.Extended.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(abs(spot.outerAngle))));
-            polymorphic.Extended.CosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
-        }
-
-		return true;
-	}
-   /* case LightType_Spot: {
-   *    // Spot Light with ies profile
-        auto& spot = static_cast<const SpotLightWithProfile&>(light);
-        float projectedArea = dm::PI_f * square(spot.radius);
-        float3 radiance = spot.color * spot.intensity / projectedArea;
-        float softness = saturate(1.f - spot.innerAngle / abs(spot.outerAngle));
-
-        polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift;
-        polymorphic.Base.ColorTypeAndFlags |= kPolymorphicLightShapingEnableBit;
-        packLightColor(radiance, polymorphic);
-        polymorphic.Base.Center = float3(spot.GetPosition());
-        polymorphic.Base.Scalars = fp32ToFp16(spot.radius);
-        polymorphic.Extended.PrimaryAxis = packNormalizedVector(float3(normalize(spot.GetDirection())));
-        polymorphic.Extended.CosConeAngleAndSoftness = fp32ToFp16(cosf(dm::radians(abs(spot.outerAngle))));
-        polymorphic.Extended.CosConeAngleAndSoftness |= fp32ToFp16(softness) << 16;
-
-        if (spot.profileTextureIndex >= 0)
-        {
-            polymorphic.Extended.iesProfileIndex = spot.profileTextureIndex;
-            polymorphic.Extended.ColorTypeAndFlags |= kPolymorphicLightIesProfileEnableBit;
-        }
-
-        return true;
-    }*/
-    case LightType_Point: {
-        auto& point = dynamic_cast<const donut::engine::PointLight&>(light);
-     
-        if (point.radius == 0.f)
-        {
-            float3 flux = point.color * point.intensity;
-
-            polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kPoint << kPolymorphicLightTypeShift;
-            packLightColor(flux, polymorphic);
-            polymorphic.Base.Center = float3(point.GetPosition());
-            // Set the default values so we can use the same path for spot lights 
-            polymorphic.Base.Direction2 = fp32ToFp16(dm::PI_f) | fp32ToFp16(0.0f) << 16;
-        }
-        else
-        {
-            float projectedArea = dm::PI_f * square(point.radius);
-            float3 radiance = point.color * point.intensity / projectedArea;
-
-            polymorphic.Base.ColorTypeAndFlags = (uint32_t)PolymorphicLightType::kSphere << kPolymorphicLightTypeShift;
-            packLightColor(radiance, polymorphic);
-            polymorphic.Base.Center = float3(point.GetPosition());
-            polymorphic.Base.Scalars = fp32ToFp16(point.radius);
-        }
-
-        return true;
-    }
     case LightType_Environment: {
         // do not add an environment light to the light list if the option is disabled 
         if (enableImportanceSampledEnvironmentLight)
@@ -380,7 +217,7 @@ RTXDI_LightBufferParameters PrepareLightsPass::Process(nvrhi::ICommandList* comm
 {
     RTXDI_LightBufferParameters lightBufferParams = {};
     
-    commandList->beginMarker("PrepareLights");
+    GpuProfiler::Begin(commandList, "PrepareLights");
 
     std::vector<PrepareLightsTask> tasks;
     std::vector<PolymorphicLightInfoFull> primitiveLightInfos;
@@ -404,7 +241,7 @@ RTXDI_LightBufferParameters PrepareLightsPass::Process(nvrhi::ICommandList* comm
             nvrhi::hash_combine(instanceHash, geometryIndex);
 
             PTMaterial & materialPT = *PTMaterial::SafeCast(geometry->material);
-            if (!materialPT.IsEmissive())
+            if (!materialPT.IsEmissiveSurfaceLightSampling() || materialPT.SkipRender)
             {
                 // remove the info about this instance, just in case it was emissive and now it's not
                 m_InstanceLightBufferOffsets.erase(instanceHash);
@@ -524,7 +361,7 @@ RTXDI_LightBufferParameters PrepareLightsPass::Process(nvrhi::ICommandList* comm
     if (lightBufferOffset > 0)
         commandList->dispatch(dm::div_ceil(lightBufferOffset, 256));
 
-    commandList->endMarker();
+    GpuProfiler::End(commandList);
 
 	lightBufferParams.localLightBufferRegion.firstLightIndex += constants.currentFrameLightOffset;
 	lightBufferParams.infiniteLightBufferRegion.firstLightIndex += constants.currentFrameLightOffset;

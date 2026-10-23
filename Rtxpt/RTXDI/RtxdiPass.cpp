@@ -91,6 +91,7 @@ void RtxdiPass::UpdateContextDynamicParameters()
 	m_ImportanceSamplingContext->GetReSTIRDIContext().SetInitialSamplingParameters(m_BridgeParameters.userSettings.restirDI.initialSamplingParams);
 	m_ImportanceSamplingContext->GetReSTIRDIContext().SetResamplingMode(m_BridgeParameters.userSettings.restirDI.resamplingMode);
 	m_ImportanceSamplingContext->GetReSTIRDIContext().SetTemporalResamplingParameters(m_BridgeParameters.userSettings.restirDI.temporalResamplingParams);
+	m_ImportanceSamplingContext->GetReSTIRDIContext().SetBoilingFilterParameters(m_BridgeParameters.userSettings.restirDI.boilingFilterParams);
 	m_ImportanceSamplingContext->GetReSTIRDIContext().SetSpatialResamplingParameters(m_BridgeParameters.userSettings.restirDI.spatialResamplingParams);
 	m_ImportanceSamplingContext->GetReSTIRDIContext().SetShadingParameters(m_BridgeParameters.userSettings.restirDI.shadingParams);
 
@@ -98,6 +99,7 @@ void RtxdiPass::UpdateContextDynamicParameters()
 	m_ImportanceSamplingContext->GetReSTIRGIContext().SetFrameIndex(m_BridgeParameters.frameIndex);
 	m_ImportanceSamplingContext->GetReSTIRGIContext().SetResamplingMode(m_BridgeParameters.userSettings.restirGI.resamplingMode);
 	m_ImportanceSamplingContext->GetReSTIRGIContext().SetTemporalResamplingParameters(m_BridgeParameters.userSettings.restirGI.temporalResamplingParams);
+	m_ImportanceSamplingContext->GetReSTIRGIContext().SetBoilingFilterParameters(m_BridgeParameters.userSettings.restirGI.boilingFilterParams);
 	m_ImportanceSamplingContext->GetReSTIRGIContext().SetSpatialResamplingParameters(m_BridgeParameters.userSettings.restirGI.spatialResamplingParams);
 	m_ImportanceSamplingContext->GetReSTIRGIContext().SetFinalShadingParameters(m_BridgeParameters.userSettings.restirGI.finalShadingParams);
 
@@ -177,10 +179,13 @@ void RtxdiPass::CreateBindingSet(const RenderTargets& renderTargets)
 
 void RtxdiPass::Reset()
 {
-	m_ImportanceSamplingContext = nullptr;
-	m_rtxdiResources = nullptr;
-	m_LocalLightPdfMipmapPass = nullptr;
-	m_bindingSet = nullptr;
+    m_ImportanceSamplingContext = nullptr;
+    m_rtxdiResources = nullptr;
+    m_LocalLightPdfMipmapPass = nullptr;
+    m_bindingSet = nullptr;
+    // Both hold the scene (the pass also its sub-instance buffer and bakers); PrepareResources sets them again
+    m_Scene = nullptr;
+    m_PrepareLightsPass = nullptr;
 }
 
 void RtxdiPass::PrepareResources(
@@ -196,10 +201,10 @@ void RtxdiPass::PrepareResources(
     const nvrhi::BindingLayoutHandle extraBindingLayout,
     std::shared_ptr<ShaderDebug> shaderDebug)
 {
-    m_Scene = scene;
     m_BridgeParameters = bridgeParams;
 
     CheckContextStaticParameters();
+    m_Scene = scene;    // after the check, whose Reset() clears it
 
     if (!m_ImportanceSamplingContext)
     {
@@ -284,9 +289,9 @@ void RtxdiPass::BeginFrame(
 	if (m_BridgeParameters.usingLightSampling)
 	{
 		//This pass needs to happen before we fill the constant buffers 
-		commandList->beginMarker("Prepare Light");
+        GpuProfiler::Begin(commandList, "Prepare Light");
 		RTXDI_LightBufferParameters lightBufferParams = m_PrepareLightsPass->Process(commandList);
-		commandList->endMarker();
+        GpuProfiler::End(commandList);
 
 		m_ImportanceSamplingContext->SetLightBufferParams(lightBufferParams);
 	}
@@ -306,11 +311,11 @@ void RtxdiPass::BeginFrame(
 			m_rtxdiResources->LocalLightPdfTexture);
 	}
 
-	commandList->beginMarker("GeneratePDFTextures");
+    GpuProfiler::Begin(commandList, "GeneratePDFTextures");
 
 	m_LocalLightPdfMipmapPass->Process(commandList);
 
-	commandList->endMarker();
+    GpuProfiler::End(commandList);
 
 	// Pre-sample lights
 	const auto lightBufferParams = m_ImportanceSamplingContext->GetLightBufferParameters();
@@ -357,7 +362,7 @@ void RtxdiPass::Execute(
     bool skipFinal
 )
 {
-	commandList->beginMarker("ReSTIR DI");
+    GpuProfiler::Begin(commandList, "ReSTIR DI");
 
 	auto& reSTIRDI = m_ImportanceSamplingContext->GetReSTIRDIContext();
 	dm::int2 dispatchSize = { (int) reSTIRDI.GetStaticParameters().RenderWidth, (int)reSTIRDI.GetStaticParameters().RenderHeight };
@@ -402,7 +407,7 @@ void RtxdiPass::Execute(
             ExecuteComputePass(commandList, m_FinalSamplingPass, "Final Sampling", screenSpaceDispatchSize, extraBindingSet);
         }
     }
-	commandList->endMarker();
+    GpuProfiler::End(commandList);
 }
 
 void RtxdiPass::FillConstants(nvrhi::CommandListHandle commandList)
@@ -437,7 +442,7 @@ void RtxdiPass::FillSharedConstants(struct RtxdiBridgeConstants& bridgeConstants
 	bridgeConstants.reStirGIEnableTemporalResampling = ((giSampleMode == rtxdi::ReSTIRGI_ResamplingMode::Temporal) || (giSampleMode == rtxdi::ReSTIRGI_ResamplingMode::TemporalAndSpatial)) ? 1 : 0;
 }
 
-void RtxdiPass::FillDIConstants(ReSTIRDI_Parameters& diParams)
+void RtxdiPass::FillDIConstants(RTXDI_Parameters& diParams)
 {
 	const auto& reSTIRDI = m_ImportanceSamplingContext->GetReSTIRDIContext();
 	const auto& lightBufferParams = m_ImportanceSamplingContext->GetLightBufferParameters();
@@ -447,19 +452,21 @@ void RtxdiPass::FillDIConstants(ReSTIRDI_Parameters& diParams)
 	diParams.initialSamplingParams = reSTIRDI.GetInitialSamplingParameters();
 	diParams.initialSamplingParams.environmentMapImportanceSampling = lightBufferParams.environmentLightParams.lightPresent;
 	if (!diParams.initialSamplingParams.environmentMapImportanceSampling)
-		diParams.initialSamplingParams.numPrimaryEnvironmentSamples = 0;
+		diParams.initialSamplingParams.numEnvironmentSamples = 0;
 	diParams.temporalResamplingParams = reSTIRDI.GetTemporalResamplingParameters();
+	diParams.boilingFilterParams = reSTIRDI.GetBoilingFilterParameters();
 	diParams.spatialResamplingParams = reSTIRDI.GetSpatialResamplingParameters();
 	diParams.shadingParams = reSTIRDI.GetShadingParameters();
 }
 
-void RtxdiPass::FillGIConstants(ReSTIRGI_Parameters& giParams)
+void RtxdiPass::FillGIConstants(RTXDI_GIParameters& giParams)
 {
 	const auto& reSTIRGI = m_ImportanceSamplingContext->GetReSTIRGIContext();
 
 	giParams.reservoirBufferParams = reSTIRGI.GetReservoirBufferParameters();
 	giParams.bufferIndices = reSTIRGI.GetBufferIndices();
 	giParams.temporalResamplingParams = reSTIRGI.GetTemporalResamplingParameters();
+	giParams.boilingFilterParams = reSTIRGI.GetBoilingFilterParameters();
 	giParams.spatialResamplingParams = reSTIRGI.GetSpatialResamplingParameters();
 	giParams.finalShadingParams = reSTIRGI.GetFinalShadingParameters();
 }
@@ -518,7 +525,7 @@ void RtxdiPass::FillReGirIndirectConstants(ReGirIndirectConstants& regirIndirect
 
 void RtxdiPass::ExecuteGI(nvrhi::CommandListHandle commandList, nvrhi::BindingSetHandle extraBindingSet, bool skipFinal)
 {
-	commandList->beginMarker("ReSTIR GI");
+    GpuProfiler::Begin(commandList, "ReSTIR GI");
 
 	auto& reSTIRGI = m_ImportanceSamplingContext->GetReSTIRGIContext();
 
@@ -538,7 +545,7 @@ void RtxdiPass::ExecuteGI(nvrhi::CommandListHandle commandList, nvrhi::BindingSe
     if (!skipFinal)
 	    ExecuteRayTracingPass(commandList, m_GIFinalShadingPass, "Final Shading", dispatchSize, extraBindingSet);
 
-	commandList->endMarker(); // ReSTIR GI
+    GpuProfiler::End(commandList); // ReSTIR GI
 }
 
 void RtxdiPass::ExecuteFusedDIGIFinal(nvrhi::CommandListHandle commandList, nvrhi::BindingSetHandle extraBindingSet)
@@ -558,13 +565,13 @@ void RtxdiPass::ExecuteComputePass(
 	dm::int3 dispatchSize,
 	nvrhi::BindingSetHandle extraBindingSet /*= nullptr*/)
 {
-	commandList->beginMarker(passName);
+    GpuProfiler::Begin(commandList, passName);
     
     SampleMiniConstants unusedPushConstants = { };  // shared bindings require them
 	pass.Execute(commandList, dispatchSize.x, dispatchSize.y, dispatchSize.z, m_bindingSet,
 		extraBindingSet, m_Scene->GetDescriptorTable(), &unusedPushConstants, sizeof(unusedPushConstants));
 
-	commandList->endMarker();
+    GpuProfiler::End(commandList);
 }
 
 void RtxdiPass::ExecuteRayTracingPass(
@@ -575,13 +582,13 @@ void RtxdiPass::ExecuteRayTracingPass(
 	nvrhi::IBindingSet* extraBindingSet /* = nullptr */
 )
 {
-	commandList->beginMarker(passName);
+    GpuProfiler::Begin(commandList, passName);
 	
     SampleMiniConstants unusedPushConstants = { };  // shared bindings require them
 	pass.Execute(commandList, dispatchSize.x, dispatchSize.y, m_bindingSet, 
 		extraBindingSet, m_Scene->GetDescriptorTable(), &unusedPushConstants, sizeof(unusedPushConstants));
 
-	commandList->endMarker();
+    GpuProfiler::End(commandList);
 }
 
 donut::engine::ShaderMacro RtxdiPass::GetReGirMacro(const rtxdi::ReGIRStaticParameters& regirParameters)

@@ -476,6 +476,28 @@ void GameScene::TickCamera(float deltaTime, donut::app::FirstPersonCamera & rend
     }
 }
 
+// Edges are clipped at w = nearW so corners behind the camera don't flip
+static void DrawAABBWireframe(ImDrawList * drawList, const box3 & bbox, const float4x4 & viewProj, const float2 & displaySize, ImU32 col, float thickness)
+{
+    const float nearW = 1e-3f;
+    auto toScreen = [&](const float4 & c) { return ImVec2((c.x / c.w * 0.5f + 0.5f) * displaySize.x, (c.y / c.w * -0.5f + 0.5f) * displaySize.y); };
+    float4 clip[8];
+    for (int i = 0; i < 8; i++)
+        clip[i] = float4(bbox.getCorner(i), 1) * viewProj;
+    for (int i = 0; i < 8; i++)
+        for (int bit = 1; bit < 8; bit <<= 1)
+        {
+            if (i & bit)
+                continue;
+            float4 a = clip[i], b = clip[i | bit];
+            if (a.w < nearW && b.w < nearW)
+                continue;
+            if (a.w < nearW) a = lerp(a, b, (nearW - a.w) / (b.w - a.w));
+            if (b.w < nearW) b = lerp(b, a, (nearW - b.w) / (a.w - b.w));
+            drawList->AddLine(toScreen(a), toScreen(b), col, thickness);
+        }
+}
+
 void GameScene::StandaloneGUI(const std::shared_ptr<donut::engine::PlanarView> & view, const float2 & displaySize)
 {
     // collect toggles
@@ -566,10 +588,11 @@ void GameScene::StandaloneGUI(const std::shared_ptr<donut::engine::PlanarView> &
     if (selArea.Selected && selProp != nullptr)
     {
         ImDrawList* draw_list = ImGui::GetForegroundDrawList();
-        draw_list->AddCircle(ImVec2(selArea.ScreenPos.x, selArea.ScreenPos.y), selArea.ScreenRadius, IM_COL32(0, 0, 255, 255), 32);
+        DrawAABBWireframe(draw_list, selProp->GetNode()->GetGlobalBoundingBox(), view->GetViewProjectionMatrix(), displaySize, IM_COL32(255, 255, 0, 255), 2.0f);
         std::string info = StringFormat("Press 'F' to lock camera to prop '%s'", selProp->GetName().c_str());
-        draw_list->AddText(ImVec2(selArea.ScreenPos.x+1, selArea.ScreenPos.y+1), IM_COL32(0, 0, 0, 192), info.c_str() );
-        draw_list->AddText(ImVec2(selArea.ScreenPos.x, selArea.ScreenPos.y), IM_COL32(255, 255, 255, 255), info.c_str());
+        const float2 textPos = selArea.ScreenPos + float2(16, 16);     // clear of the mouse cursor
+        draw_list->AddText(ImVec2(textPos.x+1, textPos.y+1), IM_COL32(0, 0, 0, 192), info.c_str() );
+        draw_list->AddText(ImVec2(textPos.x, textPos.y), IM_COL32(255, 255, 255, 255), info.c_str());
 
         if (ImGui::IsKeyDown(ImGuiKey::ImGuiKey_F))
             AttachCamera(selProp);

@@ -55,6 +55,11 @@ public:
 
     bool                            Update( double sceneTime, ProceduralSkyConstants & outConstants, const std::string & presetType, bool forceInstantUpdate );
 
+    // Most recently computed sky constants (SunDir, SunAngularDiameter, sun_solid_angle,
+    // FinalRadianceMultiplier, ...). Consumed by IntroPathTracer to synthesize a directional
+    // "sun" analytic light, since the procedural sky sun is not a scene-graph light.
+    const ProceduralSkyConstants &  GetLastConstants() const        { return m_lastConstants; }
+
     void                            DebugGUI(float indent);
 
 private:

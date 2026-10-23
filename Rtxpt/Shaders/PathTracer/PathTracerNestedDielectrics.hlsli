@@ -12,6 +12,7 @@
 #define __PATH_TRACER_NESTED_DIELECTRICS_HLSLI__
 
 #include "PathTracerTypes.hlsli"
+#include "Surface/Surface.hlsli"
 
 namespace PathTracer
 {
@@ -45,7 +46,7 @@ namespace PathTracer
     /** Handle hits on dielectrics.
     \return True if this is an valid intersection, false if it is rejected.
     */
-    inline bool HandleNestedDielectrics(inout SurfaceData surfaceData, inout PathState path, const WorkingContext workingContext)
+    inline bool HandleNestedDielectrics(inout Surface surface, inout PathState path, const WorkingContext workingContext)
     {
 #if RTXPT_NESTED_DIELECTRICS_QUALITY == 1
     static const uint           kMaxRejectedDielectricHits      = 4;    // Maximum number of rejected hits along a path (PackedCounters::RejectedHits counter, used by nested dielectrics). The path is terminated if the limit is reached to avoid getting stuck in pathological cases.
@@ -57,11 +58,11 @@ namespace PathTracer
 
 #if RTXPT_NESTED_DIELECTRICS_QUALITY > 0 || defined(__INTELLISENSE__)
 
-        if (surfaceData.shadingData.mtl.isThinSurface())
+        if (surface.shadingData.shadingFlags.isThinSurface())
             return true; 
 
         // Check for false intersections.
-        uint nestedPriority = surfaceData.shadingData.mtl.getNestedPriority();
+        uint nestedPriority = surface.shadingData.shadingFlags.getNestedPriority();
         if (
 #if NESTED_DIELECTRICS_AVOID_TERMINATION
             path.getCounter(PackedCounters::RejectedHits) < kMaxRejectedDielectricHits && 
@@ -79,21 +80,21 @@ namespace PathTracer
 #endif
             {
 #if 0 && ENABLE_DEBUG_VIZUALISATIONS && ENABLE_DEBUG_LINES_VIZ // do debugging for rejected pixels too!
-                if (workingContext.Debug.IsDebugPixel())
+                if (workingContext.Debug.IsDebugPixel(path.GetPixelPos()))
                 {
                     // IoR debugging - .x - "outside", .y - "interior", .z - frontFacing, .w - "eta" (eta is isFrontFace?outsideIoR/insideIoR:insideIoR/outsideIoR)
-                    // workingContext.Debug.Print(path.getVertexIndex()-1, float4(-42,-42,-42,-42) ); //float4(surfaceData.shadingData.IoR, surfaceData.interiorIoR, surfaceData.shadingData.frontFacing, surfaceData.bsdf.data.eta) );
+                    // workingContext.Debug.Print(path.getVertexIndex()-1, float4(-42,-42,-42,-42) ); //float4(surface.shadingData.exteriorIoR, surface.shadingData.interiorIoR, surface.shadingData.frontFacing, surface.bsdf.data.eta) );
                     // path segment
-                    workingContext.Debug.DrawLine(path.origin-, surfaceData.shadingData.posW, 0.4.xxx, 0.1.xxx);
-                    workingContext.Debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.T * workingContext.Debug.LineScale()*0.2, float3(0.1, 0, 0), float3(0.5, 0, 0));
-                    workingContext.Debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.B * workingContext.Debug.LineScale()*0.2, float3(0, 0.1, 0), float3(0, 0.5, 0));
-                    workingContext.Debug.DrawLine(surfaceData.shadingData.posW, surfaceData.shadingData.posW + surfaceData.shadingData.N * workingContext.Debug.LineScale()*0.2, float3(0, 0, 0.1), float3(0, 0, 0.5));
+                    workingContext.Debug.DrawLine(path.origin-, surface.shadingData.posW, 0.4.xxx, 0.1.xxx);
+                    workingContext.Debug.DrawLine(surface.shadingData.posW, surface.shadingData.posW + surface.shadingData.T() * workingContext.Debug.LineScale()*0.2, float3(0.1, 0, 0), float3(0.5, 0, 0));
+                    workingContext.Debug.DrawLine(surface.shadingData.posW, surface.shadingData.posW + surface.shadingData.B() * workingContext.Debug.LineScale()*0.2, float3(0, 0.1, 0), float3(0, 0.5, 0));
+                    workingContext.Debug.DrawLine(surface.shadingData.posW, surface.shadingData.posW + surface.shadingData.N * workingContext.Debug.LineScale()*0.2, float3(0, 0, 0.1), float3(0, 0, 0.5));
                 }
 #endif
 
                 path.incrementCounter(PackedCounters::RejectedHits);
-                path.interiorList.handleIntersection(surfaceData.shadingData.materialID, nestedPriority, surfaceData.shadingData.frontFacing);
-                path.SetOrigin( ComputeRayOrigin( surfaceData.shadingData.posW, -surfaceData.shadingData.faceNCorrected ) ); // same as surfaceData.shadingData.computeNewRayOrigin(false);
+                path.interiorList.handleIntersection(surface.shadingData.MaterialID(), nestedPriority, surface.shadingData.frontFacing);
+                path.SetOrigin( surface.shadingData.ComputeNewRayOrigin(false) );
                 path.decrementVertexIndex();
             }
 #if !NESTED_DIELECTRICS_AVOID_TERMINATION
@@ -106,7 +107,7 @@ namespace PathTracer
         }
 
         // Compute index of refraction for medium on the outside.
-        Bridge::updateOutsideIoR( surfaceData, ComputeOutsideIoR(path.interiorList, surfaceData.shadingData.materialID, surfaceData.shadingData.frontFacing) );
+        surface.shadingData.SetExteriorIoR(ComputeOutsideIoR(path.interiorList, surface.shadingData.MaterialID(), surface.shadingData.frontFacing));
 
 #endif // #if RTXPT_NESTED_DIELECTRICS_QUALITY > 0 || defined(__INTELLISENSE__)
 
@@ -118,10 +119,10 @@ namespace PathTracer
     inline void UpdateNestedDielectricsOnScatterTransmission(const ShadingData shadingData, inout PathState path, const WorkingContext workingContext)
     {
 #if RTXPT_NESTED_DIELECTRICS_QUALITY > 0 || defined(__INTELLISENSE__)
-        if (!shadingData.mtl.isThinSurface())
+        if (!shadingData.shadingFlags.isThinSurface())
         {
-            uint nestedPriority = shadingData.mtl.getNestedPriority();
-            path.interiorList.handleIntersection(shadingData.materialID, nestedPriority, shadingData.frontFacing);
+            uint nestedPriority = shadingData.shadingFlags.getNestedPriority();
+            path.interiorList.handleIntersection(shadingData.MaterialID(), nestedPriority, shadingData.frontFacing);
             path.setInsideDielectricVolume(!path.interiorList.isEmpty());
         }
 #endif // #if RTXPT_NESTED_DIELECTRICS_QUALITY > 0 || defined(__INTELLISENSE__)

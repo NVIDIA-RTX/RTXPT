@@ -53,6 +53,22 @@ float SampleSphereUniformPDF( )
     return 1.0 / (4.0 * K_PI);
 }
 
+// Deterministic Fibonacci-lattice point on the unit sphere (index-based, low-discrepancy)
+float3 GenerateFibonacciSphereSample(uint sampleIndex, uint totalSamples)
+{
+    const float goldenRatio = 1.618033988749895;
+    const float angleIncrement = K_2PI * goldenRatio;
+
+    float i = float(sampleIndex);
+    float n = float(totalSamples);
+
+    float a = 1 - 2 * (i / (n - 1));
+    float b = sqrt(1 - a * a);
+    float phi = angleIncrement * i;
+
+    return float3(cos(phi) * b, sin(phi) * b, a);
+}
+
 // http://www.rorydriscoll.com/2009/01/07/better-sampling/
 float3 SampleHemisphereCosineWeighted( const float2 u )
 {
@@ -64,10 +80,22 @@ float3 SampleHemisphereCosineWeighted( const float2 u )
 
     return float3(x, y, sqrt(max(0.0, 1.0 - u.x)));
 }
+
+float3 SampleHemisphereCosineWeighted(const float2 u, float3 normal)
+{
+    float3 localDir = SampleHemisphereCosineWeighted(u);
+    // Compose a local tangent basis
+    float3 tangent, bitangent;
+    BranchlessONB(normal, tangent, bitangent);
+
+    return localDir.x * tangent + localDir.y * bitangent + localDir.z * normal;
+}
+
 float SampleHemisphereCosineWeightedPDF( float cosTheta )
 { 
     return max( 0, cosTheta ) / K_PI;
 }
+
 float3 SampleHemisphereCosineWeighted( const float2 u, out float pdf )
 {
     float3 ret = SampleHemisphereCosineWeighted( u );

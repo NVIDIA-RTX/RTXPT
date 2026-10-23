@@ -19,14 +19,15 @@ enum GBufferShaderId
     ShaderIdInvalid = 0,
     ShaderIdEmissive = 1,
     ShaderIdStandardGGX = 2,
-    ShaderIdGlassGGX = 3
+    ShaderIdGlassGGX = 3,
+    ShaderIdDiffuseTx = 4
 };
 
 // G-Buffer bindings
 RWTexture2D<float4> u_GBufferBaseColor : register(u100); // RGB_10_10_11
 RWTexture2D<uint> u_GBufferSpecNormal32 : register(u101); // u32 octahedral packed
 RWTexture2D<float2> u_GBufferRoughnessMetal : register(u102); // rg16f: roughness + metalness
-RWTexture2D<uint> u_GBufferMaterialInfo : register(u103); // u32: 8 bit "BxDF index", 8 bit ambient occlusion, 8 custom BxDF packed data
+RWTexture2D<uint> u_GBufferMaterialInfo : register(u103); // u32: 8 bit "BxDF index", 8 bit opacity, 8 bit diffuse transmission, 8 bit free
 
 struct PackedGBufferSurface
 {
@@ -37,20 +38,39 @@ struct PackedGBufferSurface
     
     uint packedMaterialInfo;
     
-    void SetMaterialInfo(uint shaderModel, float AO)
+    void SetMaterialInfo(uint shaderId, float opacity, float diffTx = 0)
     {
-        uint packedAO = min(255, uint(AO * 255 + 0.5));
-        packedMaterialInfo = ((shaderModel & 0xff) << 24) | (packedAO << 16);
+        uint packedOpacity = min(255, uint(opacity * 255 + 0.5));
+        uint packedTx = min(255, uint(diffTx * 255 + 0.5));
+        // Preserve the low byte (material AO), it may have been set independently.
+        packedMaterialInfo = ((shaderId & 0xff) << 24) | (packedOpacity << 16) | (packedTx << 8) | (packedMaterialInfo & 0xff);
+    }
+
+    // Material ambient occlusion is stored in the otherwise-free low byte of packedMaterialInfo.
+    void SetMaterialAO(float ao)
+    {
+        uint packedAO = min(255, uint(saturate(ao) * 255 + 0.5));
+        packedMaterialInfo = (packedMaterialInfo & 0xffffff00) | packedAO;
+    }
+
+    float GetMaterialAO()
+    {
+        return (packedMaterialInfo & 0xff) / 255.0;
     }
     
-    uint getShaderModel()
+    uint GetShaderId()
     {
         return packedMaterialInfo >> 24;
     }
     
-    float getAO()
+    float GetOpacity()
     {
         return ((packedMaterialInfo >> 16) & 0xff) / 255.0;
+    }
+    
+    float GetDiffuseTx()
+    {
+        return ((packedMaterialInfo >> 8) & 0xff) / 255.0;
     }
     
     void SetBaseColor(float3 color)
@@ -60,7 +80,19 @@ struct PackedGBufferSurface
     
     float3 GetBaseColor()
     {
-        return baseColor;
+        float3 color = baseColor;
+        if (GetShaderId() == ShaderIdEmissive)
+        {
+            // Emissives are stored in baseColor and can be above 1. To conserve energy, normalize by the highest component.
+            color /= max(color.x, max(color.y, color.z));
+        }
+        return color;
+    }
+    
+    float3 GetEmissive()
+    {
+        // Emissives are stored in baseColor in this GBuffer layout as an optimization.
+        return (GetShaderId() == ShaderIdEmissive) ? baseColor : 0;
     }
     
     void SetSpecNormal(float3 normal)

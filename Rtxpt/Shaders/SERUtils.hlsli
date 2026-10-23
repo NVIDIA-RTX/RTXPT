@@ -31,6 +31,8 @@
         NvMakeHitWithRecordIndex( __shaderTableIndex, SceneBVH, _rayQuery.CommittedInstanceIndex(), _rayQuery.CommittedGeometryIndex(), _rayQuery.CommittedPrimitiveIndex(), 0, __rayDesc, __attrib, _outHit );
 #define SER_REORDER_HIT( _hit, _sortBits, _numberOfBits ) \
         NvReorderThread( _hit, _sortBits, _numberOfBits );
+#define SER_REORDER( _sortBits, _numberOfBits ) \
+        NvReorderThread( _sortBits, _numberOfBits );
 #define SER_INVOKE_HIT( _hit, _payload ) \
         NvInvokeHitObject(SceneBVH, _hit, _payload);
 #define SER_SORT_ENABLED USE_NVAPI_REORDER_THREADS
@@ -48,6 +50,8 @@
         _outHit.SetShaderTableIndex(_rayQuery.CommittedInstanceContributionToHitGroupIndex()+_rayQuery.CommittedGeometryIndex());
 #define SER_REORDER_HIT( _hit, _sortBits, _numberOfBits ) \
         dx::MaybeReorderThread(_hit, _sortBits, _numberOfBits );
+#define SER_REORDER( _sortBits, _numberOfBits ) \
+        dx::MaybeReorderThread( _sortBits, _numberOfBits );
 #define SER_INVOKE_HIT( _hit, _payload ) \
         dx::HitObject::Invoke( _hit, _payload );
 #define SER_SORT_ENABLED USE_DX_MAYBE_REORDER_THREADS

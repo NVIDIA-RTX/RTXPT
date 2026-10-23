@@ -19,18 +19,22 @@ using namespace donut::math;
 
 #define SUBINSTANCEDATA_EXTENDED 1
 
-// per-instance-geometry data (avoids 1 layer of indirection that requires reading from instance and geometry buffers)
+// Per-instance-geometry data (avoids 1 layer of indirection that requires reading from instance and geometry buffers)
+// Note: the size of this structure has measurable impact on CPU-side performance with many (100k+) (sub)instances
 struct SubInstanceData  // could have been called GeometryInstanceData but that's already used in Falcor codebase
 {
-    static const int Flags_AlphaTested      	= (1<<16);
-    static const int Flags_ExcludeFromNEE    	= (1<<17);
-    static const int Flags_Dummy0               = (1<<18); // free up to (1<<23)
+    static const int MaxGlobalGeometryCount     = (1<<18);
+    static const int GlobalGeometryIndexMask    = MaxGlobalGeometryCount - 1;
+
+    static const int Flags_AlphaTested      	= (1<<18);
+    static const int Flags_ExcludeFromNEE    	= (1<<19);
+    static const int Flags_Dummy0               = (1<<20); // free up to (1<<23)
 
     static const int Flags_AlphaOffsetMask      = (0xFF000000);
     static const int Flags_AlphaOffsetOffset    = (24);
 
-    uint FlagsAndAlphaInfo;                         // includes AlphaCutoff and AlphaTextureIndex
-    uint GlobalGeometryIndex_PTMaterialDataIndex;   // index into t_GeometryData and t_GeometryDebugData in higher 16 bits, index in PTMaterial list in lower 16 bits
+    uint GlobalGeometryIndex_FlagsAndAlphaCutoff;   // index into t_GeometryData and t_GeometryDebugData in GlobalGeometryIndexMask, then Flags_*, then the alpha cutoff in the top 8 bits
+    uint AlphaTextureIndex_PTMaterialDataIndex;     // alpha texture bindless index in higher 16 bits, index in PTMaterial list in lower 16 bits
     uint EmissiveLightMappingOffset;                // if emissive mesh, index of the first light (see LightsBaker); will be 0xFFFFFFFF if triangles are not emissive!
     uint AnalyticProxyLightIndex;                   // if standing in as an analytic light proxy
     
@@ -41,8 +45,30 @@ struct SubInstanceData  // could have been called GeometryInstanceData but that'
     uint padding0;
 #endif
 
-    float AlphaCutoff()                         { return (FlagsAndAlphaInfo>>Flags_AlphaOffsetOffset) / 255.0f; }
-    uint  AlphaTextureIndex()                   { return FlagsAndAlphaInfo & 0xFFFF; }
+    static float DecodeAlphaCutoff(uint quantizedCutoff)
+    {
+        // The rounded float reciprocal is shared by CPU bake inputs and runtime shaders.
+        return float(quantizedCutoff) * 0.003921568859368563f;
+    }
+
+    uint  GlobalGeometryIndex()                 { return GlobalGeometryIndex_FlagsAndAlphaCutoff & GlobalGeometryIndexMask; }
+    float AlphaCutoff()                         { return DecodeAlphaCutoff(GlobalGeometryIndex_FlagsAndAlphaCutoff >> Flags_AlphaOffsetOffset); }
+    uint  AlphaTextureIndex()                   { return AlphaTextureIndex_PTMaterialDataIndex >> 16; }
+
+#if defined(__cplusplus) // not needed in the port so far
+    static uint QuantizeAlphaCutoff(float alphaCutoff)
+    {
+        return (uint)(donut::math::clamp(alphaCutoff, 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+
+    static SubInstanceData Default()
+    {
+        SubInstanceData ret{};
+        ret.AnalyticProxyLightIndex     = 0xFFFFFFFF; //NEEAT_INVALID_LIGHT_INDEX;
+        ret.EmissiveLightMappingOffset  = 0xFFFFFFFF; //NEEAT_INVALID_LIGHT_INDEX;
+        return ret;
+    }
+#endif
 };
 
 #endif // __SUB_INSTANCE_DATA_H__

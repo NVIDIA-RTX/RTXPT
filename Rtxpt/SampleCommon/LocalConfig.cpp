@@ -51,7 +51,7 @@ void LocalConfig::PostAppInit(SampleUIData& sampleUI)
         sampleUI.RealtimeAA = 0;
         sampleUI.RealtimeDenoiser = false;
         sampleUI.DbgFreezeRealtimeNoiseSeed = false;
-        sampleUI.StablePlanesActiveCount = 1;
+        sampleUI.DenoisingLayersActiveCount = 1;
         sampleUI.AllowPrimarySurfaceReplacement = false;
         sampleUI.RealtimeDiffuseBounceCount = sampleUI.ReferenceDiffuseBounceCount;
         sampleUI.RealtimeFireflyFilterEnabled = false;
@@ -64,8 +64,8 @@ void LocalConfig::PostAppInit(SampleUIData& sampleUI)
     // This disables...
     //  * ReSTIR DI & ReSTIR GI 
     //  * AutoExposure 
-    //  * Stable Planes (set to 1) 
-    // ...and increases brute force sampling - useful for denoiser tuning as it removes temporal issues and prevents stable planes from hiding issues.
+    //  * Denoising Layers (set to 1) 
+    // ...and increases brute force sampling - useful for denoiser tuning as it removes temporal issues and prevents denoising layers from hiding issues.
     // Once denoiser works well, try enabling things one by one (and reducing NEE & global samples back to 1)
     if (RTXPT_LOCAL_CONFIG_ID_STRING == "DENOISER_TUNING")
     {
@@ -73,7 +73,7 @@ void LocalConfig::PostAppInit(SampleUIData& sampleUI)
         sampleUI.UseReSTIRDI = false;           // avoid any temporal issues from DI
         sampleUI.UseReSTIRGI = false;           // avoid any temporal issues from GI
         sampleUI.ToneMappingParams.autoExposure = false;    // for stable before/after image comparisons
-        sampleUI.StablePlanesActiveCount = 1;   // disable SPs - we want as good raw denoising as possible without SPs hiding any issues
+        sampleUI.DenoisingLayersActiveCount = 1;   // disable SPs - we want as good raw denoising as possible without SPs hiding any issues
         sampleUI.RealtimeSamplesPerPixel = 2;   // boost global samples
         sampleUI.NEEType = 1;              // avoid any temporal issues from ReGIR (due to presampling + multiple full local samples)
         sampleUI.RealtimeAA = 1;
@@ -108,7 +108,7 @@ void LocalConfig::PostAppInit(SampleUIData& sampleUI)
         sampleUI.UseReSTIRDI = false;
         sampleUI.UseReSTIRGI = false;
         sampleUI.ToneMappingParams.autoExposure = false;
-        sampleUI.StablePlanesActiveCount = 1;
+        sampleUI.DenoisingLayersActiveCount = 1;
         sampleUI.ReferenceFireflyFilterEnabled = false;
         sampleUI.EnableRussianRoulette = false;
 #else

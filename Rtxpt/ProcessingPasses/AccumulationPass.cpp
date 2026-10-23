@@ -9,6 +9,7 @@
 */
 
 #include "AccumulationPass.h"
+#include "../SampleCommon/GpuProfiler.h"
 
 #include <donut/engine/ShaderFactory.h>
 #include <donut/engine/View.h>
@@ -75,7 +76,7 @@ void AccumulationPass::Render(
     const donut::engine::IView& upscaledView,
     float accumulationWeight)
 {
-    commandList->beginMarker("Accumulation");
+    GpuProfiler::Begin(commandList, "Accumulation");
 
     const auto sourceViewport = sourceView.GetViewportState().viewports[0];
     const auto upscaledViewport = upscaledView.GetViewportState().viewports[0];
@@ -101,5 +102,5 @@ void AccumulationPass::Render(
         dm::div_ceil(upscaledView.GetViewExtent().height(), 8), 
         1);
 
-    commandList->endMarker();
+    GpuProfiler::End(commandList);
 }

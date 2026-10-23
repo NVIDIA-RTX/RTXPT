@@ -14,7 +14,9 @@
 #include <memory>
 #include <unordered_map>
 #include <donut/render/MipMapGenPass.h>
+#include <donut/engine/BindingCache.h>
 #include "ToneMapping_cb.h"
+#include "SampleCommon/SampleCommon.h"
 
 namespace donut::engine
 {
@@ -49,8 +51,17 @@ struct ToneMappingParameters
     float whiteMaxLuminance = 1.0f;
     float whiteScale = 5.1f;
     bool clamped = true;
-    float exposureValueMin = -16.0f;
-    float exposureValueMax = 16.0f;
+    float exposureValueMin = TONEMAPPING_EXPOSURE_LOG2_MIN;    // log2 range of the auto exposure multiplier (higher is brighter, unlike exposureValue)
+    float exposureValueMax = TONEMAPPING_EXPOSURE_LOG2_MAX;
+};
+
+// Exposure applied by ToneMappingPass, in log2 stops: Total = clamp(Auto + User, TONEMAPPING_EXPOSURE_LOG2_MIN, _MAX)
+struct ToneMappingExposureInfo
+{
+    float   AutoLog2    = 0.0f;     // auto exposure as applied (within exposureValueMin/Max); 0 when auto exposure is off
+    float   UserLog2    = 0.0f;     // exposure compensation + manual camera exposure (the latter only when auto exposure is off)
+    float   TotalLog2   = 0.0f;
+    bool    Clamped     = false;
 };
 
 static const std::unordered_map<ExposureMode, std::string> ExposureModeToString = {
@@ -80,18 +91,18 @@ private:
         nvrhi::TextureHandle luminanceTexture;
 		nvrhi::FramebufferHandle luminanceFrameBuffer;
         std::unique_ptr<donut::render::MipMapGenPass> mipMapPass;
-        nvrhi::BindingSetHandle luminanceBindingSet;
-        nvrhi::BindingSetHandle colorBindingSet;
-        nvrhi::TextureHandle sourceTexture;
 
 #if TONEMAPPING_AUTOEXPOSURE_CPU
         // used for readback
-        static constexpr int cReadbackLag = 3;  // if used once per frame then it should be backbuffer (swapchain) count + 1 to ensure it never blocks
+        static constexpr int cReadbackLag = c_SwapchainCount + 1;  // must be swapchain count + 1 to ensure mapBuffer never stalls waiting for in-flight GPU work
         nvrhi::BufferHandle avgLuminanceBufferGPU;
         nvrhi::BufferHandle avgLuminanceBufferReadback[cReadbackLag];
         int                 avgLuminanceLastWritten     = -1;
-        float               avgLuminanceLastCaptured    = 0.0;
 #endif
+        // Set in PreRender and used by both the tonemap and GetPreExposedGray, so they always agree
+        float                   autoExposureLog2        = 0.0f;     // last measured, unclamped; kept while there's no new data
+        ToneMappingExposureInfo exposureInfo;
+        float                   exposure                = 1.0f;     // exp2(exposureInfo.TotalLog2)
     };
         
     std::vector<PerViewData> m_PerView;
@@ -135,16 +146,17 @@ private:
     int m_Clamped;
         
     //Pre-computed fields
-    float3x3 m_WhiteBalanceTransform; 
+    float3x3 m_WhiteBalanceTransform;
     float3 m_SourceWhite;
-    float3x3 m_ColorTransform; 
-        
+    float m_UserExposureLog2 = 0.0f;    // exposure compensation + manual camera exposure (when auto exposure is off)
+
     bool m_FrameParamsSet = false;
 
     void SetParameters(const ToneMappingParameters& params);
     void UpdateExposureValue();
 	void UpdateWhiteBalanceTransform();
-	void UpdateColorTransform();
+    void UpdateUserExposure();
+    void UpdateExposure();
     void GenerateMips(nvrhi::ICommandList* commandList, uint32_t numberOfViews);
 public:
     struct CreateParameters
@@ -167,12 +179,18 @@ public:
 
     void PreRender(const ToneMappingParameters& params);
 
-    // note - if enable == false, it still does autoexposure (if enabled) and everything else, but the output is just passthrough
-    bool Render( nvrhi::ICommandList* commandList, const donut::engine::ICompositeView& compositeView, nvrhi::ITexture* sourceTexture, bool enabled );
+    // note - if enable == false, auto exposure metering still runs, but the output is pure passthrough (no exposure applied)
+    bool Render( nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, const donut::engine::ICompositeView& compositeView, nvrhi::ITexture* sourceTexture, bool enabled );
 
 #if TONEMAPPING_AUTOEXPOSURE_CPU
     float3 GetPreExposedGray( uint viewIndex );
 #endif
+
+    // As of the last PreRender; unlike GetPreExposedGray, callable any time (e.g. from UI)
+    const ToneMappingExposureInfo & GetExposureInfo(uint viewIndex) const   { assert(viewIndex < m_PerView.size()); return m_PerView[viewIndex].exposureInfo; }
+
+    // Carries the measured auto exposure over from a previous instance, so re-creation doesn't cause an exposure jump
+    void InheritAutoExposure(const ToneMappingPass & other);
 
     void AdvanceFrame(float frameTime);
 

@@ -57,6 +57,7 @@ public:
 
 private:
 	virtual std::unique_ptr<Sample> CreateMainRenderPass(donut::app::DeviceManager& deviceManager, const CommandLineOptions& cmdLineOptions) = 0;
+	virtual void ConfigureDefaultDeviceParams(donut::app::DeviceCreationParameters& deviceParams) const {}
 
 	// Initialization methods
 	void RegisterDonutCallback();

@@ -39,7 +39,6 @@ OmmBaker::OmmBaker(nvrhi::DeviceHandle device,
     std::shared_ptr<donut::engine::ShaderFactory> shaderFactory)
     : m_device(device)
     , m_textureCache(std::move(textureCache))
-    , m_bindingCache(device)
     , m_shaderFactory(std::move(shaderFactory))
     , m_descriptorTableManager(std::move(descriptorTableManager))
 {
@@ -94,6 +93,11 @@ void OmmBaker::CreateRenderPasses(nvrhi::BindingLayoutHandle bindlessLayout, std
     m_commonPasses = std::move(commonPasses);
 }
 
+void OmmBaker::SetBlasCompactor(bvh::BlasCompactor* compactor)
+{
+    m_ommBuildQueue->SetBlasCompactor(compactor);
+}
+
 void OmmBaker::CreateOpacityMicromaps(const donut::engine::Scene& scene)
 {
     m_ommBuildQueue->CancelPendingBuilds();
@@ -101,6 +105,10 @@ void OmmBaker::CreateOpacityMicromaps(const donut::engine::Scene& scene)
     m_uiData.ActiveState = m_uiData.DesiredState;
     m_uiData.BuildsLeftInQueue = 0;
     m_uiData.BuildsQueued = 0;
+    m_uiData.TriggerRebuild = false;
+    m_retainDebugData = m_uiData.DebugView != OpacityMicroMapDebugView::Disabled;
+    m_ommBuildQueue->SetRetainDebugData(m_retainDebugData);
+    ++m_memoryGeneration;
 
     for (auto& mesh : scene.GetSceneGraph()->GetMeshes())
     {
@@ -108,6 +116,9 @@ void OmmBaker::CreateOpacityMicromaps(const donut::engine::Scene& scene)
             continue; // skip the skinning prototypes
         if (mesh->skinPrototype)
             continue;
+
+        for (const auto& geometry : mesh->geometries)
+            static_cast<MeshGeometryEx&>(*geometry).DebugData = {};
 
         OmmBuildQueue::BuildInput input;
         input.mesh = mesh;
@@ -123,7 +134,17 @@ void OmmBaker::CreateOpacityMicromaps(const donut::engine::Scene& scene)
             if (!material->EnableAlphaTesting)
                 continue;
 
-            std::shared_ptr<TextureData> alphaTexture = m_textureCache->GetLoadedTexture(geometry.material->baseOrDiffuseTexture->path);
+            // The texture cache key is {path, TextureLoadOptions}, so look the texture up under the options it was
+            // actually loaded with (glTF base colour comes in as SRGBMode::ForceSRGB). The default options would not
+            // match, and GetLoadedTexture indexes with operator[], so a miss both returns null and leaves a null
+            // placeholder behind in the cache.
+            // Nothing renders differently today: geom.alphaTexture below is currently write-only, as the bake reads
+            // materialPT.BaseTexture.Loaded->texture instead (see OmmBuildQueue.cpp). This keeps the field honest for
+            // whenever it does get read, and keeps the junk entry out of the cache.
+            // Take it from PTMaterial (null-checked above, and what the bake uses): a material JSON can supply a
+            // BaseTexture the glTF material lacks, leaving Donut's baseOrDiffuseTexture null.
+            const auto & baseTexture = material->BaseTexture.Loaded;
+            std::shared_ptr<TextureData> alphaTexture = m_textureCache->GetLoadedTexture(baseTexture->path, baseTexture->loadOptions);
 
             OmmBuildQueue::BuildInput::Geometry geom;
             geom.geometryIndexInMesh = i;
@@ -147,10 +168,11 @@ void OmmBaker::CreateOpacityMicromaps(const donut::engine::Scene& scene)
 
         if (input.geometries.size() != 0ull)
         {
-            m_uiData.BuildsQueued += (uint32_t)input.geometries.size();
+            ++m_uiData.BuildsQueued;
             m_ommBuildQueue->QueueBuild(input);
         }
     }
+    m_uiData.BuildsLeftInQueue = m_ommBuildQueue->NumPendingBuilds();
 }
 
 void OmmBaker::DestroyOpacityMicromaps(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
@@ -167,13 +189,52 @@ void OmmBaker::DestroyOpacityMicromaps(nvrhi::ICommandList& commandList, const d
         mesh->AccelStructOMM = nullptr;
         mesh->OpacityMicroMaps.clear();
         mesh->DebugData = nullptr;
-        mesh->DebugDataDirty = true;
+        mesh->MarkDebugDataDirty();
     }
+}
+
+void OmmBaker::ReleaseDebugData(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
+{
+    // Bindless descriptors can still be read by the previous frame's debug shaders.
+    commandList.close();
+    m_device->executeCommandList(&commandList);
+    m_device->waitForIdle();
+    commandList.open();
+
+    for (const auto& mesh : scene.GetSceneGraph()->GetMeshes())
+    {
+        MeshInfoEx& meshEx = static_cast<MeshInfoEx&>(*mesh);
+        if (meshEx.DebugData)
+        {
+            meshEx.DebugData.reset();
+            meshEx.MarkDebugDataDirty();
+        }
+    }
+    ++m_memoryGeneration;
+}
+
+bool OmmBaker::NeedsGraphicsQueue() const
+{
+    const bool retainDebugData = m_uiData.DebugView != OpacityMicroMapDebugView::Disabled;
+    return m_ommBuildQueue->NumPendingBuilds() > 0 || m_uiData.TriggerRebuild || retainDebugData != m_retainDebugData;
 }
 
 void OmmBaker::BuildOpacityMicromaps(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
 {
-    commandList.beginMarker("OMM Updates");
+    ZoneScoped;
+
+    GpuProfiler::Begin(&commandList, "OMM Updates");
+
+    const bool shouldRetainDebugData = m_uiData.DebugView != OpacityMicroMapDebugView::Disabled;
+    if (shouldRetainDebugData != m_retainDebugData)
+    {
+        m_retainDebugData = shouldRetainDebugData;
+        m_ommBuildQueue->SetRetainDebugData(shouldRetainDebugData);
+        if (shouldRetainDebugData)
+            m_uiData.TriggerRebuild = true;
+        else
+            ReleaseDebugData(commandList, scene);
+    }
 
     if (m_uiData.TriggerRebuild)
     {
@@ -190,13 +251,15 @@ void OmmBaker::BuildOpacityMicromaps(nvrhi::ICommandList& commandList, const don
 
     m_uiData.BuildsLeftInQueue = m_ommBuildQueue->NumPendingBuilds();
 
-    commandList.endMarker();
+    GpuProfiler::End(&commandList);
 }
 
 void OmmBaker::WriteGeometryDebugBuffer(nvrhi::ICommandList& commandList)
 {
     commandList.writeBuffer(m_geometryDebugBuffer, m_geometryDebugDataPtr.data(), m_geometryDebugDataPtr.size() * sizeof(GeometryDebugData));
 }
+
+bool MeshInfoEx::s_anyDebugDataDirty = true;   // start dirty so the first Update() always scans
 
 void OmmBaker::UpdateDebugGeometry(const MeshInfo& _mesh)
 {
@@ -237,7 +300,15 @@ void OmmBaker::UpdateDebugGeometry(const MeshInfo& _mesh)
 
 bool OmmBaker::Update(nvrhi::ICommandList& commandList, const donut::engine::Scene& scene)
 {
-    RAII_SCOPE( commandList.beginMarker("OmmBaker");, commandList.endMarker(); );
+    ZoneScoped;
+
+    // Skip the full-scene scan entirely when nothing has been marked dirty. Without this we dereference every mesh's
+    // shared_ptr every frame just to read a bool that is almost always false. The flag is push-based - raised only by
+    // MeshInfoEx::MarkDebugDataDirty() and by MeshInfoEx construction - so this cannot miss an update.
+    if( !MeshInfoEx::AnyDebugDataDirty() )
+        return false;
+
+    RTXPT_GPU_SCOPE(&commandList, "OmmBaker");
 
     bool anyDirty = false;
     for (auto& _mesh : scene.GetSceneGraph()->GetMeshes())
@@ -245,13 +316,17 @@ bool OmmBaker::Update(nvrhi::ICommandList& commandList, const donut::engine::Sce
         MeshInfoEx& mesh = static_cast<MeshInfoEx&>(*_mesh);
         assert(&mesh != nullptr);
 
-        if (mesh.DebugDataDirty)
+        if (mesh.IsDebugDataDirty())
         {
-            mesh.DebugDataDirty = false;
+            mesh.ClearDebugDataDirty();
             anyDirty = true;
             UpdateDebugGeometry(mesh);
         }
     }
+    // Cleared after the scan, which has just visited every mesh. Nothing in the loop marks anything dirty, so there is
+    // no reentrancy window here.
+    MeshInfoEx::ClearAnyDebugDataDirty();
+
     if (anyDirty)
         WriteGeometryDebugBuffer(commandList);
     return anyDirty;
@@ -415,6 +490,7 @@ bool OmmBaker::DebugGUI(float indent, const donut::engine::Scene& scene)
 
 #if ENABLE_DEBUG_VIZUALISATIONS
             RESET_ON_CHANGE( ImGui::Combo("Debug View", (int*)&m_uiData.DebugView, "Disabled\0InWorld\0Overlay\0\0") );
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enabling visualization rebakes OMMs and retains their debug buffers. Disabling it releases those buffers.");
 #else
             ImGui::Text("Please enable ENABLE_DEBUG_VIZUALISATIONS for debug viz");
             m_uiData.DebugView = OpacityMicroMapDebugView::Disabled;
@@ -440,7 +516,7 @@ bool OmmBaker::DebugGUI(float indent, const donut::engine::Scene& scene)
 
         {
             std::stringstream ss;
-            ss << m_uiData.BuildsQueued << " active OMMs";
+            ss << (m_uiData.BuildsQueued - m_uiData.BuildsLeftInQueue) << " / " << m_uiData.BuildsQueued << " OMM meshes built";
             std::string str = ss.str();
             ImGui::Text(str.c_str());
 

@@ -11,14 +11,17 @@
 #ifndef __PATH_PAYLOAD_HLSLI__ // using instead of "#pragma once" due to https://github.com/microsoft/DirectXShaderCompiler/issues/3943
 #define __PATH_PAYLOAD_HLSLI__
 
-#include "Config.h"    
+#include "Config.h"
 
 
 // Packed and aligned representation of PathState in a pre-raytrace state (no HitInfo, but path.origin and path.direction set)
 // NOTE: we tried removing this and relying just on packed PathState, but we're blocked by various compiler bugs such as https://github.com/microsoft/DirectXShaderCompiler/issues/6464
 struct PAYLOAD_QUALIFIER PathPayload
 {
-    uint4   packed[5] PAYLOAD_FIELD_RW_ALL; // normal reference codepath
+    // NOTE: the SHaRC training pass used to extend this to 10 slots, [5..9] carrying the per-path propagation
+    // state. That state now lives in a per-thread scratch buffer (see PathTracerSHaRC.hlsli), so the payload is the
+    // same size in every mode - and DenoisingLayers.hlsli, which hard-codes uint4[5], can stay that way.
+    uint4   packed[5] PAYLOAD_FIELD_RW_ALL;
 
 #ifdef PATH_STATE_DEFINED
     static PathPayload pack(const PathState path);
@@ -40,7 +43,7 @@ PathPayload PathPayload::pack(const PathState path)
 
     // 2
     p.packed[2].xy = path.pack23;
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD
     p.packed[2].zw = path.imageXformPacked;
 #else
     p.packed[2].zw = path.pack45;
@@ -86,7 +89,7 @@ PathState PathPayload::unpack(const PathPayload p)
 
     // 2
     path.pack23             = p.packed[2].xy;
-#if PATH_TRACER_MODE==PATH_TRACER_MODE_BUILD_STABLE_PLANES
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD
     path.imageXformPacked   = p.packed[2].zw;
 #else
     path.pack45             = p.packed[2].zw;
@@ -104,7 +107,7 @@ PathState PathPayload::unpack(const PathPayload p)
     path.rayCone.widthSpreadAngleFP16   = p.packed[4].x;
     path.pack0                          = p.packed[4].y;
     path.pack1                          = p.packed[4].z;
-    path.flagsAndVertexIndex            = p.packed[4].w;   
+    path.flagsAndVertexIndex            = p.packed[4].w;
 
     return path;
 }

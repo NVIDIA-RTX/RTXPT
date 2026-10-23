@@ -13,7 +13,6 @@
 #include <filesystem>
 #include <memory>
 
-#include <donut/engine/BindingCache.h>
 #include <nvrhi/nvrhi.h>
 #include <donut/core/math/math.h>
 #include <donut\engine\SceneTypes.h>
@@ -23,6 +22,7 @@
 #include "../Shaders/PathTracer/Materials/MaterialPT.h"
 
 #include <unordered_map>
+#include <cassert>
 
 
 using namespace donut::math;
@@ -40,6 +40,7 @@ namespace donut::engine
 
 class ShaderDebug;
 class ExtendedScene;
+class SceneRenderCache;
 
 struct MaterialShaderPermutation
 {
@@ -126,7 +127,8 @@ struct PTMaterialBase
 struct PTMaterial : public PTMaterialBase
 {
     PTTexture               BaseTexture;                        // .rgb base color; .a = opacity (both modes)
-    PTTexture               OcclusionRoughnessMetallicTexture;  // .rgb ORM; (spec-gloss fallback: specular color, .a = glossiness)
+    PTTexture               OcclusionRoughnessMetallicTexture;  // .rgb metal-rough; (spec-gloss fallback: specular color, .a = glossiness)
+    PTTexture               OcclusionTexture;                   // .r ambient occlusion (dedicated glTF occlusion texture; may alias the ORM texture)
     PTTexture               NormalTexture;
     PTTexture               EmissiveTexture;
     PTTexture               TransmissionTexture;                // see KHR_materials_transmission; undefined on specular-gloss materials
@@ -151,6 +153,7 @@ struct PTMaterial : public PTMaterialBase
     // Toggles for the textures. Only effective if the corresponding texture is non-null.
     bool                    EnableBaseTexture                   = true;
     bool                    EnableOcclusionRoughnessMetallicTexture   = true;
+    bool                    EnableOcclusionTexture              = true;
     bool                    EnableNormalTexture                 = true;
     bool                    EnableEmissiveTexture               = true;
     bool                    EnableTransmissionTexture           = true;
@@ -169,7 +172,7 @@ struct PTMaterial : public PTMaterialBase
     // The mesh will not be part of NEE.
     bool                    ExcludeFromNEE                      = false;
 
-    // will not propagate dominant stable plane when doing path space decomposition
+    // will not propagate dominant denoising layer when doing path space decomposition
     bool                    PSDExclude                          = true;
     // for path space decomposition: -1 means no dominant; 0 usually means transmission, 1 usually means reflection, 2 usually means clearcoat reflection - must match corresponding BSDFSample::getDeltaLobeIndex()!
     int                     PSDDominantDeltaLobe                = -1;
@@ -193,6 +196,8 @@ struct PTMaterial : public PTMaterialBase
     uint                    GPUDataIndex                        = 0xFFFFFFFF;   // 0xFFFFFFFF if no GPU buffer slot allocated
 
     bool                    EnableAsAnalyticLightProxy          = false;
+    
+    bool                    DisableLightSampling                = false;
 
     bool                    IgnoreMeshTangentSpace              = false;
 
@@ -202,9 +207,17 @@ struct PTMaterial : public PTMaterialBase
 
     void                    FillData(PTMaterialData & data);
     bool                    EditorGUI(class MaterialsBaker & baker);
-    bool                    IsEmissive() const;
+    // Defined here rather than in the .cpp on purpose: SceneRenderCache::FillInstanceInfos and the guards in
+    // LightsBaker::ProcessEmissiveGeometry call these once per sub-instance per frame, and with no /GL in the stock
+    // configs each one was a real cross-TU call wrapped around two field loads.
+    bool                    IsEmissiveSurface() const                           // 'true' if there's emission from the surface at all
+        { return ((EmissiveIntensity > 0) && donut::math::any(EmissiveColor > 0.0f)) || UseDonutEmissiveIntensity; }     // UseDonutEmissiveIntensity can animate on/off so just assume we're emissive and pay the cost
+    bool                    HasNoCurrentEmission() const                        // 'true' if IsEmissiveSurface and it can be determined with certainty that it has no emission
+        { return !((EmissiveIntensity > 0) && donut::math::any(EmissiveColor > 0.0f)); }
+    bool                    IsEmissiveSurfaceLightSampling() const              // 'true' if IsEmissiveSurface and will participate in light sampling
+        { return IsEmissiveSurface() && !DisableLightSampling && !HasNoCurrentEmission(); }                              // UseDonutEmissiveIntensity can animate on/off so just assume we're emissive and pay the cost
 
-    static std::shared_ptr<PTMaterial> SafeCast(const std::shared_ptr<donut::engine::Material>& donutMaterial);
+    static PTMaterial* SafeCast(const std::shared_ptr<donut::engine::Material>& donutMaterial);  // inline, defined just below MaterialEx
 
     static std::shared_ptr<PTMaterial> FromJson(Json::Value& input, const std::filesystem::path& mediaPath, const std::shared_ptr<donut::engine::TextureCache>& textureCache, const std::string & modelName, const std::string & name);
 
@@ -219,8 +232,23 @@ struct PTMaterial : public PTMaterialBase
 
 struct MaterialEx : donut::engine::Material
 {
-    std::shared_ptr<PTMaterial> PTMaterial;              
+    std::shared_ptr<PTMaterial> PTMaterial;
 };
+
+// Inline for the same reason as the emissive predicates above - once per sub-instance per frame from
+// SceneRenderCache::FillInstanceInfos, where the call overhead dwarfed the two pointer loads it actually does. Has to
+// live down here because it needs MaterialEx to be complete.
+inline PTMaterial* PTMaterial::SafeCast(const std::shared_ptr<donut::engine::Material>& donutMaterial)
+{
+    donut::engine::Material* srcPtr = donutMaterial.get();
+    if (srcPtr == nullptr)
+        return nullptr;
+    assert(dynamic_cast<MaterialEx*>(srcPtr) != nullptr);
+    PTMaterial * ptMaterial = static_cast<MaterialEx*>(srcPtr)->PTMaterial.get();
+    // MaterialsBaker gives every MaterialEx one at scene load, so an empty one is a bug upstream, not a state to handle.
+    assert(ptMaterial != nullptr);
+    return ptMaterial;
+}
 
 class MaterialsBaker
 {
@@ -228,13 +256,17 @@ public:
     MaterialsBaker(const std::string & relativeShaderSourcePath, nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, std::shared_ptr<donut::engine::ShaderFactory> shaderFactory);
     ~MaterialsBaker();
 
+    // Resolve definitions before mesh upload; texture uploads and render resources remain deferred.
+    void                            LoadMaterials(const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path& mediaPath);
+
     void                            CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path & sceneFilePath, const std::filesystem::path & mediaPath);
 
     // this update can happen in parallel with any other ray preparatory tracing work - anything from BVH building to laying down denoising layers
-    void                            Update(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::vector<SubInstanceData> & subInstanceData);
+    void                            Update(nvrhi::ICommandList * commandList, const std::shared_ptr<ExtendedScene> & scene, std::vector<SubInstanceData> & subInstanceData, SceneRenderCache & sceneRenderCache);
 
     nvrhi::BufferHandle             GetMaterialDataBuffer() const           { return m_materialData; }
     uint                            GetMaterialDataCount() const            { return m_materialsGPU.size(); }
+    bool                            HasDeferredTexturesLoad() const         { return m_deferredTextureLoadInProgress; }   // Update would flush to the graphics queue
 
     const std::unordered_map<std::string, PTTexture> &
                                     GetUsedTextures() const                 { return m_textures; }
@@ -259,7 +291,7 @@ private:
     void                            Clear();
 
     std::shared_ptr<PTMaterial>     Load(const std::string & modelFileName, const std::string& name);
-    std::shared_ptr<PTMaterial>     ImportFromDonut(donut::engine::Material & material);
+    void                            ImportFromDonut(donut::engine::Material& material, PTMaterial& materialPT);
     void                            SaveAll();
 
     void                            CompleteDeferredTexturesLoad(nvrhi::ICommandList* commandList);
@@ -276,7 +308,6 @@ private:
     std::shared_ptr<donut::engine::FramebufferFactory> m_framebufferFactory;
     std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
 
-    donut::engine::BindingCache     m_bindingCache;
 
     nvrhi::BufferHandle             m_materialData;
     bool                            m_materialDataWasReset = true;
@@ -285,6 +316,7 @@ private:
     std::vector<std::shared_ptr<PTMaterial>>    
                                     m_materials;
     std::vector<PTMaterialData>     m_materialsGPU;
+    std::vector<std::shared_ptr<MaterialEx>> m_pendingDonutImports;
 
     std::unordered_map<std::string, PTTexture> m_textures;
 

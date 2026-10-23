@@ -28,6 +28,7 @@
 #define POLYLIGHT_DIRECTIONAL_ENABLE    1   // probably not needed as baked in envmap but this need testing
 #define POLYLIGHT_ENV_ENABLE            1
 #define POLYLIGHT_QT_ENV_ENABLE         0   // environment map quad tree in equal area octahedral mapping
+#define POLYLIGHT_LIGHT_CLUSTER         0
 #define POLYLIGHT_CONFIGURED
 
 #include "../Shaders/PathTracer/Lighting/PolymorphicLight.hlsli"

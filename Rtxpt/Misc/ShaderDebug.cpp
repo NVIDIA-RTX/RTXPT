@@ -16,6 +16,7 @@
 #include <donut/core/log.h>
 #include "../SampleCommon/SampleCommon.h"
 
+#include <algorithm>
 #include <chrono>
 //#include <iostream>
 #include <thread>
@@ -44,6 +45,10 @@ ShaderDebug::ShaderDebug( nvrhi::IDevice* device, nvrhi::ICommandList* commandLi
     bufferDesc.isDrawIndirectArgs = true;
     bufferDesc.debugName = "ShaderDebugIndirectDrawBufferGPU";
     m_indirectDrawBufferGPU = m_device->createBuffer(bufferDesc);
+    bufferDesc.byteSize = 3*4;
+    bufferDesc.initialState = nvrhi::ResourceStates::CopyDest;  // rests where CopyForOutput copies into it, so that copy needs no barrier
+    bufferDesc.debugName = "ShaderDebugCopyDispatchArgs";
+    m_copyDispatchArgs = m_device->createBuffer(bufferDesc);
 
     bufferDesc.byteSize = SHADER_DEBUG_BUFFER_IN_BYTES;
     bufferDesc.isConstantBuffer = false;
@@ -68,7 +73,7 @@ ShaderDebug::ShaderDebug( nvrhi::IDevice* device, nvrhi::ICommandList* commandLi
     bufferDesc.initialState = nvrhi::ResourceStates::Unknown;
     bufferDesc.isDrawIndirectArgs = false;
     bufferDesc.byteSize = SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES;
-    for (int i = 0; i < c_swapchainCount; i++)
+    for (int i = 0; i < (int)std::size(m_bufferCPU); i++)
     {
         bufferDesc.debugName = "ShaderDebugBufferCPU_" + std::to_string(i);
         m_bufferCPU[i] = m_device->createBuffer(bufferDesc);
@@ -77,8 +82,10 @@ ShaderDebug::ShaderDebug( nvrhi::IDevice* device, nvrhi::ICommandList* commandLi
     memset(m_initHeader.data(), 0, m_initHeader.size());
     reinterpret_cast<ShaderDebugHeader*>(m_initHeader.data())->VertexCountPerInstance = 3;  // needed for indirect draw
     commandList->writeBuffer(m_bufferGPU, m_initHeader.data(), m_initHeader.size() );
+    const uint32_t copyDispatchArgs[3] = { 0, 1, 1 };   // CopyForOutput only ever rewrites the group count
+    commandList->writeBuffer(m_copyDispatchArgs, copyDispatchArgs, sizeof(copyDispatchArgs));
 
-    for (int i = 0; i < c_swapchainCount; i++)
+    for (int i = 0; i < (int)std::size(m_bufferCPU); i++)
         commandList->copyBuffer(m_bufferCPU[i], 0, m_bufferGPU, 0, SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES );
 }
 
@@ -95,7 +102,10 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
     desc.isUAV = true;
     desc.keepInitialState = true;
     desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-    m_debugVizOutput = m_device->createTexture(desc);
+    // Only recreate on a size change: this also runs on AS-only rebuilds, where binding caches that bound the texture
+    // are not cleared and would keep a replaced one alive.
+    if (m_debugVizOutput == nullptr || m_debugVizOutput->getDesc().width != desc.width || m_debugVizOutput->getDesc().height != desc.height)
+        m_debugVizOutput = m_device->createTexture(desc);
 
 
     {
@@ -110,6 +120,16 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
         m_geometryBindingLayout = m_device->createBindingLayout(bindingLayoutDesc);
     }
 
+    {   // The viz blend only reads the viz texture (its copy, see CopyForOutput)
+        nvrhi::BindingLayoutDesc bindingLayoutDesc;
+        bindingLayoutDesc.visibility = nvrhi::ShaderType::Pixel;
+        bindingLayoutDesc.bindings = { nvrhi::BindingLayoutItem::Texture_SRV(1) };
+        m_blendBindingLayout = m_device->createBindingLayout(bindingLayoutDesc);
+
+        m_blendCopyBindingSet = nullptr;    // the copy sets are recreated against the new layouts by CopyForOutput/OutputFromCopies
+        m_geometryCopyBindingSet = nullptr;
+    }
+
     {
         std::vector<donut::engine::ShaderMacro> shaderMacros;
         shaderMacros.push_back(donut::engine::ShaderMacro({              "BLEND_DEBUG_BUFFER", "1" })); 
@@ -117,7 +137,7 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
         m_blendDebugVizPS = m_shaderFactory->CreateShader("app/Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl", "main", &shaderMacros, nvrhi::ShaderType::Pixel);
 
         nvrhi::GraphicsPipelineDesc pipelineDesc;
-        pipelineDesc.bindingLayouts = { m_geometryBindingLayout };
+        pipelineDesc.bindingLayouts = { m_blendBindingLayout };
         pipelineDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
         pipelineDesc.VS = m_commonPasses->m_FullscreenVS;
         pipelineDesc.PS = m_blendDebugVizPS;
@@ -145,13 +165,20 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
         m_linesPixelShader = m_shaderFactory->CreateShader("app/Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl", "main_ps", &drawLinesMacro, nvrhi::ShaderType::Pixel);
     }
 
-    nvrhi::BindingSetDesc bindingSetDesc;
-    bindingSetDesc.bindings = {
-        nvrhi::BindingSetItem::Texture_SRV(0, depthBuffer),
-        nvrhi::BindingSetItem::Texture_SRV(1, m_debugVizOutput),
-        nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, GetGPUWriteBuffer()),
-    };
-    m_geometryBindingSet = m_device->createBindingSet(bindingSetDesc, m_geometryBindingLayout);
+    {   // Copies the geometry the overlay draws (see CopyForOutput)
+        nvrhi::BindingLayoutDesc bindingLayoutDesc;
+        bindingLayoutDesc.visibility = nvrhi::ShaderType::Compute;
+        bindingLayoutDesc.bindings = {
+            nvrhi::BindingLayoutItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX),
+            nvrhi::BindingLayoutItem::RawBuffer_UAV(0)
+        };
+        m_copyGeometryBindingLayout = m_device->createBindingLayout(bindingLayoutDesc);
+        m_copyGeometryBindingSet = nullptr;
+
+        std::vector<ShaderMacro> copyGeometryMacro = { ShaderMacro("COPY_GEOMETRY_FOR_OUTPUT", "1") };
+        m_copyGeometryCS = m_shaderFactory->CreateShader("app/Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl", "main_cs", &copyGeometryMacro, nvrhi::ShaderType::Compute);
+        m_copyGeometryPSO = m_device->createComputePipeline(nvrhi::ComputePipelineDesc().setComputeShader(m_copyGeometryCS).addBindingLayout(m_copyGeometryBindingLayout));
+    }
 
     nvrhi::GraphicsPipelineDesc psoDesc;
     psoDesc.VS = m_trianglesVertexShader;
@@ -173,6 +200,8 @@ void ShaderDebug::CreateRenderPasses( nvrhi::IFramebuffer * frameBuffer, nvrhi::
 
 void ShaderDebug::BeginFrame( nvrhi::ICommandList* commandList, const float4x4& matWorldToClip )
 {
+    ZoneScoped;
+
     ShaderDebugHeader* header = reinterpret_cast<ShaderDebugHeader*>(m_initHeader.data());
     memcpy( header->WorldViewProjectionMatrix, matWorldToClip.m_data, sizeof(float)*16 );
 
@@ -184,40 +213,165 @@ void ShaderDebug::ClearDebugVizTexture(nvrhi::CommandListHandle commandList)
     commandList->clearTextureFloat(m_debugVizOutput, nvrhi::AllSubresources, nvrhi::Color(0, 0, 0, 0));
 }
 
-void ShaderDebug::EndFrameAndOutput( nvrhi::ICommandList* commandList, nvrhi::IFramebuffer * frameBuffer, nvrhi::TextureHandle depthBuffer, const nvrhi::Viewport & viewport )
+void ShaderDebug::EndFrame( nvrhi::ICommandList* commandList )
 {
-    RAII_SCOPE( commandList->beginMarker("ShaderDebug");, commandList->endMarker(); );
-
     // map and copy CPU side buffer so we can process it (later)
-    void* pData = m_device->mapBuffer(m_bufferCPU[m_currentBufferIndex], nvrhi::CpuAccessMode::Read);
-    memcpy(&m_lastBuffer, pData, SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES); assert( m_lastBuffer.size() == SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES );
+    void* pData;
+    {
+        // Own zone because nvrhi's Device::mapBuffer starts with 'if (b->lastUseFence) WaitForFence(...)' - it is a GPU
+        // sync point on the main thread, not just a Map. The readback buffers rotate over c_SwapchainCount+1 entries so
+        // the fence should be long signalled, but a sampling profiler cannot tell a wait from work, so measure it.
+        ZoneScopedN("ShaderDebugMapReadback");
+        pData = m_device->mapBuffer(m_bufferCPU[m_currentBufferIndex], nvrhi::CpuAccessMode::Read);
+    }
+
+    static uint32_t s_breakpointReportCount = 0;
+    bool logBreakpoint = false;
+    {
+        ZoneScopedN("ShaderDebugCopyReadback");
+        // Copy only the header plus however many print bytes the shaders actually wrote, rather than the whole
+        // SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES (~256KB) every frame. Nothing reads past that point: the only
+        // consumers are OutputLastBufferPrints, which bails immediately when this same counter is 0 (the common case,
+        // so the copy is normally 96 bytes), and DrawCurrentBufferGeometry, which needs the header alone - its triangle
+        // data is GPU-resident and drawn indirectly.
+        //
+        // The clamp must match OutputLastBufferPrints' exactly: the counter is a SIGNED int that the shader side
+        // increments without bound, so it can arrive negative or past the end of the print region, and either would
+        // read outside the mapped range here.
+        static_assert( SHADER_DEBUG_HEADER_IN_BYTES + SHADER_DEBUG_PRINT_BUFFER_IN_BYTES == SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES );
+        const ShaderDebugHeader * header = reinterpret_cast<const ShaderDebugHeader*>(pData);
+        const size_t printBytes = (size_t)std::clamp( header->PrintItemsCounterInBytes, 0, (int)SHADER_DEBUG_PRINT_BUFFER_IN_BYTES );
+
+        // A shader hit BREAKPOINT() (Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl)
+        // in Shaders/Bindless.hlsli when a descriptor index does not refer to the resource type the shader is about
+        // to interpret it as. Without this the trap fires and reports nothing: BREAKPOINT defaults to a plain store
+        // rather than a hang, so the failure is otherwise completely silent.
+        //
+        // BeginFrame rewrites the header every frame, so this is per-frame rather than latched. Rate-limited
+        // because a bad index usually fires for a large fraction of the threads, every frame.
+        if ( (uint32_t)header->BreakpointSentinel == SHADER_DEBUG_BREAKPOINT_SENTINEL )
+        {
+            if ( s_breakpointReportCount < 8 )
+            {
+                s_breakpointReportCount++;
+                logBreakpoint = true;
+            }
+        }
+
+        // NOTE: m_lastBuffer is persistent, so everything past this point still holds the PREVIOUS frame's bytes - that
+        // is fine because nothing reads there, but do not be fooled by it when inspecting m_lastBuffer in a debugger.
+        assert( m_lastBuffer.size() == SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES );
+        memcpy(m_lastBuffer.data(), pData, SHADER_DEBUG_HEADER_IN_BYTES + printBytes);
+    }
+
     m_device->unmapBuffer(m_bufferCPU[m_currentBufferIndex]);
 
     // copy latest GPU side buffer 
     commandList->copyBuffer(m_bufferCPU[m_currentBufferIndex], 0, m_bufferGPU, 0, SHADER_DEBUG_BUFFER_IN_BYTES_NO_TRIANGLES );
-    m_currentBufferIndex = (m_currentBufferIndex+1)%c_swapchainCount;
+    m_currentBufferIndex = (m_currentBufferIndex+1)%(int)std::size(m_bufferCPU);
 
     OutputLastBufferPrints();
-    
-    DrawCurrentBufferGeometry(commandList, frameBuffer, depthBuffer, viewport );
 
-    // Draw debug viz overlay with blending
+    if (logBreakpoint)  // do it here so any DebugPrint-s from before are shown in the Output before the breakpoint popup appears
     {
-        nvrhi::BindingSetHandle bindingSet = m_geometryBindingSet; //m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_BindingLayoutPS);
-
-        nvrhi::GraphicsState state;
-        state.pipeline = m_blendDebugVizPSO;
-        state.framebuffer = frameBuffer;
-        state.bindings = { bindingSet };
-        nvrhi::ViewportState viewportState;
-        state.viewport.addViewportAndScissorRect(viewport);
-        commandList->setGraphicsState(state);
-
-        nvrhi::DrawArguments args;
-        args.instanceCount = 1;
-        args.vertexCount = 4;
-        commandList->draw(args);
+        // The sentinel carries no source location, so this cannot say WHICH BREAKPOINT() fired - grep for
+        // the macro to see the candidates. The bindless validation is the most common one by far.
+        donut::log::error("Shader BREAKPOINT() was hit%s. Set RTXPT_BREAKPOINT_HANG to 1 in "
+            "Shaders/Libraries/ShaderDebug/ShaderDebug.hlsl to trap it on the GPU instead.",
+            (s_breakpointReportCount == 8) ? " (further reports suppressed)" : "");
     }
+}
+
+void ShaderDebug::CopyForOutput( nvrhi::ICommandList* commandList )
+{
+    // The copies rest in CopyDest, so copying into them needs no barrier on the compute queue
+    const nvrhi::TextureDesc& vizDesc = m_debugVizOutput->getDesc();
+    if (m_debugVizOutputCopy == nullptr || m_debugVizOutputCopy->getDesc().width != vizDesc.width || m_debugVizOutputCopy->getDesc().height != vizDesc.height)
+    {
+        nvrhi::TextureDesc desc = vizDesc;
+        desc.debugName = "DebugVizOutputCopy";
+        desc.isUAV = false;
+        desc.initialState = nvrhi::ResourceStates::CopyDest;
+        m_debugVizOutputCopy = m_device->createTexture(desc);
+        m_blendCopyBindingSet = nullptr;
+        m_geometryCopyBindingSet = nullptr;
+    }
+    if (m_blendCopyBindingSet == nullptr)
+    {
+        nvrhi::BindingSetDesc bindingSetDesc;
+        bindingSetDesc.bindings = { nvrhi::BindingSetItem::Texture_SRV(1, m_debugVizOutputCopy) };
+        m_blendCopyBindingSet = m_device->createBindingSet(bindingSetDesc, m_blendBindingLayout);
+    }
+    commandList->copyTexture(m_debugVizOutputCopy, nvrhi::TextureSlice(), m_debugVizOutput, nvrhi::TextureSlice());
+
+    if (m_bufferGPUCopy == nullptr)
+    {
+        nvrhi::BufferDesc desc = m_bufferGPU->getDesc();
+        desc.debugName = "ShaderDebugBufferGPUCopy";
+        desc.initialState = nvrhi::ResourceStates::CopyDest;
+        m_bufferGPUCopy = m_device->createBuffer(desc);
+        m_geometryCopyBindingSet = nullptr;
+    }
+    if (m_copyGeometryBindingSet == nullptr)
+    {
+        nvrhi::BindingSetDesc bindingSetDesc;
+        bindingSetDesc.bindings = {
+            nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_bufferGPU),
+            nvrhi::BindingSetItem::RawBuffer_UAV(0, m_bufferGPUCopy),
+        };
+        m_copyGeometryBindingSet = m_device->createBindingSet(bindingSetDesc, m_copyGeometryBindingLayout);
+    }
+
+    // Every frame, without the CPU knowing whether there is any geometry: the header (draw arguments, matrix), then only
+    // the triangles and lines this frame added, as counted by the shaders that added them (no groups when there are none)
+    commandList->copyBuffer(m_bufferGPUCopy, 0, m_bufferGPU, 0, SHADER_DEBUG_HEADER_IN_BYTES);
+    commandList->copyBuffer(m_copyDispatchArgs, 0, m_bufferGPU, SHADER_DEBUG_COPY_GROUP_COUNT_OFFSET, sizeof(uint32_t));
+    nvrhi::ComputeState state;
+    state.pipeline = m_copyGeometryPSO;
+    state.bindings = { m_copyGeometryBindingSet };
+    state.indirectParams = m_copyDispatchArgs;
+    commandList->setComputeState(state);
+    commandList->dispatchIndirect(0);
+}
+
+void ShaderDebug::OutputFromCopies( nvrhi::ICommandList* commandList, nvrhi::IFramebuffer * frameBuffer, nvrhi::TextureHandle depthCopy, const nvrhi::Viewport & viewport )
+{
+    RTXPT_GPU_SCOPE(commandList, "ShaderDebug");
+
+    if (m_bufferGPUCopy != nullptr)
+    {
+        if (m_geometryCopyBindingSet == nullptr || m_geometryCopyDepth != depthCopy)
+        {
+            nvrhi::BindingSetDesc bindingSetDesc;
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::Texture_SRV(0, depthCopy),
+                nvrhi::BindingSetItem::Texture_SRV(1, m_debugVizOutputCopy),
+                nvrhi::BindingSetItem::RawBuffer_UAV(SHADER_DEBUG_BUFFER_UAV_INDEX, m_bufferGPUCopy),
+            };
+            m_geometryCopyBindingSet = m_device->createBindingSet(bindingSetDesc, m_geometryBindingLayout);
+            m_geometryCopyDepth = depthCopy;
+        }
+        DrawCurrentBufferGeometry(commandList, frameBuffer, viewport, m_geometryCopyBindingSet, m_bufferGPUCopy);
+    }
+
+    if (m_blendCopyBindingSet != nullptr)
+        BlendDebugViz(commandList, frameBuffer, viewport, m_blendCopyBindingSet);
+}
+
+void ShaderDebug::BlendDebugViz( nvrhi::ICommandList* commandList, nvrhi::IFramebuffer * frameBuffer, const nvrhi::Viewport & viewport, nvrhi::IBindingSet* bindingSet )
+{
+    // Draw debug viz overlay with blending
+    nvrhi::GraphicsState state;
+    state.pipeline = m_blendDebugVizPSO;
+    state.framebuffer = frameBuffer;
+    state.bindings = { bindingSet };
+    state.viewport.addViewportAndScissorRect(viewport);
+    commandList->setGraphicsState(state);
+
+    nvrhi::DrawArguments args;
+    args.instanceCount = 1;
+    args.vertexCount = 4;
+    commandList->draw(args);
 }
 
 static std::string ProcessSingleValue(const char*& currentData, const char* endData, ShaderDebugArgCode valueType )
@@ -369,17 +523,17 @@ void ShaderDebug::OutputLastBufferPrints()
     }
 }
 
-void ShaderDebug::DrawCurrentBufferGeometry(nvrhi::ICommandList* commandList, nvrhi::IFramebuffer * frameBuffer, nvrhi::TextureHandle depthBuffer, const nvrhi::Viewport & viewport)
+void ShaderDebug::DrawCurrentBufferGeometry(nvrhi::ICommandList* commandList, nvrhi::IFramebuffer * frameBuffer, const nvrhi::Viewport & viewport, nvrhi::IBindingSet* bindingSet, nvrhi::IBuffer* buffer)
 {
-    RAII_SCOPE(commandList->beginMarker("Tris"); , commandList->endMarker(); );
+    RTXPT_GPU_SCOPE(commandList, "Tris");
 
     ShaderDebugHeader & header = *reinterpret_cast<ShaderDebugHeader*>(m_lastBuffer.data());
 
     // copy args from master buffer to indirect
-    commandList->copyBuffer(m_indirectDrawBufferGPU, 0, m_bufferGPU, 4*4, 4*4 );    
-    
+    commandList->copyBuffer(m_indirectDrawBufferGPU, 0, buffer, 4*4, 4*4 );
+
     nvrhi::GraphicsState state;
-    state.bindings = { m_geometryBindingSet };
+    state.bindings = { bindingSet };
     //state.vertexBuffers = { {0, 0, 0} };
     state.pipeline = m_trianglesPipeline;
     state.framebuffer = frameBuffer;

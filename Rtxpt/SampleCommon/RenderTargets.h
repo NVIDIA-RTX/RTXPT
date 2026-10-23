@@ -31,12 +31,20 @@ class RenderTargets// : public donut::render::GBufferRenderTargets
     int m_BackbufferCount = -1;
     nvrhi::IDevice* m_device;
 public:
+    struct OptionalBuffers
+    {
+        bool NeedsGBuffer              = false;
+        bool NeedsDirectLightingBuffer = false;
+        bool EnableMotionVectors       = true;  // currently informational; allocation is unconditional
+        bool UseReverseProjection      = true;  // selects Depth clear value (0 for reversed, 1 otherwise)
+    };
+
     nvrhi::TextureHandle AccumulatedRadiance;   // used only in non-realtime mode
     nvrhi::TextureHandle LdrColor;              // final, post-tonemapped color
     nvrhi::TextureHandle LdrColorScratch;       // used for ping-ponging post-process stuff vs LdrColor
     nvrhi::TextureHandle OutputColor;           // raw path tracing output goes here (in both realtime and non-realtime modes); this can be input to TAA/DLSS
     nvrhi::TextureHandle ProcessedOutputColor;  // for when post-processing OutputColor (i.e. TAA) (previously ResolvedColor); this is the output of TAA/DLSS in full res, but before tonemapping and without ImGUI
-    nvrhi::TextureHandle TemporalFeedback1;     // used by TAA
+    nvrhi::TextureHandle TemporalFeedback1;     // used by TAA; only allocated while TAA is active, see EnsureTemporalFeedback
     nvrhi::TextureHandle TemporalFeedback2;     // used by TAA
     nvrhi::TextureHandle PreUIColor;            // used DLSS-G
 
@@ -46,6 +54,8 @@ public:
     nvrhi::TextureHandle RRNormalsAndRoughness; // used by DLSS-RR, see: sl::kBufferTypeNormals and
     nvrhi::TextureHandle RRSpecMotionVectors;   // used by DLSS-RR, see: sl::kBufferTypeSpecularMotionVectors and sl::DLSSDNormalRoughnessMode::ePacked
     nvrhi::TextureHandle RRTransparencyLayer;   // used by DLSS-RR, see: sl::kBufferTypeTransparencyLayer
+    nvrhi::TextureHandle RRDepth;               // DLSS-RR's copy of Depth, so the async prefix can rewrite Depth while DLSS-RR runs
+    nvrhi::TextureHandle RRMotionVectors;       // same for ScreenMotionVectors
 
     nvrhi::TextureHandle Throughput;            // when using PSR we need to remember throughput after perfect speculars with color for RTXDI to know how to do its thing correctly
     nvrhi::TextureHandle Depth;                 // exported by path tracer, used by TAA and others
@@ -56,10 +66,12 @@ public:
     nvrhi::TextureHandle DenoiserNormalRoughness;
 
     nvrhi::TextureHandle StableRadiance;                    // radiance that doesn't require denoising; this is technically not needed as a separate buffer, but very useful for debug viz
-    nvrhi::TextureHandle StablePlanesHeader;
-    nvrhi::BufferHandle  StablePlanesBuffer;
+    nvrhi::TextureHandle DenoisingLayersHeader;
+    nvrhi::BufferHandle  DenoisingLayersBuffer;
 
     nvrhi::BufferHandle  SurfaceDataBuffer;
+
+    nvrhi::BufferHandle  SubSamplingPixelList;              // stream-compacted pixels for the stochastic sub-sampling pattern - layout in Shaders/Misc/SubSampling.h
 
     nvrhi::TextureHandle DenoiserAvgLayerRadianceHalfRes;
 
@@ -69,8 +81,8 @@ public:
     
     nvrhi::TextureHandle CombinedHistoryClampRelax;         // all DenoiserDisocclusionThresholdMix combined together - used to tell TAA where to relax disocclusion test to minimize aliasing
 
-    nvrhi::TextureHandle DenoiserOutDiffRadianceHitDist[cStablePlaneCount]; // output from denoiser, texture per denoiser instance - search for OUT_DIFF_RADIANCE_HITDIST in NRDDescs.h for more info
-    nvrhi::TextureHandle DenoiserOutSpecRadianceHitDist[cStablePlaneCount]; // output from denoiser, texture per denoiser instance - search for OUT_SPEC_RADIANCE_HITDIST in NRDDescs.h for more info
+    nvrhi::TextureHandle DenoiserOutDiffRadianceHitDist[cDenoisingLayerCount]; // output from denoiser, texture per denoiser instance - search for OUT_DIFF_RADIANCE_HITDIST in NRDDescs.h for more info
+    nvrhi::TextureHandle DenoiserOutSpecRadianceHitDist[cDenoisingLayerCount]; // output from denoiser, texture per denoiser instance - search for OUT_SPEC_RADIANCE_HITDIST in NRDDescs.h for more info
     nvrhi::TextureHandle DenoiserOutValidation = nullptr;   // output from denoiser (for validation) - leave nullptr to disable validation
 
     nvrhi::TextureHandle SecondarySurfacePositionNormal;    // input to restir gi
@@ -85,13 +97,8 @@ public:
     nvrhi::TextureHandle SpecularHitT;                      // input for denoisers to be able to resolve spec motion vectors
     nvrhi::TextureHandle ScratchFloat1;                     // can be used to ping-pong stuff - 32bit float 1
 
-    // === Reflection System Render Targets ===
-    nvrhi::TextureHandle LocalCubemap;                      // 256x256x6, RGBA16F, ray-traced local environment cubemap
-    nvrhi::TextureHandle SSRResult;                         // Screen-sized, RGBA16F (rgb=reflection, a=confidence)
-    nvrhi::TextureHandle SSRBlurMipChain;                   // Screen-sized with mip levels for roughness blur
-
-    static constexpr uint32_t LocalCubemapSize = 256;        // Size of local environment cubemap faces
-    static constexpr uint32_t SSRMaxMipLevels = 13;          // Number of blur mip levels for SSR
+    // === Direct Lighting ===
+    nvrhi::TextureHandle DirectLighting;                    // Full-res R11G11B10_FLOAT: direct lighting output
 
     nvrhi::HeapHandle Heap;
 
@@ -102,9 +109,16 @@ public:
     std::shared_ptr<donut::engine::FramebufferFactory> ProcessedOutputFramebuffer;
     std::shared_ptr<donut::engine::FramebufferFactory> LdrFramebuffer;
 
-    void Init(nvrhi::IDevice* device, donut::math::uint2 renderSize, donut::math::uint2 displaySize, bool enableMotionVectors, bool useReverseProjection, int backbufferCount, bool introSample);// override;
+    void Init(nvrhi::IDevice* device, donut::math::uint2 renderSize, donut::math::uint2 displaySize, int backbufferCount, OptionalBuffers optionalBuffers);// override;
     [[nodiscard]] bool IsUpdateRequired(donut::math::uint2 renderSize, donut::math::uint2 displaySize, donut::math::uint sampleCount = 1) const;
     void Clear(nvrhi::ICommandList* commandList);
+
+    // TAA history is display-size, so it is only allocated while TAA is active
+    void EnsureTemporalFeedback();
+    void ReleaseTemporalFeedback();
+
+    // Only allocated while the async compute prefix is enabled
+    void EnsureRRDepthAndMotionVectors();
 
     static uint32_t GetNumMipLevels(uint32_t width, uint32_t height);
 };

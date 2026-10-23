@@ -12,9 +12,11 @@
 
 #include <mutex>
 #include <memory>
+#include <functional>
 #include <nvrhi/nvrhi.h>
 #include <donut/engine/ShaderFactory.h>
 #include <donut/engine/ThreadPool.h>
+#include "DirectoryModifiedMonitor.h"
 #include <unordered_set>
 
 #include "ShaderCompilerUtils.h"
@@ -42,6 +44,7 @@ class PTPipelineVariant
 
         std::string                             US_compileCmdLine;
         std::string                             US_compileError;
+        std::filesystem::file_time_type         US_sourceSnapshot;              // source timestamp the compile is for, see CompileIfNeeded
         ShaderPermutation *                     US_masterCopy = nullptr;
 
         nvrhi::ShaderLibraryHandle              ShaderLibrary;
@@ -56,7 +59,7 @@ class PTPipelineVariant
 
 private:
     friend class PTPipelineBaker;
-    PTPipelineVariant(const std::string & relativeSourcePath, const std::vector<donut::engine::ShaderMacro> & variantMacros, const std::shared_ptr<PTPipelineBaker> & baker, const std::string & shortUniqueDebugID, bool raygenOnly);
+    PTPipelineVariant(const std::string & relativeSourcePath, const std::vector<donut::engine::ShaderMacro> & variantMacros, const std::shared_ptr<PTPipelineBaker> & baker, const std::string & shortUniqueDebugID, bool raygenOnly, std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> variantMacrosGetter);
 public:
     ~PTPipelineVariant();
 
@@ -68,6 +71,9 @@ public:
     const nvrhi::rt::ShaderTableHandle &    GetShaderTable() const { return m_shaderTable; }
 
 private:
+    // Re-evaluates the (optional) runtime per-variant macro callback; returns true only when the produced set actually
+    // changed, so a variant that reports the same macros every frame costs a compare and nothing else.
+    bool                                    RefreshDynamicMacros();
     void                                    UpdateStart(std::filesystem::file_time_type lastModifiedSourceCode);
     void                                    UpdateFinalize();
     int64_t                                 GetVersion() const { return m_localVersion; }
@@ -88,8 +94,14 @@ private:
     std::shared_ptr<class PTPipelineBaker>  m_us_lockedBaker;
 
 
-    std::vector<donut::engine::ShaderMacro> m_macros;                   // global macros (obtained from PTPipelineBaker::GetMacros)
-    std::vector<donut::engine::ShaderMacro> m_combinedMacros;           // per-PTPipelineVariant macros 
+    std::vector<donut::engine::ShaderMacro> m_macros;                   // static per-variant macros, fixed at CreateVariant time
+    std::vector<donut::engine::ShaderMacro> m_combinedMacros;           // baker globals + m_macros + m_dynamicMacros, with same-name overrides resolved
+
+    // Optional runtime per-variant macros. Re-evaluated every Update; these override both the baker globals and
+    // m_macros by name. Used by the SHaRC update variant to drive RTXPT_SUB_SAMPLING_SCALE_X/Y from its downscale factor.
+    std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> m_dynamicMacrosGetter;
+    std::vector<donut::engine::ShaderMacro> m_dynamicMacros;            // last values produced by m_dynamicMacrosGetter
+    std::vector<donut::engine::ShaderMacro> m_dynamicMacrosScratch;     // kept around purely to avoid a per-frame allocation
 
 
     // Raygen and (optional) Miss
@@ -115,11 +127,18 @@ struct HitGroupInfo
 class PTPipelineBaker : public std::enable_shared_from_this<PTPipelineBaker>
 {
 public:
-    PTPipelineBaker(nvrhi::IDevice* device, std::shared_ptr<class MaterialsBaker> & materialsBaker, nvrhi::BindingLayoutHandle bindingLayout, nvrhi::BindingLayoutHandle bindlessLayout);
+    // bindlessHeapLayout is the optional MutableSrvUavCbv layout that enables SM6.6 ResourceDescriptorHeap access
+    // (Rtxpt/Shaders/Bindless.hlsli). When set it is appended LAST to every variant's global layout list; leave it
+    // null for bakers whose shaders never fetch that way. Trailing is load-bearing - see Sample.h.
+    // hitGroupMacros are applied to every variant this baker compiles, on top of the per-variant and global sets.
+    // They select a branch of the MaterialsBaker's specialization file, which is how one MaterialsBaker serves
+    // pipelines whose hit groups differ - including in ray payload type.
+    PTPipelineBaker(nvrhi::IDevice* device, std::shared_ptr<class MaterialsBaker> & materialsBaker, nvrhi::BindingLayoutHandle bindingLayout, nvrhi::BindingLayoutHandle bindlessLayout, std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> globalMacrosGetter, nvrhi::BindingLayoutHandle bindlessHeapLayout = nullptr, std::vector<donut::engine::ShaderMacro> hitGroupMacros = {});
     ~PTPipelineBaker();
     
-    void                                Update(const std::shared_ptr<class ExtendedScene> & scene, unsigned int subInstanceCount, const std::function<void(std::vector<donut::engine::ShaderMacro> & macros)>& globalMacrosGetter, bool forceShaderReload);
-    std::shared_ptr<PTPipelineVariant>  CreateVariant(const std::string & relativeSourcePath, std::vector<donut::engine::ShaderMacro> variantMacros, const std::string & shortUniqueDebugID, bool rayGenOnly = false );
+    void                                Update(const std::shared_ptr<class ExtendedScene> & scene, unsigned int subInstanceCount, bool forceShaderReload);
+    // variantMacrosGetter is optional; when set it is re-evaluated every Update and its macros override the globals by name.
+    std::shared_ptr<PTPipelineVariant>  CreateVariant(const std::string & relativeSourcePath, std::vector<donut::engine::ShaderMacro> variantMacros, const std::string & shortUniqueDebugID, bool rayGenOnly = false, std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> variantMacrosGetter = {} );
     void                                ReleaseVariant(std::shared_ptr<PTPipelineVariant> & variant);
     
     const std::shared_ptr<class MaterialsBaker> & 
@@ -136,13 +155,13 @@ private:
 
     nvrhi::BindingLayoutHandle          GetBindingLayout() const            { return m_bindingLayout; }
     nvrhi::BindingLayoutHandle          GetBindlessLayout() const           { return m_bindlessLayout; }
+    nvrhi::BindingLayoutHandle          GetBindlessHeapLayout() const       { return m_bindlessHeapLayout; }
     nvrhi::DeviceHandle                 GetDevice() const                   { return m_device; }
 
     const std::filesystem::path &       GetShaderBinariesPath() const       { return m_compilerConfig.ShaderBinariesPath; }
     const std::filesystem::path &       GetShaderCompilerPath() const       { return m_compilerConfig.ShaderCompilerPath; }
     const std::filesystem::path &       GetShadersPath() const              { return m_compilerConfig.ShadersPath; }
-    const std::filesystem::path &       GetShadersPathExternalIncludes1() const { return m_compilerConfig.ShadersPathExternalIncludes1; }
-    const std::filesystem::path &       GetShadersPathExternalIncludes2() const { return m_compilerConfig.ShadersPathExternalIncludes2; }
+    const std::vector<std::filesystem::path>& GetIncludePaths() const       { return m_compilerConfig.IncludePaths; }
 
     bool                                IsVerbose() const                       { return m_verbose; }
     bool                                IsNVAPIShaderExtensionEnabled() const   { return m_enableNVAPIShaderExtension; }
@@ -166,10 +185,14 @@ private:
     std::shared_ptr<class MaterialsBaker> &         m_materialsBaker;
     nvrhi::BindingLayoutHandle                      m_bindingLayout;
     nvrhi::BindingLayoutHandle                      m_bindlessLayout;
+    nvrhi::BindingLayoutHandle                      m_bindlessHeapLayout;   // optional, appended last when set
 
     ShaderCompilerUtils::ShaderCompilerConfig       m_compilerConfig;
 
+    std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> m_globalMacrosGetter;
     std::vector<donut::engine::ShaderMacro>         m_macros;
+    // Constant for the baker's lifetime, unlike m_macros which Update() refills from the global getter.
+    std::vector<donut::engine::ShaderMacro>         m_hitGroupMacros;
 
     std::vector<std::shared_ptr<PTPipelineVariant>> m_variants;
 
@@ -184,6 +207,8 @@ private:
     std::unordered_map<int, HitGroupInfo>           m_uniqueHitGroups;
 
     std::optional<std::filesystem::file_time_type>  m_lastUpdatedSourceTimestamp;
+    // Registered group covering ShadersPath; the walk itself happens on the monitor's worker thread.
+    DirectoryModifiedMonitor::Handle                m_sourceMonitor = DirectoryModifiedMonitor::kInvalidHandle;
 
     bool                                            m_verbose = false;
     bool                                            m_enableNVAPIShaderExtension = false;

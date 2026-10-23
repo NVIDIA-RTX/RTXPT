@@ -14,12 +14,13 @@
 #include "PathTracer/Config.h"
 #include "Libraries/ShaderDebug/ShaderDebug.hlsl"
 #include "PathTracer/PathTracerTypes.hlsli"
-#include "PathTracer/Rendering/Volumes/HomogeneousVolumeSampler.hlsli"
+#include "PathTracer/Utils/HomogeneousVolumeData.hlsli"
 #include "PathTracer/Lighting/EnvMap.hlsli"
 #include "PathTracer/Lighting/LightSampler.hlsli"
 
-#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP
-#define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS
+// I think this is obsolete now with NVAPI OMM's gone?
+#if NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP // this doesn't seem to work?
+#define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS 0 //RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS
 #else
 #define RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS 0
 #endif
@@ -45,25 +46,11 @@ namespace Bridge
     \return Texture sampler instance.
     */
     static ActiveTextureSampler createTextureSampler(
-        const RayCone rayCone,
-        const float3 rayDir,
-        float coneTexLODValue,
-        float3 normalW,
-        bool isPrimaryHit,
-        bool isTriangleHit,
-        float texLODBias
+        const RayCone rayCone, const float3 rayDir, float coneTexLODValue, float3 normalW, bool isTriangleHit, float texLODBias
 #if RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE
         ,STF_SamplerState stfSamplerState
 #endif
     );
-
-    static PathTracer::SurfaceData loadSurface( const uint instanceIndex, const uint geometryIndex, const uint triangleIndex, const float2 barycentrics,
-        const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPosition, DebugContext debug );
-
-    static PathTracer::SurfaceData loadSurface( const TriangleHit triangleHit, 
-        const float3 rayDir, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPosition, DebugContext debug );
-
-    static void updateOutsideIoR(inout PathTracer::SurfaceData surfaceData, lpfloat outsideIoR);
 
     static lpfloat loadIoR(const uint materialID);
 
@@ -76,26 +63,16 @@ namespace Bridge
     static float3 computeSkyMotionVector(const uint2 pixelPos);
 
     // The normal AlphaTest
-    static bool AlphaTest(
-        uint instanceID, 
-        uint instanceIndex, 
-        uint geometryIndex, 
-        uint triangleIndex, 
-        float2 rayBarycentrics);
+    static bool AlphaTest(uint instanceID, uint instanceIndex, uint geometryIndex, uint triangleIndex, float2 rayBarycentrics);
 
     // The alpha test function used for visibility rays.
-    static bool AlphaTestVisibilityRay(
-        uint instanceID,
-        uint instanceIndex,
-        uint geometryIndex,
-        uint triangleIndex,
-        float2 rayBarycentrics);
+    static bool AlphaTestVisibilityRay(uint instanceID, uint instanceIndex, uint geometryIndex, uint triangleIndex, float2 rayBarycentrics);
 
     // There's a relatively high cost to this when used in large shaders just due to register allocation required for alphaTest, even if all geometries are opaque.
     // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
-    static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, DebugContext debug);
+    static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug);
 
-    static void traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_NONE, RTXPT_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug);
+    static void traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug);
 
 #if PT_USE_RESTIR_GI
     static void StoreSecondarySurfacePositionAndNormal(uint2 pixelCoordinate, float3 worldPos, float3 normal);
@@ -118,10 +95,11 @@ namespace Bridge
     static float DiffuseEnvironmentMapMIPOffset( );    ///< Use lower MIP level when sampling environment map. Only 0 produces unbiased results
 
     static void ExportSurfaceInit(uint2 pixelPos);
-    static void ExportSurface(const PathState path, PathTracer::SurfaceData surfaceData, float sceneLength, float3 motionVectors/*, const float roughness, const float3 worldNormal, float3 diffBSDFEstimate, float3 specBSDFEstimate*/ );
     static void ExportNonSurface(const PathState path, float3 virtualWorldPos, float3 motionVectors );
     static void ExportSpecHitTStart(const PathState path);
     static void ExportSpecHitTStop(const PathState path);
+
+    static PathTracer::WorkingContext GetWorkingContext();
 };
 
 #endif // __PATH_TRACER_BRIDGE_HLSLI__

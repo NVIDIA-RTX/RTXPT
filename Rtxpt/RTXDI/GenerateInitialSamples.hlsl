@@ -12,6 +12,8 @@
 
 #include "RtxdiApplicationBridge.hlsli"
 
+#include <Rtxdi/DI/ReservoirStorage.hlsli>
+#include <Rtxdi/Utils/ReservoirAddressing.hlsli>
 #include <Rtxdi/Di/InitialSampling.hlsli>
 
 #if USE_RAY_QUERY
@@ -36,22 +38,13 @@ void RayGen()
     if (!RAB_IsSurfaceValid(surface))
         return;
   
-    RTXDI_SampleParameters sampleParams = RTXDI_InitSampleParameters(
-        g_RtxdiBridgeConst.restirDI.initialSamplingParams.numPrimaryLocalLightSamples,
-        g_RtxdiBridgeConst.restirDI.initialSamplingParams.numPrimaryInfiniteLightSamples,
-        g_RtxdiBridgeConst.restirDI.initialSamplingParams.numPrimaryEnvironmentSamples,
-        g_RtxdiBridgeConst.restirDI.initialSamplingParams.numPrimaryBrdfSamples,
-        g_RtxdiBridgeConst.restirDI.initialSamplingParams.brdfCutoff,
-        0.001f);
-
     RAB_LightSample lightSample;
     RTXDI_DIReservoir reservoir = RTXDI_SampleLightsForSurface(
         rng, 
         tileRng, 
         surface, 
-        sampleParams, 
+        g_RtxdiBridgeConst.restirDI.initialSamplingParams, 
         g_RtxdiBridgeConst.lightBufferParams,
-        g_RtxdiBridgeConst.restirDI.initialSamplingParams.localLightSamplingMode,
 #ifdef RTXDI_ENABLE_PRESAMPLING
         g_RtxdiBridgeConst.localLightsRISBufferSegmentParams, 
         g_RtxdiBridgeConst.environmentLightRISBufferSegmentParams,
@@ -70,7 +63,7 @@ void RayGen()
         {
             RTXDI_StoreVisibilityInDIReservoir(reservoir, 0, true);
 #if ENABLE_DEBUG_RTXDI_VIZUALISATION
-            if (debug.IsDebugPixel())
+            if (debug.IsDebugPixel(pixelPosition))
             {
                debug.DrawLine(lightSample.position, RAB_GetNewRayOrigin(surface), float3(1, 0, 0), float3(1, 0, 0));
             }
@@ -79,7 +72,7 @@ void RayGen()
 #if ENABLE_DEBUG_RTXDI_VIZUALISATION
         else //debug only
         {
-            if (debug.IsDebugPixel())
+            if (debug.IsDebugPixel(pixelPosition))
             {
                 debug.DrawLine(lightSample.position, RAB_GetNewRayOrigin(surface), float3(0, 1, 0), float3(0, 1, 0));
             }

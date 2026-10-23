@@ -24,7 +24,7 @@
 #define FLT_EPSILON_MINI                (2e-9f)
 #define MAX_SOLID_ANGLE_PDF             (1e10f)
 
-#if (!defined(POLYLIGHT_SPHERE_ENABLE) || !defined(POLYLIGHT_POINT_ENABLE) || !defined(POLYLIGHT_TRIANGLE_ENABLE) || !defined(POLYLIGHT_DIRECTIONAL_ENABLE) || !defined(POLYLIGHT_ENV_ENABLE) )
+#if (!defined(POLYLIGHT_SPHERE_ENABLE) || !defined(POLYLIGHT_POINT_ENABLE) || !defined(POLYLIGHT_TRIANGLE_ENABLE) || !defined(POLYLIGHT_DIRECTIONAL_ENABLE) || !defined(POLYLIGHT_ENV_ENABLE) || !defined(POLYLIGHT_LIGHT_CLUSTER))
 #error Each light type must be explicitly enabled or disabled
 #endif
 
@@ -351,19 +351,17 @@ struct DirectionalLight
             + tangent * diskSample.x * sinHalfAngle
             + bitangent * diskSample.y * sinHalfAngle;
 
-        // Calculate sample position on the distant light
-        // Since there is no physical distant light to hit (as it is at infinity), this simply uses a large
-        // number far enough away from anything in the world.
-
-        const float3 distantPositionSample = viewerPosition - distantDirectionSample * DISTANT_LIGHT_DISTANCE;
-        const float3 distantNormalSample = direction;
-
-        // Create the light sample
+        // Special convention for directional lights: since there is no physical position (the
+        // light is at infinity), store the unit vector that points FROM the receiver TO the
+        // sampled point on the sun disk directly in Position. Consumers can then read it as a
+        // direction without any subtract/normalize round trip against viewerPosition.
+        // `direction` is the light's travel direction, so toLight = -distantDirectionSample.
+        const float3 toLightSample = -distantDirectionSample;
 
         PolymorphicLightSample lightSample;
 
-        lightSample.Position = distantPositionSample;
-        lightSample.Normal = distantNormalSample;
+        lightSample.Position = toLightSample;
+        lightSample.Normal = direction;
         lightSample.Radiance = radiance;
         lightSample.SolidAnglePdf = 1.0 / solidAngle;
         lightSample.LightSampleableByBSDF = false;
@@ -448,6 +446,9 @@ struct TriangleLight
         const float distance = sqrt(distSqr);
         const float3 dir = toLight / distance;
         float cosTheta = dot(normal, -dir);
+        // Like CalcSample, which never produces these directions (e.g. a triangle that is degenerate or flipped after fp16 packing) - so
+        // BSDF hits on them must get MIS weight 1
+        if (cosTheta <= 0.f) return 0.f;
 
         const float areaPdf = max(FLT_EPSILON_MINI, 1.0 / surfaceArea);
         return min( MAX_SOLID_ANGLE_PDF, pdfAtoW(areaPdf, distance, cosTheta) );
@@ -502,20 +503,20 @@ struct TriangleLight
         return triLight;
     }
 
-    PolymorphicLightInfoFull Store(uint uniqueID)
+    PolymorphicLightInfoFull Store()
     {
         PolymorphicLightInfoFull lightInfo = (PolymorphicLightInfoFull)0;
 
         PolymorphicLight::PackColor(radiance, lightInfo.Base);
         lightInfo.Base.Center = base + ((edge1 + edge2) / 3.0); 
-        float3 edges = (f32tof16(edge1) & 0xffff) | (f32tof16(edge2) << 16);
+        // uint, not float: each packed pair exceeds 2^24, so a float round trip would round off edge1's low mantissa bits.
+        uint3 edges = (f32tof16(edge1) & 0xffff) | (f32tof16(edge2) << 16);
         lightInfo.Base.Direction1 = edges.x;
         lightInfo.Base.Direction2 = edges.y;
         lightInfo.Base.Scalars = edges.z;
         lightInfo.Base.ColorTypeAndFlags |= uint(PolymorphicLightType::kTriangle) << kPolymorphicLightTypeShift;
         //lightInfo.Base.logRadiance |= f32tof16((uint) empty slot) << 16; //unused
         lightInfo.Extended = PolymorphicLightInfoEx::empty();
-        lightInfo.Extended.UniqueID = uniqueID;
         return lightInfo;
     }
 };
@@ -623,7 +624,7 @@ struct EnvironmentQuadLight
         return Weight;
     }
 
-    PolymorphicLightInfoFull Store(uint uniqueID)
+    PolymorphicLightInfoFull Store()
     {
         PolymorphicLightInfoFull lightInfo = (PolymorphicLightInfoFull)0;
 
@@ -634,11 +635,128 @@ struct EnvironmentQuadLight
         lightInfo.Base.ColorTypeAndFlags |= uint(PolymorphicLightType::kEnvironmentQuad) << kPolymorphicLightTypeShift;
         //PolymorphicLight::PackColor(radiance, lightInfo.Base);
         lightInfo.Extended = PolymorphicLightInfoEx::empty();
-        lightInfo.Extended.UniqueID = uniqueID;
         return lightInfo;
     }
 };
 #endif // #if POLYLIGHT_ENV_ENABLE
+
+#if POLYLIGHT_LIGHT_CLUSTER || defined(__INTELLISENSE__)
+
+struct LightCluster
+{
+    uint        IndexFrom;          // starting index of the light we're representing; it should always be valid (not RTXPT_INVALID_LIGHT_INDEX) even if not active
+    uint        IndexCount;         // number of sequential lights we're representing; it should always be valid (>0) even if not active
+
+    float3      AABBCenter;         // covers all triangles (or volumes of whatever lights we're representing from IndexFrom to but not including IndexFrom+IndexCount)
+    float3      AABBExtents;        // covers all triangles (or volumes of whatever lights we're representing from IndexFrom to but not including IndexFrom+IndexCount)
+
+    bool        Active;            // whether it's currently representing any triangles
+
+    // Interface methods
+
+    PolymorphicLightSample CalcSample(in const float3 viewerPosition)
+    {
+        // Note: this should never get called. LightCluster is a proxy for other light types and as such this call should be handled on
+        // the caller side by picking one random index between [IndexFrom, IndexFrom+Count) and calling its CalcSample
+        const float3 lightVector = AABBCenter - viewerPosition;
+        PolymorphicLightSample lightSample;
+        lightSample.Position = AABBCenter;
+        lightSample.Normal = normalize(-lightVector);
+        lightSample.Radiance = float3(10,1,0); // pink-ish?
+        lightSample.SolidAnglePdf = 1.0;
+        lightSample.LightSampleableByBSDF = false;
+
+        return lightSample;
+    }
+
+    float CalcSolidAnglePdfForMIS(in const float3 viewerPosition, in const float3 lightSamplePosition)
+    {
+        // Note: this should never get called. LightCluster is a proxy for other light types and as such this call should be handled on
+        // the caller side by picking one random index between [IndexFrom, IndexFrom+Count) and calling its CalcSample
+        return 0;
+    }
+
+    float GetPower()
+    {
+        return 0; // not implemented
+    }
+
+    float GetWeightForVolume(in const float3 volumeCenter, in const float volumeRadius)
+    {
+        return 0; // not implemented
+    }
+
+    // Packing: Center = AABBCenter; Direction1 = IndexFrom (23 bits) | (IndexCount-1) << 23 (6 bits, so max 64) | Active << 31;
+    // Direction2 unused; Scalars = fp16 AABBExtents.xy; LogRadiance = fp16 AABBExtents.z (upper 16 bits unused)
+    static LightCluster Create(in const PolymorphicLightInfoFull lightInfo)
+    {
+        LightCluster lightCluster;
+        lightCluster.IndexFrom      = lightInfo.Base.Direction1 & 0x7FFFFF;
+        lightCluster.IndexCount     = ((lightInfo.Base.Direction1 >> 23) & 0x3F) + 1;
+        lightCluster.Active         = (lightInfo.Base.Direction1 >> 31) != 0;
+        lightCluster.AABBCenter     = lightInfo.Base.Center;
+        lightCluster.AABBExtents    = f16tof32(uint3(lightInfo.Base.Scalars, lightInfo.Base.Scalars >> 16, lightInfo.Base.LogRadiance));
+        return lightCluster;
+    }
+
+    PolymorphicLightInfoFull Store()
+    {
+        PolymorphicLightInfoFull lightInfo = (PolymorphicLightInfoFull)0;
+        lightInfo.Base.Center = AABBCenter;
+        lightInfo.Base.ColorTypeAndFlags = uint(PolymorphicLightType::kLightCluster) << kPolymorphicLightTypeShift;
+        lightInfo.Base.Direction1 = (IndexFrom & 0x7FFFFF) | (((IndexCount - 1) & 0x3F) << 23) | (Active ? (1u << 31) : 0);
+        uint3 extents = f32tof16(AABBExtents);
+        extents += uint3(f16tof32(extents) < AABBExtents);  // round up so the fp16 box never shrinks
+        lightInfo.Base.Scalars = extents.x | (extents.y << 16);
+        lightInfo.Base.LogRadiance = extents.z;
+        lightInfo.Extended = PolymorphicLightInfoEx::empty();
+        return lightInfo;
+    }
+
+    // Whether the global/local samplers may hand this light out directly: a light in an active cluster is only reachable through
+    // its cluster, and an inactive cluster not at all (its lights are sampled individually)
+    static bool IsDirectlySampleable(PolymorphicLightInfo lightInfo)
+    {
+        if( lightInfo.IsPartOfLightCluster() )
+            return false;
+        return PolymorphicLight::DecodeType(lightInfo) != PolymorphicLightType::kLightCluster || LightCluster::Create(PolymorphicLightInfoFull::make(lightInfo)).Active;
+    }
+
+    // This takes a light index, checks the type, and if it's a cluster then it will randomly pick a single contained light and adjust pdf accordingly.
+    // If it's not a light cluster, it does nothing.
+    static void MaybeUnwrap(in const StructuredBuffer<PolymorphicLightInfo> lightsBuffer, inout uint lightIndex, inout float selectionPdf, in const float random)
+    {
+        PolymorphicLightInfo infoBase = lightsBuffer[lightIndex];  // no bounds checking here
+
+        // if this is a light cluster, pick one index from it and re-load it
+        if (PolymorphicLight::DecodeType(infoBase) == PolymorphicLightType::kLightCluster)
+        {
+            LightCluster lightCluster = LightCluster::Create(PolymorphicLightInfoFull::make(infoBase, PolymorphicLightInfoEx::empty()));
+            lightIndex = lightCluster.IndexFrom + clamp( uint(random * lightCluster.IndexCount), 0, lightCluster.IndexCount-1 );
+            infoBase = lightsBuffer[lightIndex];
+            selectionPdf *= 1.0 / (float)lightCluster.IndexCount;
+
+            // we should assert on
+            // if (DecodeType(infoBase) == PolymorphicLightType::kLightCluster) assert();
+        }
+    }
+    // Opposite of MaybeUnwrap - this takes a light index, checks the flag, and if it's >in a cluster< then it will replace its index with cluster index
+    // and adjust pdf accordingly.
+    // If it's not a light cluster, it does nothing.
+    static void MaybeWrap(in const StructuredBuffer<PolymorphicLightInfo> lightsBuffer, in const StructuredBuffer<PolymorphicLightInfoEx> lightsExBuffer, inout uint lightIndex, inout float selectionPdf, in const float random)
+    {
+        PolymorphicLightInfo infoBase = lightsBuffer[lightIndex];  // no bounds checking here
+
+        // if this is a light cluster, pick one index from it and re-load it
+        if ( infoBase.IsPartOfLightCluster() )
+        {
+            const uint clusterIndexAndCount = lightsExBuffer[lightIndex].ClusterIndexAndCount;
+            lightIndex = PolymorphicLightInfoEx::UnpackClusterIndex( clusterIndexAndCount );
+            selectionPdf *= (float)PolymorphicLightInfoEx::UnpackClusterLightCount( clusterIndexAndCount );
+        }        
+    }
+};
+#endif // #if POLYLIGHT_LIGHT_CLUSTER
 
 PolymorphicLightSample PolymorphicLight::CalcSample(in const PolymorphicLightInfoFull lightInfo, in const float2 random, in const float3 viewerPosition)
 {
@@ -653,7 +771,9 @@ PolymorphicLightSample PolymorphicLight::CalcSample(in const PolymorphicLightInf
     case PolymorphicLightType::kPoint:          lightSample = PointLight::Create(lightInfo).CalcSample(viewerPosition); break;
 #endif
 #if POLYLIGHT_TRIANGLE_ENABLE
+#ifndef OVERRIDE_POLYLIGHT_TRIANGLE_ENABLE
     case PolymorphicLightType::kTriangle:       lightSample = TriangleLight::Create(lightInfo).CalcSample(random, viewerPosition); break;
+#endif
 #endif
 #if POLYLIGHT_DIRECTIONAL_ENABLE
     case PolymorphicLightType::kDirectional:    lightSample = DirectionalLight::Create(lightInfo).CalcSample(random, viewerPosition); break;
@@ -663,6 +783,9 @@ PolymorphicLightSample PolymorphicLight::CalcSample(in const PolymorphicLightInf
 #endif
 #if POLYLIGHT_QT_ENV_ENABLE
     case PolymorphicLightType::kEnvironmentQuad:lightSample = EnvironmentQuadLight::Create(lightInfo).CalcSample(random, viewerPosition); break;
+#endif
+#if POLYLIGHT_LIGHT_CLUSTER
+    case PolymorphicLightType::kLightCluster:   lightSample = LightCluster::Create(lightInfo).CalcSample(viewerPosition); break;
 #endif
     default: break;
     }
@@ -674,29 +797,6 @@ PolymorphicLightSample PolymorphicLight::CalcSample(in const PolymorphicLightInf
 
     return lightSample;
 }
-
-#if 0
-float3 PolymorphicLight::CalcSamplingProxy(in const PolymorphicLightInfoFull lightInfo, in const float randomDist, in const float2 randomDir, in const float2 randomSurf, in const float maxRangeLog2)
-{
-    float3 samplingProxy;
-
-    switch (DecodeType(lightInfo))
-    {
-#if POLYLIGHT_SPHERE_ENABLE
-    case PolymorphicLightType::kSphere:      samplingProxy = SphereLight::Create(lightInfo).CalcSamplingProxy(randomDist, randomDir, randomSurf, maxRangeLog2); break;
-#endif
-#if POLYLIGHT_POINT_ENABLE
-    case PolymorphicLightType::kPoint:       samplingProxy = PointLight::Create(lightInfo).CalcSamplingProxy(randomDist, randomDir, randomSurf, maxRangeLog2); break;
-#endif
-#if POLYLIGHT_TRIANGLE_ENABLE
-    case PolymorphicLightType::kTriangle:    samplingProxy = TriangleLight::Create(lightInfo).CalcSamplingProxy(randomDist, randomDir, randomSurf, maxRangeLog2); break;
-#endif
-    default: break;
-    }
-
-    return samplingProxy;
-}
-#endif
 
 float PolymorphicLight::GetPower(in const PolymorphicLightInfoFull lightInfo)
 {
@@ -745,6 +845,9 @@ float PolymorphicLight::GetWeightForVolume(in const PolymorphicLightInfoFull lig
 #endif
 #if POLYLIGHT_QT_ENV_ENABLE
     case PolymorphicLightType::kEnvironmentQuad:return 0; // infinite lights do not affect volume sampling
+#endif
+#if POLYLIGHT_LIGHT_CLUSTER
+    case PolymorphicLightType::kLightCluster:   return LightCluster::Create(lightInfo).GetWeightForVolume(volumeCenter, volumeRadius);
 #endif
     default: return 0;
     }
@@ -813,6 +916,7 @@ bool PolymorphicLight::PackCompactInfo(PolymorphicLightInfoFull lightInfo, out u
 PolymorphicLightInfoFull PolymorphicLight::UnpackCompactInfo(const uint4 data1, const uint4 data2)
 {
     PolymorphicLightInfoFull lightInfo = (PolymorphicLightInfoFull)0;
+    lightInfo.Extended = PolymorphicLightInfoEx::empty();
     lightInfo.Base.Center.xyz = asfloat(data1.xyz);
     lightInfo.Base.ColorTypeAndFlags = data1.w;
     lightInfo.Base.Direction1 = data2.x;

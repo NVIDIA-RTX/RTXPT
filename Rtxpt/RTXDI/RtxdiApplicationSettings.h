@@ -15,20 +15,24 @@
 // Set default values RTXDI settings
 const rtxdi::ReSTIRDI_ResamplingMode GetReSTIRDI_ResamplingMode();
 
-const ReSTIRDI_InitialSamplingParameters getReSTIRDIInitialSamplingParams();
+const RTXDI_DIInitialSamplingParameters getReSTIRDIInitialSamplingParams();
 
-const ReSTIRDI_TemporalResamplingParameters getReSTIRDITemporalResamplingParams();
+const RTXDI_DITemporalResamplingParameters getReSTIRDITemporalResamplingParams();
 
-const ReSTIRDI_SpatialResamplingParameters getReSTIRDISpatialResamplingParams();
+const RTXDI_BoilingFilterParameters getReSTIRDIBoilingFilterParams();
 
-const ReSTIRDI_ShadingParameters getReSTIRDIShadingParams();
+const RTXDI_DISpatialResamplingParameters getReSTIRDISpatialResamplingParams();
+
+const RTXDI_ShadingParameters getReSTIRDIShadingParams();
 
 const rtxdi::ReSTIRGI_ResamplingMode GetReSTIRGI_ResamplingMode();
 
-const ReSTIRGI_TemporalResamplingParameters getReSTIRGITemporalResamplingParams();
+const RTXDI_GITemporalResamplingParameters getReSTIRGITemporalResamplingParams();
 
-const ReSTIRGI_SpatialResamplingParameters getReSTIRGISpatialResamplingParams();
+const RTXDI_BoilingFilterParameters getReSTIRGIBoilingFilterParams();
 
-const ReSTIRGI_FinalShadingParameters getReSTIRGIFinalShadingParams();
+const RTXDI_GISpatialResamplingParameters getReSTIRGISpatialResamplingParams();
+
+const RTXDI_GIFinalShadingParameters getReSTIRGIFinalShadingParams();
 
 const rtxdi::ReGIRDynamicParameters getReGIRDynamicParams();

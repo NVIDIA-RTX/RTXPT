@@ -226,7 +226,7 @@ void EnvMapImportanceSamplingBaker::GenerateImportanceMap(nvrhi::CommandListHand
     FillBakerConsts( constants, sourceCubemap, -1 );    // sampleIndex not relevant during importance map generation
 
     {
-        RAII_SCOPE(commandList->beginMarker("GenIM"); , commandList->endMarker(); );
+        RTXPT_GPU_SCOPE(commandList, "GenIM");
         commandList->writeBuffer(m_builderConstants, &constants, sizeof(EnvMapImportanceSamplingBakerConstants));
         commandList->setComputeState(state);
         commandList->dispatch(groupCount, groupCount);
@@ -248,7 +248,7 @@ void EnvMapImportanceSamplingBaker::GenerateImportanceMap(nvrhi::CommandListHand
 
 void EnvMapImportanceSamplingBaker::Update(nvrhi::CommandListHandle commandList, nvrhi::TextureHandle sourceCubemap)
 {
-    RAII_SCOPE( commandList->beginMarker("ISBake");, commandList->endMarker(); );
+    RTXPT_GPU_SCOPE(commandList, "ISBake");
 
     GenerateImportanceMap(commandList, sourceCubemap);
 }

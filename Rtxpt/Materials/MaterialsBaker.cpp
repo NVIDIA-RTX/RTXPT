@@ -23,6 +23,8 @@
 
 #include "../SampleCommon/SampleCommon.h"
 #include "../SampleCommon/ExtendedScene.h"
+#include "../SceneRenderCache.h"
+#include "../SampleCommon/ParallelFor.h"
 
 #include <donut/core/json.h>
 #include <json/json.h>
@@ -71,14 +73,6 @@ void PTTexture::InitFromLoadedTexture(std::shared_ptr<donut::engine::LoadedTextu
     NormalMap = _normalMap;
 }
 
-std::shared_ptr<PTMaterial> PTMaterial::SafeCast(const std::shared_ptr<Material>& donutMaterial)
-{
-    if (donutMaterial == nullptr)
-        return nullptr;
-    assert(std::dynamic_pointer_cast<MaterialEx>(donutMaterial) != nullptr);
-    return std::static_pointer_cast<MaterialEx>(donutMaterial)->PTMaterial;
-}
-
 void PTMaterial::Write(Json::Value& output)
 {
     auto saveTexture = [ ](Json::Value& output, const PTTexture & texture, const std::string& name)
@@ -97,6 +91,7 @@ void PTMaterial::Write(Json::Value& output)
 
     saveTexture(output, BaseTexture, "BaseTexture");
     saveTexture(output, OcclusionRoughnessMetallicTexture, "OcclusionRoughnessMetallicTexture");
+    saveTexture(output, OcclusionTexture, "OcclusionTexture");
     saveTexture(output, NormalTexture, "NormalTexture");
     saveTexture(output, EmissiveTexture, "EmissiveTexture");
     saveTexture(output, TransmissionTexture, "TransmissionTexture");
@@ -119,6 +114,7 @@ void PTMaterial::Write(Json::Value& output)
     STORE_FIELD(UseSpecularGlossModel);
     STORE_FIELD(EnableBaseTexture);
     STORE_FIELD(EnableOcclusionRoughnessMetallicTexture);
+    STORE_FIELD(EnableOcclusionTexture);
     STORE_FIELD(EnableNormalTexture);
     STORE_FIELD(EnableEmissiveTexture);
     STORE_FIELD(EnableTransmissionTexture);
@@ -138,6 +134,7 @@ void PTMaterial::Write(Json::Value& output)
 
     STORE_FIELD(ShadowNoLFadeout);
 
+    STORE_FIELD(DisableLightSampling);
     STORE_FIELD(EnableAsAnalyticLightProxy);
 
     STORE_FIELD(IgnoreMeshTangentSpace);
@@ -191,11 +188,19 @@ bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath
             }
         }
 
-        output.Loaded = textureCache->LoadTextureFromFileDeferred(fullPath, output.sRGB);
+        // Must pass the SAME SRGBMode that Donut's GltfImporter passes for the equivalent slot: the TextureCache key
+        // is {path, TextureLoadOptions}, so any mismatch misses the cache and decodes/uploads the same file a second
+        // time (extra VRAM + an extra bindless descriptor). The importer uses ForceSRGB for baseColor/emissive and
+        // ForceLinear for normal/occlusion/transmission/metalRough - see GltfImporter.cpp.
+        // Safe for content: ForceLinear only rewrites sRGB->linear, and no shipped asset has a non-sRGB slot pointing
+        // at an sRGB-declaring container, so this changes no format - it only restores the cache sharing.
+        output.Loaded = textureCache->LoadTextureFromFileDeferred(fullPath,
+            TextureLoadOptions{ output.sRGB ? SRGBMode::ForceSRGB : SRGBMode::ForceLinear });
     };
 
     loadTexture(input, this->BaseTexture, "BaseTexture");
     loadTexture(input, this->OcclusionRoughnessMetallicTexture, "OcclusionRoughnessMetallicTexture");
+    loadTexture(input, this->OcclusionTexture, "OcclusionTexture");
     loadTexture(input, this->NormalTexture, "NormalTexture");
     loadTexture(input, this->EmissiveTexture, "EmissiveTexture");
     loadTexture(input, this->TransmissionTexture, "TransmissionTexture");
@@ -218,6 +223,7 @@ bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath
     LOAD_FIELD(UseSpecularGlossModel);
     LOAD_FIELD(EnableBaseTexture);
     LOAD_FIELD(EnableOcclusionRoughnessMetallicTexture);
+    LOAD_FIELD(EnableOcclusionTexture);
     LOAD_FIELD(EnableNormalTexture);
     LOAD_FIELD(EnableEmissiveTexture);
     LOAD_FIELD(EnableTransmissionTexture);
@@ -238,6 +244,7 @@ bool PTMaterial::Read(Json::Value& input, const std::filesystem::path& mediaPath
 
     LOAD_FIELD(ShadowNoLFadeout);
 
+    LOAD_FIELD(DisableLightSampling);
     LOAD_FIELD(EnableAsAnalyticLightProxy);
 
     LOAD_FIELD(IgnoreMeshTangentSpace);
@@ -291,11 +298,17 @@ bool PTMaterial::EditorGUI(MaterialsBaker & baker)
             "having more detailed mesh) is to add additional shadowing falloff to hide the seam. This setting is not \n"
             "physically correct and adds bias. Setting of 0 means no fadeout (default).");
 
-        update |= ImGui::Checkbox("Enable as analytic light proxy", &EnableAsAnalyticLightProxy);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-            "Any scene object with this material will look at it's parent node in the scenegraph; if the parent contains\n"
-            "an analytic light, the rays falling of this surface will also output radiance from the analytic light.\n"
-            "The more closely the object's mesh resembles the analytic light, the more physically correct results will be.\n");
+        update |= ImGui::Checkbox("Disable light sampling", &DisableLightSampling);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Will be ignored by light sampling - for example, if there is a manually\ncreated analytic light for light sampling it.\n");
+
+        {
+            UI_SCOPED_DISABLE(DisableLightSampling);
+            update |= ImGui::Checkbox("Enable as analytic light proxy", &EnableAsAnalyticLightProxy);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Any scene object with this material will look at it's parent node in the scenegraph; if the parent contains\n"
+                "an analytic light, the rays falling of this surface will also output radiance from the analytic light.\n"
+                "The more closely the object's mesh resembles the analytic light, the more physically correct results will be.\n");
+        }
 
         update |= ImGui::Checkbox("Emissive intensity from Donut", &UseDonutEmissiveIntensity);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Classic Donut materials can have emissive intensity animation attached; this allows RTXPT to use it\n");
@@ -508,11 +521,6 @@ static void GetBindlessTextureIndex(const std::shared_ptr<LoadedTexture>& textur
     outEncodedInfo = (baseLOD << 24) | (mipLevels << 16) | bindlessDescIndex;
 }
 
-bool PTMaterial::IsEmissive() const
-{
-    return (EmissiveIntensity > 0) && (donut::math::any(EmissiveColor>0.0f)) || UseDonutEmissiveIntensity;  // UseDonutEmissiveIntensity can animate on/off so just assume we're emissive and pay the cost
-}
-
 void PTMaterial::FillData(PTMaterialData & data)
 {
     // flags
@@ -527,6 +535,11 @@ void PTMaterial::FillData(PTMaterialData & data)
 
     if (OcclusionRoughnessMetallicTexture.Loaded && EnableOcclusionRoughnessMetallicTexture)
         data.Flags |= PTMaterialFlags_UseMetalRoughOrSpecularTexture;
+
+    // Ambient occlusion comes from the dedicated occlusion texture (.r). Donut aliases this to the
+    // ORM image for packed assets, so this path is correct for both packed and standalone AO textures.
+    if (OcclusionTexture.Loaded && EnableOcclusionTexture)
+        data.Flags |= PTMaterialFlags_UseOcclusionTexture;
 
     if (EmissiveTexture.Loaded && EnableEmissiveTexture)
         data.Flags |= PTMaterialFlags_UseEmissiveTexture;
@@ -578,6 +591,7 @@ void PTMaterial::FillData(PTMaterialData & data)
 
     GetBindlessTextureIndex(BaseTexture.Loaded, data.BaseOrDiffuseTextureIndex, data.Flags, PTMaterialFlags_UseBaseOrDiffuseTexture);
     GetBindlessTextureIndex(OcclusionRoughnessMetallicTexture.Loaded, data.MetalRoughOrSpecularTextureIndex, data.Flags, PTMaterialFlags_UseMetalRoughOrSpecularTexture);
+    GetBindlessTextureIndex(OcclusionTexture.Loaded, data.OcclusionTextureIndex, data.Flags, PTMaterialFlags_UseOcclusionTexture);
     GetBindlessTextureIndex(EmissiveTexture.Loaded, data.EmissiveTextureIndex, data.Flags, PTMaterialFlags_UseEmissiveTexture);
     GetBindlessTextureIndex(NormalTexture.Loaded, data.NormalTextureIndex, data.Flags, PTMaterialFlags_UseNormalTexture);
     GetBindlessTextureIndex(TransmissionTexture.Loaded, data.TransmissionTextureIndex, data.Flags, PTMaterialFlags_UseTransmissionTexture);
@@ -606,7 +620,6 @@ MaterialsBaker::MaterialsBaker(const std::string & relativeShaderSourcePath, nvr
     : m_relativeShaderSourcePath(relativeShaderSourcePath)
     , m_device(device)
     , m_textureCache(textureCache)
-    , m_bindingCache(device)
     , m_shaderFactory(shaderFactory)
 {
 }
@@ -637,6 +650,7 @@ void MaterialsBaker::Clear()
 {
     m_materialDataWasReset = true;
     m_materials.clear();
+    m_pendingDonutImports.clear();
     m_materialsGPU.clear();
     m_textures.clear();
     m_mediaPath = std::filesystem::path();
@@ -657,51 +671,52 @@ static std::string ModelNameFromModelFileName(const std::string& modelFileName)
     return modelName.string();
 }
 
-std::shared_ptr<PTMaterial> MaterialsBaker::ImportFromDonut(donut::engine::Material& material)
+void MaterialsBaker::ImportFromDonut(donut::engine::Material& material, PTMaterial& materialPT)
 {
-    std::shared_ptr<PTMaterial> materialPT = std::make_shared<PTMaterial>();
+    materialPT.Name = material.name;
+    materialPT.ModelName = ModelNameFromModelFileName(material.modelFileName);
 
-    materialPT->Name = material.name;
-    materialPT->ModelName = ModelNameFromModelFileName(material.modelFileName);
-
-    materialPT->BaseTexture.InitFromLoadedTexture(material.baseOrDiffuseTexture, true, false, m_mediaPath);
+    materialPT.BaseTexture.InitFromLoadedTexture(material.baseOrDiffuseTexture, true, false, m_mediaPath);
 
     if( material.useSpecularGlossModel ) // spec-gloss model is a special case hack where we use metalRoughOrSpecularTexture to store specular color, which is handled as sRGB
-        materialPT->OcclusionRoughnessMetallicTexture.InitFromLoadedTexture(material.metalRoughOrSpecularTexture, true, false, m_mediaPath);
+        materialPT.OcclusionRoughnessMetallicTexture.InitFromLoadedTexture(material.metalRoughOrSpecularTexture, true, false, m_mediaPath);
     else
-        materialPT->OcclusionRoughnessMetallicTexture.InitFromLoadedTexture(material.metalRoughOrSpecularTexture, false, false, m_mediaPath);
+        materialPT.OcclusionRoughnessMetallicTexture.InitFromLoadedTexture(material.metalRoughOrSpecularTexture, false, false, m_mediaPath);
 
-    materialPT->NormalTexture.InitFromLoadedTexture(material.normalTexture, false, true, m_mediaPath);
-    materialPT->EmissiveTexture.InitFromLoadedTexture(material.emissiveTexture, true, false, m_mediaPath);
-    materialPT->TransmissionTexture.InitFromLoadedTexture(material.transmissionTexture, false, false, m_mediaPath);
+    // Dedicated glTF occlusion texture (.r). Kept separate from the metal-rough texture: for ORM-packed
+    // assets Donut resolves this to the same image (so .r is still occlusion), and for assets with a
+    // standalone AO texture (e.g. the DamagedHelmet) this is the only place the real AO data lives.
+    materialPT.OcclusionTexture.InitFromLoadedTexture(material.occlusionTexture, false, false, m_mediaPath);
+    materialPT.NormalTexture.InitFromLoadedTexture(material.normalTexture, false, true, m_mediaPath);
+    materialPT.EmissiveTexture.InitFromLoadedTexture(material.emissiveTexture, true, false, m_mediaPath);
+    materialPT.TransmissionTexture.InitFromLoadedTexture(material.transmissionTexture, false, false, m_mediaPath);
 
     // Toggles for the textures. Only effective if the corresponding texture is non-null.
-    materialPT->EnableBaseTexture = material.enableBaseOrDiffuseTexture;
-    materialPT->EnableOcclusionRoughnessMetallicTexture = material.enableMetalRoughOrSpecularTexture;
-    materialPT->EnableNormalTexture = material.enableNormalTexture;
-    materialPT->EnableEmissiveTexture = material.enableEmissiveTexture;
-    materialPT->EnableTransmissionTexture = material.enableTransmissionTexture;
+    materialPT.EnableBaseTexture = material.enableBaseOrDiffuseTexture;
+    materialPT.EnableOcclusionRoughnessMetallicTexture = material.enableMetalRoughOrSpecularTexture;
+    materialPT.EnableOcclusionTexture = material.enableOcclusionTexture;
+    materialPT.EnableNormalTexture = material.enableNormalTexture;
+    materialPT.EnableEmissiveTexture = material.enableEmissiveTexture;
+    materialPT.EnableTransmissionTexture = material.enableTransmissionTexture;
 
-    materialPT->BaseOrDiffuseColor = material.baseOrDiffuseColor;
-    materialPT->SpecularColor = material.specularColor;
-    materialPT->EmissiveColor = material.emissiveColor;
+    materialPT.BaseOrDiffuseColor = material.baseOrDiffuseColor;
+    materialPT.SpecularColor = material.specularColor;
+    materialPT.EmissiveColor = material.emissiveColor;
 
-    materialPT->EmissiveIntensity = material.emissiveIntensity;
-    materialPT->Metalness = material.metalness;
-    materialPT->Roughness = material.roughness;
-    materialPT->Opacity = material.opacity;
-    materialPT->AlphaCutoff = material.alphaCutoff;
-    materialPT->TransmissionFactor = material.transmissionFactor;
-    //materialPT->DiffuseTransmissionFactor = material.diffuseTransmissionFactor;
-    materialPT->NormalTextureScale = material.normalTextureScale;
-    //materialPT->IoR = material.ior;
-    materialPT->UseSpecularGlossModel = material.useSpecularGlossModel;
-    materialPT->MetalnessInRedChannel = material.metalnessInRedChannel;
+    materialPT.EmissiveIntensity = material.emissiveIntensity;
+    materialPT.Metalness = material.metalness;
+    materialPT.Roughness = material.roughness;
+    materialPT.Opacity = material.opacity;
+    materialPT.AlphaCutoff = material.alphaCutoff;
+    materialPT.TransmissionFactor = material.transmissionFactor;
+    //materialPT.DiffuseTransmissionFactor = material.diffuseTransmissionFactor;
+    materialPT.NormalTextureScale = material.normalTextureScale;
+    //materialPT.IoR = material.ior;
+    materialPT.UseSpecularGlossModel = material.useSpecularGlossModel;
+    materialPT.MetalnessInRedChannel = material.metalnessInRedChannel;
 
-    materialPT->EnableAlphaTesting = (material.domain == MaterialDomain::AlphaTested || material.domain == MaterialDomain::TransmissiveAlphaTested);
-    materialPT->EnableTransmission = (material.domain == MaterialDomain::Transmissive || material.domain == MaterialDomain::TransmissiveAlphaBlended || material.domain == MaterialDomain::TransmissiveAlphaTested);
-
-    return materialPT;
+    materialPT.EnableAlphaTesting = (material.domain == MaterialDomain::AlphaTested || material.domain == MaterialDomain::TransmissiveAlphaTested);
+    materialPT.EnableTransmission = (material.domain == MaterialDomain::Transmissive || material.domain == MaterialDomain::TransmissiveAlphaBlended || material.domain == MaterialDomain::TransmissiveAlphaTested);
 }
 
 std::shared_ptr<PTMaterial> MaterialsBaker::Load(const std::string & modelFileName, const std::string & name)
@@ -803,6 +818,9 @@ void MaterialsBaker::BakeShaderPermutations()
     // first generate ubershader variant - that will likely go away in the future
     std::vector<donut::engine::ShaderMacro> macros;
     macros.push_back({ "RTXPT_MATERIAL_PERMUTATIONS_ENABLED", "0" });
+    // ubershader can only support one variant
+    macros.push_back({ "ActiveBSDF", "StandardBSDF" });
+
     m_ubershader = std::make_shared<MaterialShaderPermutation>(MaterialShaderPermutation{ .ShaderFilePath = m_relativeShaderSourcePath, .Macros = macros } );
     m_ubershader->UniqueMaterialName = "Ubershader";
 
@@ -836,24 +854,9 @@ void MaterialsBaker::BakeShaderPermutations()
     }
 }
 
-void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path & mediaPath )
+void MaterialsBaker::LoadMaterials(const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path& mediaPath)
 {
     assert(!mediaPath.empty());
-    //m_bindlessLayout = bindlessLayout;
-    m_commonPasses = commonPasses;
-
-    {
-        nvrhi::BufferDesc bufferDesc;
-        bufferDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-        bufferDesc.keepInitialState = true;
-        bufferDesc.canHaveUAVs = true;
-        bufferDesc.byteSize = sizeof(PTMaterialData) * RTXPT_MATERIAL_MAX_COUNT;
-        bufferDesc.structStride = sizeof(PTMaterialData);
-        bufferDesc.debugName = "PTMaterialDataStorage";
-        m_materialData = m_device->createBuffer(bufferDesc);
-        m_materialDataWasReset = true;
-    }
-
     if (m_mediaPath == "") // first time load all
     {
         m_mediaPath = mediaPath;
@@ -886,8 +889,9 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
                 }
                 else // ...and if we didn't find it in our .scene.materials.json, then import from Donut!
                 {
-                    std::shared_ptr<PTMaterial> materialPT = ImportFromDonut(*material);
-                    materialEx->PTMaterial = materialPT;
+                    materialEx->PTMaterial = std::make_shared<PTMaterial>();
+                    ImportFromDonut(*material, *materialEx->PTMaterial);
+                    m_pendingDonutImports.push_back(materialEx);
                     initializedFromDonutCount++;
                 }
                 materialEx->PTMaterial->DonutCounterpart = materialEx.get(); // keep the link - only needed if using material animation from Donut
@@ -919,6 +923,36 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
 
         m_deferredTextureLoadInProgress = true;
     }
+}
+
+void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* bindlessLayout, std::shared_ptr<engine::CommonRenderPasses> commonPasses, const std::shared_ptr<ExtendedScene>& scene, const std::filesystem::path& sceneFilePath, const std::filesystem::path & mediaPath )
+{
+    assert(!mediaPath.empty());
+    //m_bindlessLayout = bindlessLayout;
+    m_commonPasses = commonPasses;
+
+    {
+        nvrhi::BufferDesc bufferDesc;
+        bufferDesc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;   // read by compute/RT only; legal on the async compute queue
+        bufferDesc.keepInitialState = true;
+        bufferDesc.canHaveUAVs = true;
+        bufferDesc.byteSize = sizeof(PTMaterialData) * RTXPT_MATERIAL_MAX_COUNT;
+        bufferDesc.structStride = sizeof(PTMaterialData);
+        bufferDesc.debugName = "PTMaterialDataStorage";
+        m_materialData = m_device->createBuffer(bufferDesc);
+        m_materialDataWasReset = true;
+    }
+
+    LoadMaterials(scene, sceneFilePath, mediaPath);
+
+    // Early import supports CPU OMM identification. Finalize fallback values after the first
+    // Animate, matching the original import timing without overwriting JSON overrides or later edits.
+    for (const auto& material : m_pendingDonutImports)
+    {
+        ImportFromDonut(*material, *material->PTMaterial);
+        material->PTMaterial->GPUDataDirty = true;
+    }
+    m_pendingDonutImports.clear();
 
     CompleteDeferredTexturesLoad(nullptr);
 
@@ -935,8 +969,11 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
         {
             if( existing->second.NormalMap != texture.NormalMap )
             { donut::log::warning("Texture with path '%s' is used as a NormalMap and not a NormalMap - this is not supported, expect errors.", texture.LocalPath.string().c_str()); assert( false ); }
+            // Not an error since the Donut texture cache started keying on {path, TextureLoadOptions}: the two sRGB
+            // modes now resolve to two independent TextureData objects and both are correct. The cost is that the
+            // image is decoded, uploaded and given a bindless descriptor twice, so it is still worth knowing about.
             if( existing->second.sRGB != texture.sRGB )
-            { donut::log::warning("Texture with path '%s' is marked as both sRGB and not sRGB in different places - this is not supported, expect errors.", texture.LocalPath.string().c_str()); assert( false ); }
+                donut::log::info("Texture with path '%s' is marked as both sRGB and not sRGB in different places - it will be loaded twice, once per mode.", texture.LocalPath.string().c_str());
         }
         else
             m_textures.insert( std::make_pair(texture.LocalPath.generic_string(), texture) );
@@ -947,6 +984,7 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
     {
         recordTexture(materialPT->BaseTexture);
         recordTexture(materialPT->OcclusionRoughnessMetallicTexture);
+        recordTexture(materialPT->OcclusionTexture);
         recordTexture(materialPT->NormalTexture);
         recordTexture(materialPT->EmissiveTexture);
         recordTexture(materialPT->TransmissionTexture);
@@ -957,9 +995,18 @@ void MaterialsBaker::CreateRenderPassesAndLoadMaterials(nvrhi::IBindingLayout* b
 }
 
 // NOTE: this also handles some of the geometry data and mixed geometry&material stuff - it might be a good idea to rethink whether it needs to live outside of material baker
-void UpdateSubInstanceData(SubInstanceData & ret, const std::shared_ptr<ExtendedScene> & scene, const donut::engine::MeshInstance& meshInstance, const donut::engine::MeshGeometry& geometry, uint meshGeometryIndex, const PTMaterial& material)
+// 'mesh' is the instance's MeshInfo, which the caller already has from SceneRenderCache - taking the MeshInstance just to
+// call GetMesh() on it again cost a pointer chase per sub-instance for nothing.
+void UpdateSubInstanceData(SubInstanceData & ret, const std::shared_ptr<ExtendedScene> & scene, const donut::engine::MeshInfo& mesh, const donut::engine::MeshGeometry& geometry, uint meshGeometryIndex, const PTMaterial& material)
 {
-    bool alphaTest = material.HasAlphaTest();
+    // Deliberately the field and not HasAlphaTest(): that one is pure-virtual in PTMaterialBase, and PTMaterial is not
+    // final, so MSVC cannot devirtualize it through a const PTMaterial& - it was a vtable load plus an indirect call per
+    // sub-instance to read a bool sitting right here. PTMaterial::HasAlphaTest() returns exactly this field, and nothing
+    // derives from PTMaterial.
+    bool alphaTest = material.EnableAlphaTesting;
+
+    // Note, we're initializing to defaults here
+    ret = SubInstanceData::Default();
 
     // we need alpha texture for alpha testing to work - disable otherwise
     if (alphaTest && (!material.EnableBaseTexture || material.BaseTexture.Loaded == nullptr))
@@ -967,35 +1014,42 @@ void UpdateSubInstanceData(SubInstanceData & ret, const std::shared_ptr<Extended
 
 
     float alphaCutoff = 0.0;
+    uint alphaTextureIndex = 0;
 
-    const std::shared_ptr<MeshInfo>& mesh = meshInstance.GetMesh();
-    ret.FlagsAndAlphaInfo = 0;
+    ret.GlobalGeometryIndex_FlagsAndAlphaCutoff = 0;
     if (alphaTest)
     {
-        ret.FlagsAndAlphaInfo |= SubInstanceData::Flags_AlphaTested;
+        ret.GlobalGeometryIndex_FlagsAndAlphaCutoff |= SubInstanceData::Flags_AlphaTested;
 
-        assert(mesh->buffers->hasAttribute(VertexAttribute::TexCoord1));
+        assert(mesh.buffers->hasAttribute(VertexAttribute::TexCoord1));
         assert(material.EnableBaseTexture && material.BaseTexture.Loaded != nullptr); // disable alpha testing if this happens to be possible
         // ret.AlphaCutoff = material.alphaCutoff;
         alphaCutoff = material.AlphaCutoff;
 
-        uint alphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
+        alphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
         assert(alphaTextureIndex < 0xFFFF);
-        // ret.AlphaTextureIndex = material.BaseTexture.Loaded->bindlessDescriptor.Get();
-
-        ret.FlagsAndAlphaInfo |= alphaTextureIndex & 0xFFFF;
     }
     ret.EmissiveLightMappingOffset = 0xFFFFFFFF;
 
-    uint quantizedAlphaCutoff = (uint)(dm::clamp(alphaCutoff, 0.0f, 1.0f) * 255.0f + 0.5f); assert(quantizedAlphaCutoff < 256);
-    ret.FlagsAndAlphaInfo |= (quantizedAlphaCutoff << SubInstanceData::Flags_AlphaOffsetOffset);
+    uint quantizedAlphaCutoff = SubInstanceData::QuantizeAlphaCutoff(alphaCutoff); assert(quantizedAlphaCutoff < 256);
+    ret.GlobalGeometryIndex_FlagsAndAlphaCutoff |= (quantizedAlphaCutoff << SubInstanceData::Flags_AlphaOffsetOffset);
 
     if (material.ExcludeFromNEE)
-        ret.FlagsAndAlphaInfo |= SubInstanceData::Flags_ExcludeFromNEE;
+        ret.GlobalGeometryIndex_FlagsAndAlphaCutoff |= SubInstanceData::Flags_ExcludeFromNEE;
 
-    uint globalGeometryIndex = mesh->geometries[0]->globalGeometryIndex + meshGeometryIndex;
+    // SceneGraph::Refresh assigns globalGeometryIndex sequentially within each mesh, so this is exactly
+    // 'mesh.geometries[0]->globalGeometryIndex + meshGeometryIndex' - which is how it used to be computed, at the cost of
+    // a shared_ptr chase into an unrelated geometry object per sub-instance. It is also the very value GetGeometryData()
+    // reads below, so both now come off one load.
+    uint globalGeometryIndex = (uint)geometry.globalGeometryIndex;
+    assert( globalGeometryIndex == uint(mesh.geometries[0]->globalGeometryIndex) + meshGeometryIndex ); // guards the assumption above
     uint globalMaterialIndex = material.GPUDataIndex;
-    ret.GlobalGeometryIndex_PTMaterialDataIndex = (globalGeometryIndex << 16) | globalMaterialIndex;
+    // Overflow is silent and corrupting: a geometry index bleeds into the flags above it, a material index into the
+    // alpha texture index.
+    assert( globalGeometryIndex < uint(SubInstanceData::MaxGlobalGeometryCount) );
+    assert( globalMaterialIndex < (1u << 16) );
+    ret.GlobalGeometryIndex_FlagsAndAlphaCutoff |= globalGeometryIndex;
+    ret.AlphaTextureIndex_PTMaterialDataIndex = (alphaTextureIndex << 16) | globalMaterialIndex;
 
 #if SUBINSTANCEDATA_EXTENDED
     GeometryData * gdata = scene->GetGeometryData(geometry);
@@ -1016,51 +1070,82 @@ void UpdateSubInstanceData(SubInstanceData & ret, const std::shared_ptr<Extended
 
 }
 
-void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<ExtendedScene>& scene, std::vector<SubInstanceData>& subInstanceData)
+void MaterialsBaker::Update(nvrhi::ICommandList* commandList, const std::shared_ptr<ExtendedScene>& scene, std::vector<SubInstanceData>& subInstanceData, SceneRenderCache & sceneRenderCache)
 {
-    RAII_SCOPE( commandList->beginMarker("MaterialsBaker");, commandList->endMarker(); );
+    ZoneScoped;
+
+    RTXPT_GPU_SCOPE(commandList, "MaterialsBaker");
 
     CompleteDeferredTexturesLoad(commandList);
 
     bool needsUpload = false;
-    for (auto& materialPT : m_materials)
     {
-        if (materialPT->UseDonutEmissiveIntensity && materialPT->DonutCounterpart != nullptr && materialPT->EmissiveIntensity != materialPT->DonutCounterpart->emissiveIntensity)
+        ZoneScopedN("UpdateMaterialDataIfNeeded");
+        for (auto& materialPT : m_materials)
         {
-            materialPT->EmissiveIntensity = materialPT->DonutCounterpart->emissiveIntensity;
-            materialPT->GPUDataDirty = true;
+            if (materialPT->UseDonutEmissiveIntensity && materialPT->DonutCounterpart != nullptr && materialPT->EmissiveIntensity != materialPT->DonutCounterpart->emissiveIntensity)
+            {
+                materialPT->EmissiveIntensity = materialPT->DonutCounterpart->emissiveIntensity;
+                materialPT->GPUDataDirty = true;
+            }
+
+            if (!materialPT->GPUDataDirty && !m_materialDataWasReset)
+                continue;
+
+            materialPT->FillData(m_materialsGPU[materialPT->GPUDataIndex]);
+            materialPT->GPUDataDirty = false;
+            needsUpload = true;
         }
-
-        if (!materialPT->GPUDataDirty && !m_materialDataWasReset)
-            continue;
-
-        materialPT->FillData(m_materialsGPU[materialPT->GPUDataIndex]);
-        materialPT->GPUDataDirty = false;
-        needsUpload = true;
     }
 
     if ( needsUpload )
     {
+        ZoneScopedN("UploadMaterialData");
         commandList->writeBuffer( m_materialData, m_materialsGPU.data(), m_materialsGPU.size() * sizeof(PTMaterialData), 0 );
         m_materialDataWasReset = false;
     }
 
     // NOTE: this also handles some of the geometry data and mixed geometry&material stuff - it might be a good idea to rethink whether it needs to live outside of material baker
-    uint subInstanceIndex = 0;
+    //
+    // Flat, contiguous views of the per-instance / per-sub-instance data. Walking instance->mesh->geometry->material
+    // directly is a pointer chase per sub-instance across scattered allocations, and it was what dominated this loop -
+    // LightsBaker::ProcessEmissiveGeometry walks the identical structure, so the cache serves both from one fill.
+    const auto& instanceInfos = sceneRenderCache.GetInstanceInfos();
+    const auto& subInstanceInfos = sceneRenderCache.GetSubInstanceInfos();
     const auto& instances = scene->GetSceneGraph()->GetMeshInstances();
-    for (const auto& instance : instances)
+    assert(instanceInfos.size() == instances.size());
+    assert(subInstanceInfos.size() == subInstanceData.size());
     {
-        const auto& mesh = instance->GetMesh();
-        uint32_t firstGeometryInstanceIndex = instance->GetGeometryInstanceIndex();
-        for (size_t geometryIndex = 0; geometryIndex < mesh->geometries.size(); ++geometryIndex, subInstanceIndex++)
-        {
-            const auto& geometry = mesh->geometries[geometryIndex];
-            assert( geometry->material != nullptr && "No handling for null materials!" );
-            std::shared_ptr<PTMaterial> materialPT = PTMaterial::SafeCast(geometry->material);
-            assert(materialPT != nullptr && "Unknown error - should never have happened" );
+        ZoneScopedN("FillSubInstanceInfos");
 
-            UpdateSubInstanceData(subInstanceData[subInstanceIndex], scene, *instance, *geometry, geometryIndex, *materialPT);
-        }
+        // The sub-instance slot is FirstGeometryInstanceIndex + geometryIndex, which the previous code already computed into
+        // a local and then never used, relying on a running counter instead. Using it directly removes the loop-carried
+        // dependency, so chunks write disjoint ranges of subInstanceData and can run concurrently.
+        // UpdateSubInstanceData only reads material/mesh/geometry state and Scene::GetGeometryData (a bounds-checked vector
+        // index), writing solely to its own subInstanceData entry - safe to run in parallel.
+        auto updateRange = [&]( size_t begin, size_t end )
+        {
+            for( size_t i = begin; i < end; i++ )
+            {
+                const SceneRenderCache::InstanceInfo & info = instanceInfos[i];
+                assert( info.Mesh == instances[i]->GetMesh().get() );
+
+                for( uint32_t geometryIndex = 0; geometryIndex < info.GeometryCount; geometryIndex++ )
+                {
+                    const uint32_t subInstanceIndex = info.FirstGeometryInstanceIndex + geometryIndex;
+                    const SceneRenderCache::SubInstanceInfo & sub = subInstanceInfos[subInstanceIndex];
+
+                    assert( sub.Geometry != nullptr && "No handling for null geometry!" );
+                    // An empty PTMaterial already asserted in SafeCast, so null here means the geometry has no material.
+                    if( sub.MaterialPT == nullptr )
+                        continue;
+
+                    UpdateSubInstanceData( subInstanceData[subInstanceIndex], scene, *info.Mesh, *sub.Geometry, geometryIndex, *sub.MaterialPT );
+                }
+            }
+        };
+
+        ParallelForChunked( sceneRenderCache.GetThreadPool(), instances.size(), updateRange );
     }
 }
 
@@ -1229,11 +1314,14 @@ MaterialShaderPermutation PTMaterial::ComputeShaderPermutation(const std::string
     std::vector<donut::engine::ShaderMacro> macros;
     macros.push_back({ "RTXPT_MATERIAL_PERMUTATIONS_ENABLED", "1" });
 
+    // this can now be dynamic, per-material
+    macros.push_back({ "ActiveBSDF", "StandardBSDF" });
+
     PTMaterialData data; FillData(data);
 
     // props.AlphaTest = material.EnableAlphaTesting;
     bool hasTransmission = this->EnableTransmission;
-    bool isEmissive = this->IsEmissive();
+    bool isEmissive = this->IsEmissiveSurface();
     bool isAnalyticProxy = this->EnableAsAnalyticLightProxy;
     bool effectiveIsThinSurface = (data.Flags & PTMaterialFlags_ThinSurface) != 0; // this includes non-transmission too which forces thin surface!
     // props.NoTransmission = !props.HasTransmission;
@@ -1260,16 +1348,9 @@ MaterialShaderPermutation PTMaterial::ComputeShaderPermutation(const std::string
     macros.push_back({ "RTXPT_MATERIAL_HAS_TRANSMISSION", EnableTransmission ? "1" : "0" });
 #endif
 
-#if 0
-    macros.push_back({ "RTXPT_MATERIAL_IS_EMISSIVE", isEmissive ? "1" : "0" });
-    macros.push_back({ "RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY", isAnalyticProxy ? "1" : "0" });
-#else // bunch them together and only use them disable emissive & analytic paths together
-    if (!isEmissive && !isAnalyticProxy)
-    {
-        macros.push_back({ "RTXPT_MATERIAL_IS_EMISSIVE", "0" });
-        macros.push_back({ "RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY", "0" });
-    }
-#endif 
+    // removing this due to complexity/permutations
+    // macros.push_back({ "RTXPT_MATERIAL_IS_EMISSIVE", isEmissive ? "1" : "0" });
+    // macros.push_back({ "RTXPT_MATERIAL_IS_ANALYTIC_LIGHT_PROXY", isAnalyticProxy ? "1" : "0" });
 
 #if 0 // NUCLEAR OPTION: make every material have its own shader - can be useful for tracking down weird perf issues
     macros.push_back({ "RTXPT_MATERIAL_UNIQUE_NAME", this->UniqueFullName() });

@@ -19,7 +19,6 @@
 #include "../Sample.h"
 
 extern SampleUIData g_sampleUIData;
-extern const char* g_windowTitle;
 
 #if RTXPT_D3D12_WITH_NVAPI
 #include <nvApi.h>
@@ -72,6 +71,20 @@ SampleBaseApp::InitReturnCodes SampleBaseApp::Init(int argc, const char* const* 
     {
         return InitReturnCodes::FailProcessingCommandLine;
     }
+    ConfigureDefaultDeviceParams(deviceParams);
+
+    if (m_CmdLine.gpuValidation)
+    {
+        // Apply after sample defaults so an explicit validation request takes precedence.
+        deviceParams.enableDebugRuntime = true;
+        deviceParams.enableNvrhiValidationLayer = true;
+        deviceParams.enableGPUValidation = true;
+#if DONUT_WITH_AFTERMATH
+        deviceParams.enableAftermath = false;
+#endif
+    }
+
+    deviceParams.enableComputeQueue = true; // allow async compute
 
     if (!InitDeviceAndWindow(deviceParams))
     {
@@ -112,13 +125,10 @@ SampleBaseApp::InitReturnCodes SampleBaseApp::Init(int argc, const char* const* 
     }
 #endif
 
-    // Optionally create the UP render pass. This exposes run time parameter controls.
-    if (!m_CmdLine.noWindow)
-    {
-        m_UIRender = std::make_unique<SampleUI>(m_DeviceManager.get(), *this, *m_MainSceneRender, g_sampleUIData, IsSERSupported(), m_CmdLine);
-        m_UIRender->Init(m_ShaderFactory);
-        m_DeviceManager->AddRenderPassToBack(m_UIRender.get());
-    }
+    // Create the UI render pass. This exposes run time parameter controls.
+    m_UIRender = m_MainSceneRender->CreateUI(m_DeviceManager.get(), *this, g_sampleUIData, IsSERSupported(), m_CmdLine);
+    m_UIRender->Init(m_ShaderFactory);
+    m_DeviceManager->AddRenderPassToBack(m_UIRender.get());
 
     LocalConfig::PostAppInit(g_sampleUIData);
 
@@ -213,6 +223,8 @@ void SampleBaseApp::SampleLogCallback(donut::log::Severity severity, const char*
             || msg.find("Unable to find NGX ") != std::string::npos
             || msg.find("NvAPI_D3D_Sleep") != std::string::npos)
             severity = donut::log::Severity::Warning;
+        if (msg.find("parseServerManifest") != std::string::npos)
+            severity = donut::log::Severity::Warning;
     }
 
     // Pass all other messages to donut's default callback
@@ -230,15 +242,19 @@ donut::app::DeviceCreationParameters SampleBaseApp::GetDefaultDeviceParams() con
     deviceParams.startBorderless = false;
     deviceParams.vsyncEnabled = true;
     deviceParams.enableRayTracingExtensions = true;
+    // SM6.6 dynamic resources (ResourceDescriptorHeap) - see Rtxpt/Shaders/Bindless.hlsli. This is only a
+    // request: NVRHI re-checks Resource Binding Tier 3 and Shader Model 6.6 and silently leaves the feature off
+    // if either is missing, so CheckDeviceFeatureSupport below verifies it actually took.
+    deviceParams.enableHeapDirectlyIndexed = true;
 #if DONUT_WITH_DX12
 #if defined(RTXPT_D3D_AGILITY_SDK_VERSION)
     deviceParams.featureLevel = D3D_FEATURE_LEVEL_12_2;
-    // TODO: Redefining this isn't needed. Take the ones from AgilitySDK
-    static const UUID D3D12ExperimentalShaderModels = { 0x76f5573e, 0xf13a, 0x40f5, {0xb2, 0x97, 0x81, 0xce, 0x9e, 0x18, 0x93, 0x3f} };
-    static const UUID D3D12StateObjectsExperiment = { 0x398a7fd6, 0xa15a, 0x42c1, {0x96, 0x05, 0x4b, 0xd9, 0x99, 0x9a, 0x61, 0xaf} };
-    static const UUID D3D12RaytracingExperiment = { 0xb56e238b, 0xe886, 0x46d8, {0x9b, 0xe1, 0x34, 0x10, 0x30, 0x31, 0x45, 0x09} };
-    UUID Features[] = { D3D12ExperimentalShaderModels }; //, D3D12StateObjectsExperiment }; //, D3D12RaytracingExperiment };
-    HRESULT ok = D3D12EnableExperimentalFeatures(_countof(Features), Features, nullptr, nullptr);
+    //// TODO: Redefining this isn't needed. Take the ones from AgilitySDK
+    //static const UUID D3D12ExperimentalShaderModels = { 0x76f5573e, 0xf13a, 0x40f5, {0xb2, 0x97, 0x81, 0xce, 0x9e, 0x18, 0x93, 0x3f} };
+    //static const UUID D3D12StateObjectsExperiment = { 0x398a7fd6, 0xa15a, 0x42c1, {0x96, 0x05, 0x4b, 0xd9, 0x99, 0x9a, 0x61, 0xaf} };
+    //static const UUID D3D12RaytracingExperiment = { 0xb56e238b, 0xe886, 0x46d8, {0x9b, 0xe1, 0x34, 0x10, 0x30, 0x31, 0x45, 0x09} };
+    //UUID Features[] = { D3D12ExperimentalShaderModels }; //, D3D12StateObjectsExperiment }; //, D3D12RaytracingExperiment };
+    //HRESULT ok = D3D12EnableExperimentalFeatures(_countof(Features), Features, nullptr, nullptr);
 #else
     deviceParams.featureLevel = D3D_FEATURE_LEVEL_12_1;
 #endif
@@ -262,6 +278,34 @@ donut::app::DeviceCreationParameters SampleBaseApp::GetDefaultDeviceParams() con
 #if DONUT_WITH_VULKAN
     deviceParams.requiredVulkanDeviceExtensions.push_back("VK_KHR_buffer_device_address");
     deviceParams.requiredVulkanDeviceExtensions.push_back("VK_KHR_format_feature_flags2");
+
+    // NRD's REBLUR and IntroSample's SSR use quad ops in compute shaders, which need compute derivative groups.
+    // Donut fills this struct in its feature query; the callback below enables what the device reported.
+    static VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR s_computeDerivativesSupported = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR };
+    deviceParams.optionalVulkanDeviceExtensions.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    deviceParams.physicalDeviceFeatures2Extensions = &s_computeDerivativesSupported;
+
+    deviceParams.deviceCreateInfoCallback = [](VkDeviceCreateInfo& info)
+    {
+        // Features Donut does not enable: 16-bit floats (-enable-16bit-types) and min/max samplers (IntroSample's depth
+        // hierarchy). Donut has Vulkan12Features chained.
+        for (VkBaseOutStructure* s = (VkBaseOutStructure*)info.pNext; s != nullptr; s = s->pNext)
+            if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+            {
+                ((VkPhysicalDeviceVulkan12Features*)s)->shaderFloat16 = VK_TRUE;
+                ((VkPhysicalDeviceVulkan12Features*)s)->samplerFilterMinmax = VK_TRUE;
+            }
+
+        // A copy, so the queried struct stays the tail of Donut's feature query chain.
+        static VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR s_computeDerivativesEnabled;
+        for (uint32_t i = 0; i < info.enabledExtensionCount; i++)
+            if (std::string(info.ppEnabledExtensionNames[i]) == VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)
+            {
+                s_computeDerivativesEnabled = s_computeDerivativesSupported;
+                s_computeDerivativesEnabled.pNext = (void*)info.pNext;
+                info.pNext = &s_computeDerivativesEnabled;
+            }
+    };
 
     // Attachment 0 not written by fragment shader; undefined values will be written to attachment (OMM baker)
     deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x0000000023e43bb7);
@@ -317,6 +361,12 @@ bool SampleBaseApp::ProcessCommandLine(int argc, char const* const* argv,
         HelpersSetNonInteractive();
     }
 
+    if (m_CmdLine.noWindow)
+    {   // No headless path: without a window no device gets created, and Donut's main loop needs one too
+        donut::log::error("--noWindow is not supported; for scripted captures run with a window and --nonInteractive instead.");
+        return false;
+    }
+
     if (m_CmdLine.debug)
     {
         deviceParams.enableDebugRuntime = true;
@@ -326,6 +376,7 @@ bool SampleBaseApp::ProcessCommandLine(int argc, char const* const* argv,
     deviceParams.backBufferWidth = m_CmdLine.width;
     deviceParams.backBufferHeight = m_CmdLine.height;
     deviceParams.startFullscreen = m_CmdLine.fullscreen;
+    deviceParams.startBorderless = m_CmdLine.borderless;
     deviceParams.adapterIndex = m_CmdLine.adapterIndex;
 
     return true;
@@ -333,23 +384,12 @@ bool SampleBaseApp::ProcessCommandLine(int argc, char const* const* argv,
 
 bool SampleBaseApp::InitDeviceAndWindow(const donut::app::DeviceCreationParameters& deviceParams)
 {
-    if (m_CmdLine.noWindow)
+    if (!m_DeviceManager->CreateWindowDeviceAndSwapChain(deviceParams, "Please wait, loading..."))
     {
-        if (!m_DeviceManager->CreateInstance(deviceParams))
-        {
-            donut::log::fatal("CreateDeviceAndSwapChain failed: Cannot initialize a graphics device with the requested parameters");
-            return false;
-        }
+        donut::log::fatal("Cannot initialize a graphics device with the requested parameters");
+        return false;
     }
-    else
-    {
-        if (!m_DeviceManager->CreateWindowDeviceAndSwapChain(deviceParams, g_windowTitle))
-        {
-            donut::log::fatal("Cannot initialize a graphics device with the requested parameters");
-            return false;
-        }
-        HelpersRegisterActiveWindow();
-    }
+    HelpersRegisterActiveWindow();
 
 #if 0 && RTXPT_D3D12_WITH_NVAPI
     static bool NVAPI_VALIDATION = false;
@@ -379,6 +419,15 @@ bool SampleBaseApp::CheckDeviceFeatureSupport(const donut::app::DeviceCreationPa
     if (!device->queryFeatureSupport(nvrhi::Feature::RayQuery))
     {
         donut::log::fatal("The graphics device does not support Ray Queries");
+        return false;
+    }
+
+    // enableHeapDirectlyIndexed above is a request, not a guarantee - without the feature the root signature
+    // never gets D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED while shaders still index
+    // ResourceDescriptorHeap, which is undefined rather than diagnosed. Fail here instead.
+    if (!device->queryFeatureSupport(nvrhi::Feature::HeapDirectlyIndexed))
+    {
+        donut::log::fatal("The graphics device does not support directly indexed descriptor heaps - Resource Binding Tier 3 and Shader Model 6.6 are required");
         return false;
     }
 

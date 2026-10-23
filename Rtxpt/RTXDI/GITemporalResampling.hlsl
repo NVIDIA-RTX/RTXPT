@@ -55,8 +55,6 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
             motionVector = convertMotionVectorToPixelSpace(g_Const.view, g_Const.previousView, pixelPosition, motionVector);
 
             RTXDI_GITemporalResamplingParameters tparams;
-            tparams.screenSpaceMotion = motionVector;
-            tparams.sourceBufferIndex = g_RtxdiBridgeConst.restirGI.bufferIndices.temporalResamplingInputBufferIndex;
             tparams.maxHistoryLength = g_RtxdiBridgeConst.restirGI.temporalResamplingParams.maxHistoryLength;
             tparams.depthThreshold = g_RtxdiBridgeConst.restirGI.temporalResamplingParams.depthThreshold;
             tparams.normalThreshold = g_RtxdiBridgeConst.restirGI.temporalResamplingParams.normalThreshold;
@@ -71,6 +69,8 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
             resultReservoir = RTXDI_GITemporalResampling(
                 pixelPosition, 
                 surface, 
+                motionVector,
+                g_RtxdiBridgeConst.restirGI.bufferIndices.temporalResamplingInputBufferIndex,
                 initialReservoir,
                 rng, 
                 g_RtxdiBridgeConst.runtimeParams,
@@ -99,11 +99,11 @@ void main(uint2 GlobalIndex : SV_DispatchThreadID, uint2 LocalIndex : SV_GroupTh
     }
 
 #ifdef RTXDI_ENABLE_BOILING_FILTER
-    if  (g_RtxdiBridgeConst.restirGI.temporalResamplingParams.enableBoilingFilter > 0)
+    if  (g_RtxdiBridgeConst.restirGI.boilingFilterParams.enableBoilingFilter > 0)
     {
         RTXDI_GIBoilingFilter(
-            LocalIndex, 
-            g_RtxdiBridgeConst.restirGI.temporalResamplingParams.boilingFilterStrength, 
+            LocalIndex,
+            g_RtxdiBridgeConst.restirGI.boilingFilterParams.boilingFilterStrength,
             resultReservoir);
     }
 #endif

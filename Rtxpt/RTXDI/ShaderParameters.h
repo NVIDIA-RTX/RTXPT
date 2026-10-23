@@ -24,10 +24,9 @@
 #include "../Shaders/PathTracer/PathTracerShared.h"
 #include "../Shaders/PathTracer/Lighting/PolymorphicLight.h"
 #include "../Shaders/Bindings/BindingDataTypes.hlsli"
+#include "../Shaders/Bindings/PrepareLightsTask.h"
 
 #include "../Shaders/PathTracer/Lighting/EnvMap.hlsli"
-
-#define TASK_PRIMITIVE_LIGHT_BIT 0x80000000u
 
 #define RTXDI_PRESAMPLING_GROUP_SIZE 256
 #define RTXDI_GRID_BUILD_GROUP_SIZE 256
@@ -83,14 +82,6 @@ struct PrepareLightsConstants
     uint _padding;
     EnvMapSceneParams envMapSceneParams;
     EnvMapImportanceSamplingParams envMapImportanceSamplingParams;
-};
-
-struct PrepareLightsTask
-{
-    uint instanceAndGeometryIndex; // low 12 bits are geometryIndex, mid 19 bits are instanceIndex, high bit is TASK_PRIMITIVE_LIGHT_BIT
-    uint triangleCount;
-    uint lightBufferOffset;
-    int previousLightBufferOffset; // -1 means no previous data
 };
 
 struct RenderEnvironmentMapConstants
@@ -234,9 +225,9 @@ struct RtxdiBridgeConstants
 	RTXDI_RISBufferSegmentParameters environmentLightRISBufferSegmentParams;
 
 	// Algorithm specific parameters
-	ReSTIRDI_Parameters restirDI;
+	RTXDI_Parameters restirDI;
 	ReGIR_Parameters regir;
-	ReSTIRGI_Parameters restirGI;
+	RTXDI_GIParameters restirGI;
 
     ReGirIndirectConstants regirIndirect;
 	

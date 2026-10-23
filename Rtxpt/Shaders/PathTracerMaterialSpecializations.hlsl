@@ -18,13 +18,15 @@
 #endif
 
 #include "PathTracerBridgeDonut.hlsli"
+#include "PathTracerSurfaceBridgeDonut.hlsli"
 #include "PathTracer/PathTracer.hlsli"
+#include "PathTracer/PathTracerHandleHit.hlsli"
 
 [shader("closesthit")] 
 void CLOSESTHIT_ENTRY(inout PathPayload payload : SV_RayPayload, in BuiltInTriangleIntersectionAttributes attrib)
 {
     PathState path = PathPayload::unpack( payload );
-    PathTracer::HandleHit(path, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), attrib.barycentrics, GetWorkingContext());
+    PathTracer::HandleHit(path, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), attrib.barycentrics, Bridge::GetWorkingContext());
     payload = PathPayload::pack( path );
 }
 
@@ -32,7 +34,7 @@ void CLOSESTHIT_ENTRY(inout PathPayload payload : SV_RayPayload, in BuiltInTrian
 void ANYHIT_ENTRY(inout PathPayload payload : SV_RayPayload, in BuiltInTriangleIntersectionAttributes attrib/* : SV_IntersectionAttributes*/)
 {
     PathState path = PathPayload::unpack( payload );
-    if (!Bridge::AlphaTest(InstanceID(), InstanceIndex(), GeometryIndex(), PrimitiveIndex(), attrib.barycentrics/*, GetWorkingContext( ).debug*/ ))
+    if (!Bridge::AlphaTest(InstanceID(), InstanceIndex(), GeometryIndex(), PrimitiveIndex(), attrib.barycentrics/*, Bridge::GetWorkingContext( ).debug*/ ))
         IgnoreHit();
     
     // AnyHit doesn't currently modify the payload - but it could!

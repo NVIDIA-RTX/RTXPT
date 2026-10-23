@@ -9,7 +9,7 @@
 */
 
 #include "EnvMapBaker.h"
-#include "CubemapProcessing.hlsl"
+#include "../../Shaders/Libraries/LightsBaker/CubemapProcessing.hlsl"
 
 #include "EnvMapImportanceSamplingBaker.h"
 #include "../../SampleCommon/ComputePipelineBaker.h"
@@ -44,6 +44,7 @@ static const int    c_BlockCompressionBlockSize = 4;
 EnvMapBaker::EnvMapBaker( nvrhi::IDevice* device, std::shared_ptr<donut::engine::TextureCache> textureCache, bool enableRasterPrecompute )
     : m_device(device)
     , m_textureCache(textureCache)
+    , m_enableRasterPrecompute(enableRasterPrecompute)
 {
 }
 
@@ -147,6 +148,7 @@ void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug, s
     samplerDesc.setBorderColor(nvrhi::Color(0.f));
     samplerDesc.setAllFilters(true);
     samplerDesc.setMipFilter(true);
+
     samplerDesc.setAllAddressModes(nvrhi::SamplerAddressMode::Wrap);
     m_linearSampler = m_device->createSampler(samplerDesc);
 
@@ -225,17 +227,23 @@ void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug, s
         nvrhi::BindingLayoutDesc layoutDesc;
         layoutDesc.visibility = nvrhi::ShaderType::Compute;
         layoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::PushConstants(0, sizeof(GGXPrefilterConstants)),
+            // Volatile CB rather than push constants: GGXPrefilterConstants embeds EnvMapSceneParams
+            // (two float3x4 + color), which pushes it past the 128-byte root/push-constant limit.
+            nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
             nvrhi::BindingLayoutItem::Texture_SRV(0),
             nvrhi::BindingLayoutItem::Texture_UAV(0),
             nvrhi::BindingLayoutItem::Sampler(0)
         };
         m_ggxPrefilterBindingLayout = m_device->createBindingLayout(layoutDesc);
+
+        // One version per prefiltered mip, with headroom for multiple bakes in flight.
+        m_ggxPrefilterConstantBuffer = m_device->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(
+            sizeof(GGXPrefilterConstants), "GGXPrefilterConstants", engine::c_MaxRenderPassConstantBufferVersions * 16));
                 
         if (m_computePipelineBaker)
         {
             m_ggxPrefilterVariant = m_computePipelineBaker->CreateVariant(
-                "../Lighting/Distant/CubemapProcessing.hlsl",  // source path relative to ShadersPath (Rtxpt/Shaders)
+                "Libraries/LightsBaker/CubemapProcessing.hlsl",  // source path relative to ShadersPath (Rtxpt/Shaders)
                 "GGXPrefilterCS",                               // entry point
                 {},                                             // macros (empty)
                 { m_ggxPrefilterBindingLayout },                // binding layouts
@@ -249,17 +257,21 @@ void EnvMapBaker::CreateRenderPasses(std::shared_ptr<ShaderDebug> shaderDebug, s
         nvrhi::BindingLayoutDesc layoutDesc;
         layoutDesc.visibility = nvrhi::ShaderType::Compute;
         layoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::PushConstants(0, sizeof(IrradianceConvolveConstants)),
+            // Volatile CB rather than push constants: IrradianceConvolveConstants embeds EnvMapSceneParams.
+            nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
             nvrhi::BindingLayoutItem::Texture_SRV(0),
             nvrhi::BindingLayoutItem::Texture_UAV(0),
             nvrhi::BindingLayoutItem::Sampler(0)
         };
         m_irradianceConvolveBindingLayout = m_device->createBindingLayout(layoutDesc);
+
+        m_irradianceConvolveConstantBuffer = m_device->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(
+            sizeof(IrradianceConvolveConstants), "IrradianceConvolveConstants", engine::c_MaxRenderPassConstantBufferVersions * 5));
                 
         if (m_computePipelineBaker)
         {
             m_irradianceConvolveVariant = m_computePipelineBaker->CreateVariant(
-                "../Lighting/Distant/CubemapProcessing.hlsl",  // source path relative to ShadersPath (Rtxpt/Shaders)
+                "Libraries/LightsBaker/CubemapProcessing.hlsl",  // source path relative to ShadersPath (Rtxpt/Shaders)
                 "ConvolveIrradianceCS",                         // entry point
                 {},                                             // macros (empty)
                 { m_irradianceConvolveBindingLayout },          // binding layouts
@@ -361,7 +373,19 @@ int EnvMapBaker::GetTargetCubeResolution() const
     return m_targetResolution; 
 }
 
-void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::string envMapBackgroundPath)
+bool EnvMapBaker::NeedsGraphicsQueue(const std::string & envMapBackgroundPath) const
+{
+    // The async prefix records PreUpdate/Update on a compute queue list, which these can't use: a new source map, a new
+    // procedural sky and m_dbgSaveBaked execute the passed list on the graphics queue and waitForIdle; a resolution or
+    // compression change reallocates the cube and rebuilds bindings mid-frame (no flush, kept serial to be safe).
+    const bool outputCompressed = m_compressionQuality > 0 && m_BC6UCompressionEnabled;
+    return envMapBackgroundPath != m_loadedSourceBackgroundPath
+        || (IsProceduralSky(envMapBackgroundPath.c_str()) && m_proceduralSky == nullptr)
+        || m_targetResolution == 0 || m_targetResolution != m_cubeDim
+        || outputCompressed != m_outputIsCompressed || m_dbgSaveBaked != "";
+}
+
+bool EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, std::string envMapBackgroundPath)
 {
     if( m_device->getGraphicsAPI() == nvrhi::GraphicsAPI::VULKAN && m_BC6UCompressionEnabled )
     {
@@ -388,22 +412,39 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::shared_ptr<do
     }
     m_importanceSamplingBaker->PreUpdate(m_cubemap, newBuffers);
 
+    // Choose the output texture here, not in Update: callers rebind on a GetEnvMapCube() swap across PreUpdate, and the
+    // forced rebake in this frame's Update writes the chosen texture before anything samples it.
+    const bool outputCompressed = m_compressionQuality > 0 && m_BC6UCompressionEnabled;
+    if (outputCompressed != m_outputIsCompressed)
+    {
+        m_outputIsCompressed = outputCompressed;
+        m_renderPassesDirty = true;
+    }
+
     // Load static (background) environment map or procedural sky if enabled
+    bool sourceUnloaded = false;
     if (m_sourceBackgroundPath != m_loadedSourceBackgroundPath)
     {
+        // Only a texture actually released counts: after a failed load there is none, yet this block re-runs every frame.
+        sourceUnloaded = m_loadedSourceBackgroundTextureEquirect != nullptr || m_loadedSourceBackgroundTextureCubemap != nullptr;
         UnloadSourceBackgrounds();
         m_loadedSourceBackgroundPath = m_sourceBackgroundPath;
 
         if (!proceduralSkyEnabled)
         {
             std::filesystem::path fullPath = GetLocalPath(c_AssetsFolder) / m_loadedSourceBackgroundPath;
-            m_textureCache->LoadTextureFromFile(fullPath, false, commonPasses.get(), commandList);
+            // One options value shared by the load and the lookup below. The texture cache key is {path, options},
+            // so any disagreement between the two makes GetLoadedTexture miss and hand back nullptr - which would
+            // make every load look failed (black env plus the error below).
+            // Default-constructed is SRGBMode::FromFile, matching what the old 'false' argument did.
+            const TextureLoadOptions loadOptions;
+            m_textureCache->LoadTextureFromFile(fullPath, loadOptions, commonPasses.get(), commandList);
             commandList->close();
             m_device->executeCommandList(commandList);
             m_device->waitForIdle();
             commandList->open();
 
-            std::shared_ptr<TextureData> loadedTexture = m_textureCache->GetLoadedTexture(fullPath);
+            std::shared_ptr<TextureData> loadedTexture = m_textureCache->GetLoadedTexture(fullPath, loadOptions);
             if (loadedTexture != nullptr && loadedTexture->format != nvrhi::Format::UNKNOWN)
             {
                 if (loadedTexture->arraySize == 6)
@@ -412,7 +453,13 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::shared_ptr<do
                     m_loadedSourceBackgroundTextureEquirect = loadedTexture;
             }
             else
-                m_loadedSourceBackgroundPath = "";
+            {
+                // Keep the path marked as loaded so the failure isn't retried every frame (waitForIdle + rebake + accumulation
+                // reset); the bake binds black instead. log::error is a modal box in interactive runs, a log line otherwise.
+                log::error("Environment map '%s' could not be loaded - using black.", fullPath.string().c_str());
+                if (loadedTexture != nullptr)
+                    m_textureCache->UnloadTexture(loadedTexture);   // so re-selecting it after a fix really reloads
+            }
         }
 
         m_renderPassesDirty = true;
@@ -420,6 +467,8 @@ void EnvMapBaker::PreUpdate(nvrhi::ICommandList* commandList, std::shared_ptr<do
 
     if (proceduralSkyEnabled && m_proceduralSky == nullptr)
         m_proceduralSky = std::make_shared<SampleProceduralSky>(m_device, m_textureCache, commonPasses, commandList);
+
+    return newBuffers || sourceUnloaded;
 }
 
 bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::BindingCache & bindingCache, std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses, const BakeSettings & _settings, double sceneTime, EMB_DirectionalLight const * directionalLights, uint directionaLightCount, bool forceInstantUpdate)
@@ -458,7 +507,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::Bindin
     if (!contentsChanged)
         return contentsChanged;
 
-    RAII_SCOPE(commandList->beginMarker("EnvMapBaker"); , commandList->endMarker(); );
+    RTXPT_GPU_SCOPE(commandList, "EnvMapBaker");
 
     // Constants
     {
@@ -518,7 +567,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::Bindin
         // Low res pre-pass (only needed for proc sky)
         if (proceduralSkyEnabled)
         {
-            RAII_SCOPE(commandList->beginMarker("ProcSkyLowResPrePass"); , commandList->endMarker(); );
+            RTXPT_GPU_SCOPE(commandList, "ProcSkyLowResPrePass");
 
             nvrhi::ComputeState state;
             state.bindings = { bindingSetLowResPrePass };
@@ -535,7 +584,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::Bindin
 
         // Base bake
         {
-            RAII_SCOPE(commandList->beginMarker("ProcSkyBaseBake");, commandList->endMarker(); );
+            RTXPT_GPU_SCOPE(commandList, "ProcSkyBaseBake");
             nvrhi::ComputeState state;
             state.bindings = { bindingSetBake };
             state.pipeline = m_baseLayerPSO;
@@ -553,7 +602,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::Bindin
     }
 
     {
-        RAII_SCOPE( commandList->beginMarker("EnvMapBakerMIPs");, commandList->endMarker(); );
+        RTXPT_GPU_SCOPE(commandList, "EnvMapBakerMIPs");
 
         // Downsample MIPs - TODO: do it as a 2 or 4 layers at a time for better perf 
         uint mipLevels = m_cubemap->getDesc().mipLevels;
@@ -590,9 +639,9 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::Bindin
         }
     }
 
-    if (m_compressionQuality>0 && m_BC6UCompressionEnabled)
+    if (m_outputIsCompressed)
     {
-        RAII_SCOPE(commandList->beginMarker("BC6UCompression"); , commandList->endMarker(); );
+        RTXPT_GPU_SCOPE(commandList, "BC6UCompression");
 
         uint mipLevels = m_cubemap->getDesc().mipLevels; assert( mipLevels == m_cubemapBC6HScratch->getDesc().mipLevels );
         for (uint i = 0; i < mipLevels; i++)
@@ -626,11 +675,7 @@ bool EnvMapBaker::Update(nvrhi::ICommandList* commandList, donut::engine::Bindin
                 nvrhi::TextureSlice slice; slice.setArraySlice(ia); slice.setMipLevel(im);
                 commandList->copyTexture(m_cubemapBC6H, slice, m_cubemapBC6HScratch, slice);
             }
-
-        m_outputIsCompressed = true;
     }
-    else
-        m_outputIsCompressed = false;
 
     m_importanceSamplingBaker->Update(commandList, m_cubemap);
 
@@ -741,7 +786,7 @@ bool EnvMapBaker::GenerateBRDFLUT(nvrhi::ICommandList* commandList, donut::engin
     if (!m_enableRasterPrecompute || m_brdfLUTGenerated)
         return false;
     
-    RAII_SCOPE(commandList->beginMarker("GenerateBRDFLUT");, commandList->endMarker(););
+    RTXPT_GPU_SCOPE(commandList, "GenerateBRDFLUT");
     
     BRDFLUTConstants consts;
     consts.LUTSize = c_BRDFLUTSize;
@@ -771,29 +816,34 @@ bool EnvMapBaker::GenerateBRDFLUT(nvrhi::ICommandList* commandList, donut::engin
 }
 
 void EnvMapBaker::GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache, 
-    nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap)
+    nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap, const EnvMapSceneParams& envParams)
 {
     if (!m_enableRasterPrecompute)
         return;
 
-    RAII_SCOPE(commandList->beginMarker("GGXPrefilter");, commandList->endMarker(););
+    RTXPT_GPU_SCOPE(commandList, "GGXPrefilter");
     
     // Get pipeline from hot-reloadable variant
     auto pipeline = m_ggxPrefilterVariant ? m_ggxPrefilterVariant->GetPipeline() : nullptr;
     if (!pipeline)
         return; // Pipeline not yet compiled or compilation failed
     
+    // The destination cube can be smaller than the source (e.g. a compact prefiltered
+    // cube derived from a high-resolution environment map); the shader samples the source
+    // via a computed LOD, so only SrcCubemapSize needs the source dimension.
     uint srcSize = srcCubemap->getDesc().width;
+    uint dstSize = dstCubemap->getDesc().width;
     uint mipLevels = dstCubemap->getDesc().mipLevels;
     
     GGXPrefilterConstants consts;
     consts.SrcCubemapSize = srcSize;
     consts.MaxMipLevels = mipLevels;
     consts.SampleCount = 64;
+    consts.EnvParams = envParams;
 
     for (uint mip = 0; mip < mipLevels; mip++)
     {
-        uint dstMipSize = srcSize >> mip;
+        uint dstMipSize = dstSize >> mip;
         float roughness = static_cast<float>(mip) / static_cast<float>(mipLevels - 1);
         roughness = max(0.001f, roughness);
         
@@ -805,7 +855,7 @@ void EnvMapBaker::GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::e
         
         nvrhi::BindingSetDesc bindingSetDesc;
         bindingSetDesc.bindings = {
-            nvrhi::BindingSetItem::PushConstants(0, sizeof(GGXPrefilterConstants)),
+            nvrhi::BindingSetItem::ConstantBuffer(0, m_ggxPrefilterConstantBuffer),
             nvrhi::BindingSetItem::Texture_SRV(0, srcCubemap),
             nvrhi::BindingSetItem::Texture_UAV(0, dstCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(mip, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
             nvrhi::BindingSetItem::Sampler(0, m_linearSampler)
@@ -815,8 +865,8 @@ void EnvMapBaker::GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::e
         nvrhi::ComputeState state;
         state.bindings = { bindingSet };
         state.pipeline = pipeline;
+        commandList->writeBuffer(m_ggxPrefilterConstantBuffer, &consts, sizeof(consts));
         commandList->setComputeState(state);
-        commandList->setPushConstants(&consts, sizeof(consts));
         
         const uint threads = CUBEMAP_PROCESS_THREADS;
         const dm::uint2 dispatchSize = dm::uint2(div_ceil(dstMipSize,threads),div_ceil(dstMipSize, threads));
@@ -828,12 +878,12 @@ void EnvMapBaker::GGXPrefilterCubemap(nvrhi::ICommandList* commandList, donut::e
 }
 
 void EnvMapBaker::ConvolveDiffuseIrradiance(nvrhi::ICommandList* commandList, donut::engine::BindingCache& bindingCache,
-    nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap)
+    nvrhi::TextureHandle srcCubemap, nvrhi::TextureHandle dstCubemap, const EnvMapSceneParams& envParams)
 {
     if (!m_enableRasterPrecompute)
         return;
 
-    RAII_SCOPE(commandList->beginMarker("ConvolveIrradiance");, commandList->endMarker(););
+    RTXPT_GPU_SCOPE(commandList, "ConvolveIrradiance");
     
     // Get pipeline from hot-reloadable variant
     auto pipeline = m_irradianceConvolveVariant ? m_irradianceConvolveVariant->GetPipeline() : nullptr;
@@ -844,11 +894,12 @@ void EnvMapBaker::ConvolveDiffuseIrradiance(nvrhi::ICommandList* commandList, do
     consts.SrcCubemapSize = srcCubemap->getDesc().width;
     consts.DstCubemapSize = c_IrradianceCubeSize;
     consts.SampleCount = 1024;
-    consts.Padding = 0;
+    consts.Padding0 = 0;
+    consts.EnvParams = envParams;
     
     nvrhi::BindingSetDesc bindingSetDesc;
     bindingSetDesc.bindings = {
-        nvrhi::BindingSetItem::PushConstants(0, sizeof(IrradianceConvolveConstants)),
+        nvrhi::BindingSetItem::ConstantBuffer(0, m_irradianceConvolveConstantBuffer),
         nvrhi::BindingSetItem::Texture_SRV(0, srcCubemap),
         nvrhi::BindingSetItem::Texture_UAV(0, dstCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(0, 1, 0, 6)).setDimension(nvrhi::TextureDimension::Texture2DArray),
         nvrhi::BindingSetItem::Sampler(0, m_linearSampler)
@@ -858,8 +909,8 @@ void EnvMapBaker::ConvolveDiffuseIrradiance(nvrhi::ICommandList* commandList, do
     nvrhi::ComputeState state;
     state.bindings = { bindingSet };
     state.pipeline = pipeline;
+    commandList->writeBuffer(m_irradianceConvolveConstantBuffer, &consts, sizeof(IrradianceConvolveConstants));
     commandList->setComputeState(state);
-    commandList->setPushConstants(&consts, sizeof(IrradianceConvolveConstants));
     
     // Dispatch once per face - 1024 threads per group, one group per face (32x32 resolution)
     commandList->dispatch(1, 1, 6);
@@ -869,7 +920,7 @@ void EnvMapBaker::GenerateCubemapMips(nvrhi::ICommandList* commandList, donut::e
     nvrhi::TextureHandle cubemap)
 {
     // Reuse the existing MIPReduceCS for solid-angle weighted mip generation
-    RAII_SCOPE(commandList->beginMarker("GenerateCubemapMips");, commandList->endMarker(););
+    RTXPT_GPU_SCOPE(commandList, "GenerateCubemapMips");
     
     // Write dummy constants (MIPReduceCS doesn't actually read them, but binding layout requires it)
     EnvMapBakerConstants dummyConsts = {};
@@ -910,10 +961,11 @@ void EnvMapBaker::ProcessCubemap(
     nvrhi::ICommandList* commandList,
     donut::engine::BindingCache& bindingCache,
     nvrhi::TextureHandle sourceCubemap,
+    const EnvMapSceneParams& envParams,
     const CubemapProcessingOptions& options,
     const CubemapProcessingResults& results)
 {
-    RAII_SCOPE(commandList->beginMarker("ProcessCubemap");, commandList->endMarker(););
+    RTXPT_GPU_SCOPE(commandList, "ProcessCubemap");
     
     // Generate mips for source if needed
     if (options.generateMips)
@@ -925,13 +977,13 @@ void EnvMapBaker::ProcessCubemap(
     if (options.ggxPrefilter)
     {
         assert(results.filteredCubemap);
-        GGXPrefilterCubemap(commandList, bindingCache, sourceCubemap, results.filteredCubemap);
+        GGXPrefilterCubemap(commandList, bindingCache, sourceCubemap, results.filteredCubemap, envParams);
     }
     
     // SH-based diffuse irradiance
     if (options.projectToSH)
     {
         assert(results.diffuseIrradianceCube);
-        ConvolveDiffuseIrradiance(commandList, bindingCache, sourceCubemap, results.diffuseIrradianceCube);
+        ConvolveDiffuseIrradiance(commandList, bindingCache, sourceCubemap, results.diffuseIrradianceCube, envParams);
     }
 }

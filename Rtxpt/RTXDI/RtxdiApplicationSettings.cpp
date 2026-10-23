@@ -12,54 +12,60 @@
 
 const rtxdi::ReSTIRDI_ResamplingMode GetReSTIRDI_ResamplingMode() { return rtxdi::ReSTIRDI_ResamplingMode::TemporalAndSpatial; }
 
-const ReSTIRDI_InitialSamplingParameters getReSTIRDIInitialSamplingParams()
+const RTXDI_DIInitialSamplingParameters getReSTIRDIInitialSamplingParams()
 {
-	ReSTIRDI_InitialSamplingParameters params = {};
+	RTXDI_DIInitialSamplingParameters params = {};
 	params.brdfCutoff = 0.0001f;
 	params.enableInitialVisibility = true;
 	params.environmentMapImportanceSampling = 1;
 	params.localLightSamplingMode = ReSTIRDI_LocalLightSamplingMode::ReGIR_RIS;
-	params.numPrimaryBrdfSamples = 1;
-	params.numPrimaryEnvironmentSamples = 1;
-	params.numPrimaryInfiniteLightSamples = 1;
-	params.numPrimaryLocalLightSamples = 8;
+	params.numBrdfSamples = 1;
+	params.numEnvironmentSamples = 1;
+	params.numInfiniteLightSamples = 1;
+	params.numLocalLightSamples = 8;
 
 	return params;
 }
 
-const ReSTIRDI_TemporalResamplingParameters getReSTIRDITemporalResamplingParams()
+const RTXDI_DITemporalResamplingParameters getReSTIRDITemporalResamplingParams()
 {
-	ReSTIRDI_TemporalResamplingParameters params = {};
-	params.boilingFilterStrength = 0.2f;
-	params.discardInvisibleSamples = false;
-	params.enableBoilingFilter = true;
+	RTXDI_DITemporalResamplingParameters params = {};
 	params.enablePermutationSampling = true;
 	params.maxHistoryLength = 20;
 	params.permutationSamplingThreshold = 0.9f;
-	params.temporalBiasCorrection = ReSTIRDI_TemporalBiasCorrectionMode::Raytraced;
-	params.temporalDepthThreshold = 0.1f;
-	params.temporalNormalThreshold = 0.5f;
+	params.biasCorrectionMode = ReSTIRDI_TemporalBiasCorrectionMode::Raytraced;
+	params.depthThreshold = 0.1f;
+	params.normalThreshold = 0.5f;
 
 	return params;
 }
 
-const ReSTIRDI_SpatialResamplingParameters getReSTIRDISpatialResamplingParams()
+const RTXDI_BoilingFilterParameters getReSTIRDIBoilingFilterParams()
 {
-	ReSTIRDI_SpatialResamplingParameters params = {};
+	RTXDI_BoilingFilterParameters params = {};
+	params.enableBoilingFilter = true;
+	params.boilingFilterStrength = 0.2f;
+
+	return params;
+}
+
+const RTXDI_DISpatialResamplingParameters getReSTIRDISpatialResamplingParams()
+{
+	RTXDI_DISpatialResamplingParameters params = {};
 	params.numDisocclusionBoostSamples = 8;
-	params.numSpatialSamples = 1;
-	params.spatialBiasCorrection = ReSTIRDI_SpatialBiasCorrectionMode::Raytraced;
-	params.spatialDepthThreshold = 0.1f;
-	params.spatialNormalThreshold = 0.5f;
-	params.spatialSamplingRadius = 32.0f;
+	params.numSamples = 1;
+	params.biasCorrectionMode = ReSTIRDI_SpatialBiasCorrectionMode::Raytraced;
+	params.depthThreshold = 0.1f;
+	params.normalThreshold = 0.5f;
+	params.samplingRadius = 32.0f;
 	params.discountNaiveSamples = true;
 
 	return params;
 }
 
-const ReSTIRDI_ShadingParameters getReSTIRDIShadingParams()
+const RTXDI_ShadingParameters getReSTIRDIShadingParams()
 {
-	ReSTIRDI_ShadingParameters params = {};
+	RTXDI_ShadingParameters params = {};
 	params.enableDenoiserInputPacking = false;
 	params.enableFinalVisibility = true;
 	params.finalVisibilityMaxAge = 4;
@@ -71,37 +77,44 @@ const ReSTIRDI_ShadingParameters getReSTIRDIShadingParams()
 
 const rtxdi::ReSTIRGI_ResamplingMode GetReSTIRGI_ResamplingMode() { return rtxdi::ReSTIRGI_ResamplingMode::TemporalAndSpatial; }
 
-const ReSTIRGI_TemporalResamplingParameters getReSTIRGITemporalResamplingParams()
+const RTXDI_GITemporalResamplingParameters getReSTIRGITemporalResamplingParams()
 {
-	ReSTIRGI_TemporalResamplingParameters params = {};
-	params.boilingFilterStrength = 0.35f;
+	RTXDI_GITemporalResamplingParameters params = {};
 	params.depthThreshold = 0.1f;
-	params.enableBoilingFilter = true;
 	params.enableFallbackSampling = true;
 	params.enablePermutationSampling = true;
 	params.maxHistoryLength = 10;
 	params.maxReservoirAge = 50;
 	params.normalThreshold = 0.6f;
-	params.temporalBiasCorrectionMode = ResTIRGI_TemporalBiasCorrectionMode::Basic;
+	params.biasCorrectionMode = RTXDI_GIBiasCorrectionMode::Basic;
 
 	return params;
 }
 
-const ReSTIRGI_SpatialResamplingParameters getReSTIRGISpatialResamplingParams()
+const RTXDI_BoilingFilterParameters getReSTIRGIBoilingFilterParams()
 {
-	ReSTIRGI_SpatialResamplingParameters params = {};
-	params.numSpatialSamples = 2;
-	params.spatialBiasCorrectionMode = ResTIRGI_SpatialBiasCorrectionMode::Basic;
-	params.spatialDepthThreshold = 0.1f;
-	params.spatialNormalThreshold = 0.5f;
-	params.spatialSamplingRadius = 32.0f;
+	RTXDI_BoilingFilterParameters params = {};
+	params.enableBoilingFilter = true;
+	params.boilingFilterStrength = 0.35f;
 
 	return params;
 }
 
-const ReSTIRGI_FinalShadingParameters getReSTIRGIFinalShadingParams()
+const RTXDI_GISpatialResamplingParameters getReSTIRGISpatialResamplingParams()
 {
-	ReSTIRGI_FinalShadingParameters params = {};
+	RTXDI_GISpatialResamplingParameters params = {};
+	params.numSamples = 2;
+	params.biasCorrectionMode = RTXDI_GIBiasCorrectionMode::Basic;
+	params.depthThreshold = 0.1f;
+	params.normalThreshold = 0.5f;
+	params.samplingRadius = 32.0f;
+
+	return params;
+}
+
+const RTXDI_GIFinalShadingParameters getReSTIRGIFinalShadingParams()
+{
+	RTXDI_GIFinalShadingParameters params = {};
 	params.enableFinalMIS = true;
 	params.enableFinalVisibility = true;
 	return params;

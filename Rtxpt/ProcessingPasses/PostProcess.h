@@ -35,12 +35,11 @@ class PostProcess
 public:
     enum class ComputePassType
     {
-        StablePlanesDebugViz,
+        DenoisingLayersDebugViz,
         RELAXDenoiserPrepareInputs,
         REBLURDenoiserPrepareInputs,
         RELAXDenoiserFinalMerge,
         REBLURDenoiserFinalMerge,
-        DLSSRRDenoiserPrepareInputs,
         NoDenoiserFinalMerge,
         DummyPlaceholder,
 

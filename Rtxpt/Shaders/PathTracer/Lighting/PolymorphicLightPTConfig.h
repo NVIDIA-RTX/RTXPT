@@ -15,11 +15,12 @@
 
 // Polymorphic light config - RTXDI will also need ENV 
 #define POLYLIGHT_SPHERE_ENABLE         1
-#define POLYLIGHT_POINT_ENABLE          0   // handled by sphere
+#define POLYLIGHT_POINT_ENABLE          1   // handled by sphere
 #define POLYLIGHT_TRIANGLE_ENABLE       1
-#define POLYLIGHT_DIRECTIONAL_ENABLE    0   // baked into envmap (Distant lighting code)
+#define POLYLIGHT_DIRECTIONAL_ENABLE    1   // baked into envmap (Distant lighting code)
 #define POLYLIGHT_ENV_ENABLE            0   // handled by Distant lighting code, not polymorphic light
 #define POLYLIGHT_QT_ENV_ENABLE         1   // environment map quad tree in equal area octahedral mapping
+#define POLYLIGHT_LIGHT_CLUSTER         1
 
 #define POLYLIGHT_CONFIGURED
 

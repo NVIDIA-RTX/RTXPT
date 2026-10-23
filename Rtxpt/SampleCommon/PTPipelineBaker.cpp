@@ -11,11 +11,14 @@
 #include "PTPipelineBaker.h"
 #include "ShaderCompilerUtils.h"
 
+#include <algorithm>
+
 #include <donut/app/ApplicationBase.h>
 
 #include "../Materials/MaterialsBaker.h"
 #include "ExtendedScene.h"
 #include "SampleCommon.h"
+#include "DirectoryModifiedMonitor.h"
 #include "../Shaders/PathTracer/PathTracerShared.h"
 
 #define BAKER_ENABLE_MULTITHREADED_COMPILE_SHADER 1
@@ -28,13 +31,19 @@
 // this is for testing
 #define PIPELINE_BAKER_REVERT_TO_UBERSHADER 0
 
-#define PIPELINE_BAKER_EMBED_PDBS 0 // otherwise export as .pdb-s
+#define PIPELINE_BAKER_EMBED_PDBS 1 // otherwise export as .pdb-s
 
+// Must stay >= -O1 for any shader that fetches bindlessly (see Shaders/Bindless.hlsli): a bindless resource stored
+// in a struct that crosses a function boundary is only representable once the optimizer scalarises the struct, and
+// at -Od DXC 1.9 fails with an internal compiler error rather than a diagnostic. SHaRC hits this via SharcParameters.
 #define PIPELINE_BAKER_USE_OPTIMIZATIONS 1
 
 using namespace donut;
 using namespace donut::math;
 using namespace donut::engine;
+
+// defined further down, next to macrosEqual; used by PTPipelineVariant::UpdateStart above it
+static void ApplyMacroOverrides(std::vector<donut::engine::ShaderMacro>& dst, const std::vector<donut::engine::ShaderMacro>& overrides);
 
 static const std::string c_PTShaderBinariesRoot = "ShaderDynamic/Bin";
 
@@ -72,6 +81,10 @@ void PTPipelineVariant::ShaderPermutation::CompileIfNeeded()
 
     donut::log::info("Compiling shader '%s' file '%s'...", PermutationName.c_str(), CompiledFullPath.c_str() );
 
+    // Ensure the output directory exists (shader paths may include subdirectories)
+    std::filesystem::path outputDir = std::filesystem::path(CompiledFullPath).parent_path();
+    EnsureDirectoryExists(outputDir);
+
     auto [resNum, resString, resErrorString] = SystemShell(US_compileCmdLine, false);
 
     US_compileError = "";
@@ -81,6 +94,11 @@ void PTPipelineVariant::ShaderPermutation::CompileIfNeeded()
 
     if (US_compileError != "")
         donut::log::warning(US_compileError.c_str());
+    else
+    {   // Stamped with the source snapshot, not the compile end time, so a source saved mid-compile still counts as newer
+        std::error_code ec;
+        std::filesystem::last_write_time(CompiledFullPath, US_sourceSnapshot, ec);
+    }
 }
 
 void PTPipelineVariant::ShaderPermutation::ResetShaderLibrary()
@@ -102,8 +120,8 @@ void PTPipelineVariant::ShaderPermutation::LoadShaderLibraryIfNeeded(PTPipelineB
         US_compileError = StringFormat("ERROR creating ShaderLibrary for file %s", CompiledFullPath.c_str());
 }
 
-PTPipelineVariant::PTPipelineVariant(const std::string & relativeSourcePath, const std::vector<donut::engine::ShaderMacro> & variantMacros, const std::shared_ptr<PTPipelineBaker>& baker, const std::string & shortUniqueDebugID, bool raygenOnly)
-    : m_macros(variantMacros), m_baker(baker), m_rayGenOnly(raygenOnly)
+PTPipelineVariant::PTPipelineVariant(const std::string & relativeSourcePath, const std::vector<donut::engine::ShaderMacro> & variantMacros, const std::shared_ptr<PTPipelineBaker>& baker, const std::string & shortUniqueDebugID, bool raygenOnly, std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> variantMacrosGetter)
+    : m_macros(variantMacros), m_baker(baker), m_rayGenOnly(raygenOnly), m_dynamicMacrosGetter(std::move(variantMacrosGetter))
 {
     m_raygen.SetPath(relativeSourcePath);
 
@@ -206,12 +224,21 @@ void PTPipelineVariant::CompileIfNeeded_Enqueue(std::filesystem::file_time_type 
         
         command += " -D ENABLE_DEBUG_PRINT"; // <- some issues with Linux and SPIRV? need to test this; also - test perf implications
 
+        // Tracks the C++ build configuration so shaders can gate debug-only work on it (see ShaderDebug.hlsl).
+        // ComputePipelineBaker injects the same macro via ShaderCompilerUtils::BuildDxcCommand; shaders precompiled
+        // offline by ShaderMake get neither and fall back to the 0 default declared in ShaderDebug.hlsl. The value is
+        // part of the hashed command line, so switching configuration recompiles rather than reusing a stale blob.
+#if defined(_DEBUG)
+        command += " -D RTXPT_SHADER_DEBUG=1";
+#else
+        command += " -D RTXPT_SHADER_DEBUG=0";
+#endif
+
         for (auto& macro : permutation->CombinedAndSpecializedMacros)
             command += " -D " + macro.name + "=" + macro.definition;
 
-        command += " -I \"" + baker->GetShadersPathExternalIncludes1().string() + "\"";
-        if (!baker->GetShadersPathExternalIncludes2().empty())
-            command += " -I \"" + baker->GetShadersPathExternalIncludes2().string() + "\"";
+        for (const auto& includePath : baker->GetIncludePaths())
+            command += " -I \"" + includePath.string() + "\"";
 
         std::string targetMacro = " -D ";
         if (baker->GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
@@ -233,6 +260,7 @@ void PTPipelineVariant::CompileIfNeeded_Enqueue(std::filesystem::file_time_type 
             command += " -fspv-target-env=vulkan1.2";
             command += " -fspv-extension=SPV_EXT_descriptor_indexing";
             command += " -fspv-extension=KHR";
+            command += " -fvk-bind-resource-heap 0 2";  // ResourceDescriptorHeap: the mutable heap layout is the third (set 2) - see Bindless.hlsli
 
             nvrhi::VulkanBindingOffsets cBindingOffsets;
             for (int i = 0; i < 7; i++)
@@ -247,7 +275,7 @@ void PTPipelineVariant::CompileIfNeeded_Enqueue(std::filesystem::file_time_type 
 
         std::string previousHashHex = permutation->CompiledHashHex;
 
-        // adding all command params (which includes all macros) but NOT the full file path (just file name) - this is to avoid recompiling if just moving folders around
+        // hash of all command params, including macros and the absolute source and include paths (so moving the install recompiles everything)
         std::string newHash = ShaderCompilerUtils::ComputeSha256Hex(command);
         if (newHash!=permutation->CompiledHashHex)
         {
@@ -256,9 +284,11 @@ void PTPipelineVariant::CompileIfNeeded_Enqueue(std::filesystem::file_time_type 
             permutation->ResetShaderLibrary();
         }
 
-        permutation->CompiledFileNameNoExt = permutation->ShaderOutFileName.string() + "_" + permutation->CompiledHashHex;
+        permutation->CompiledFileNameNoExt = permutation->ShaderOutFileName.string() + "_" + permutation->CompiledHashHex.substr(0, ShaderCompilerUtils::k_CacheFileHashHexChars);
         permutation->CompiledFullPath = std::filesystem::absolute(baker->GetShaderBinariesPath() / permutation->CompiledFileNameNoExt).string() + ".bin";
+#if !PIPELINE_BAKER_EMBED_PDBS
         std::string compiledFullPathPdb = std::filesystem::absolute(baker->GetShaderBinariesPath() / permutation->CompiledFileNameNoExt).string() + ".pdb";
+#endif
 
         // check if the file with the hash baked in exists and if it's newer than the last modified source (the latest modified file in the whole source directory)
         if (ShaderCompilerUtils::IsCompiledShaderUpToDate(permutation->CompiledFullPath, lastModifiedSourceCode))
@@ -278,6 +308,7 @@ void PTPipelineVariant::CompileIfNeeded_Enqueue(std::filesystem::file_time_type 
             if (baker->IsVerbose())
                 donut::log::info("Enqueuing shader variant of '%s'...", srcFullPath.string().c_str());
             permutation->US_compileCmdLine = command;
+            permutation->US_sourceSnapshot = lastModifiedSourceCode;
             resetPipelineNeeded = true;
             permutation->ResetShaderLibrary();
         }
@@ -304,11 +335,15 @@ void PTPipelineVariant::UpdateStart(std::filesystem::file_time_type lastModified
         return;
     }
 
-    m_combinedMacros.clear(); m_combinedMacros.reserve( m_macros.size() + baker->GetMacros().size() );
-    for (auto& macro : m_macros)
-        m_combinedMacros.push_back(macro);
+    // Globals first, then let the per-variant macros override them by name. Order matters: these all become
+    // '-D NAME=VALUE' on the DXC command line, and a redefinition with a *different* value is a hard error under -WX
+    // (see the '-WX' below), so a colliding name must replace rather than append. Replacing in place also keeps the
+    // command line (and therefore the compiled-binary hash) stable when nothing actually changed.
+    m_combinedMacros.clear(); m_combinedMacros.reserve( baker->GetMacros().size() + m_macros.size() + m_dynamicMacros.size() );
     for (auto& macro : baker->GetMacros())
         m_combinedMacros.push_back(macro);
+    ApplyMacroOverrides(m_combinedMacros, m_macros);          // static per-variant macros beat globals
+    ApplyMacroOverrides(m_combinedMacros, m_dynamicMacros);   // runtime per-variant macros beat both
     
     bool foundExportAnyHitDependency = false;
     for (auto& macro : m_combinedMacros)
@@ -341,6 +376,13 @@ void PTPipelineVariant::UpdateFinalize()
 
         nvrhi::rt::PipelineDesc pipelineDesc;
         pipelineDesc.globalBindingLayouts = { baker->GetBindingLayout(), baker->GetBindlessLayout() };
+        // Appended LAST on purpose. nvrhi matches binding set i to pipeline layout i positionally, so callers that
+        // do not fetch via ResourceDescriptorHeap (IntroSample) can keep dispatching these pipelines with only two
+        // binding sets and the trailing layout is simply never visited. Note nvrhi validates the set/layout count
+        // for compute and graphics but NOT for ray tracing, which is what makes that safe here - if that ever
+        // changes, every rt::State dispatch of these pipelines has to pass the third set.
+        if (baker->GetBindlessHeapLayout() != nullptr)
+            pipelineDesc.globalBindingLayouts.push_back(baker->GetBindlessHeapLayout());
         pipelineDesc.shaders.push_back({ "", m_raygen.ShaderLibrary->getShader(rayGenName.c_str(), nvrhi::ShaderType::RayGeneration), nullptr });
         pipelineDesc.shaders.push_back({ "", m_raygen.ShaderLibrary->getShader(missName.c_str(), nvrhi::ShaderType::Miss), nullptr });
         pipelineDesc.allowOpacityMicromaps = true;
@@ -369,7 +411,7 @@ void PTPipelineVariant::UpdateFinalize()
             );
         }
 
-        pipelineDesc.maxPayloadSize = PATH_TRACER_MAX_PAYLOAD_SIZE;
+        pipelineDesc.maxPayloadSize = PATH_TRACER_MAX_PAYLOAD_SIZE; // with SM 6.7+ with PAQs enabled, this is ignored by the driver
         pipelineDesc.maxRecursionDepth = 1; // 1 is enough if using inline visibility rays
         
         // NV HLSL extensions - DX12 only - we should probably expose some form of GetNvapiIsInitialized instead
@@ -378,13 +420,42 @@ void PTPipelineVariant::UpdateFinalize()
 
         m_pipeline = baker->GetDevice()->createRayTracingPipeline(pipelineDesc);
 
+        // Left at a stale version: PTPipelineBaker::Update reports it like a compile error (Retry, or exit)
         if (!m_pipeline)
-            { assert( false ); return; }
+            { m_us_lockedBaker = nullptr; return; }
 
-        m_shaderTable = m_pipeline->createShaderTable();
+        // CACHED shader table. An uncached one is re-baked on its first use in every command list - nvrhi keeps the
+        // build state in CommandList::m_UncachedShaderTableStates, which close() clears - so with one hit group entry per
+        // sub-instance this was rewriting 64 bytes x sub-instance count, once per variant per frame, on the calling
+        // thread. It profiled at ~38% of main thread time, dwarfing the actual ray dispatch it was preparing.
+        //
+        // Caching moves the build state onto the table itself (ShaderTable::cacheState), so it survives command list
+        // close and the table is baked only when ShaderTable::version changes. Two properties of this call site make that
+        // safe rather than merely faster:
+        //  - the entry set cannot change behind the cache's back: it only changes when the baker bumps its version, and
+        //    that path runs ResetPipeline() on every stale variant, which nulls m_shaderTable and re-enters this block.
+        //    So maxEntries computed here can never be exceeded later by an addHitGroup on a live table.
+        //  - every hit group above is built with bindingLayout == nullptr, so maxLocalRootParameters == 0 and
+        //    hasLocalResources() is false. isStateValid() therefore reduces to a version compare and descriptor heap
+        //    churn cannot force a re-bake either.
+        //
+        // Costs a shader-binding-table-sized buffer per variant (64B per entry, no local root args) plus one
+        // CopyBufferRegion per rebuild. Note cacheState lives on the table, not per command list, so this assumes the
+        // table is never recorded into two command lists concurrently - true here, all of this is main-thread recording.
+        //
+        // Must match ShaderTable::getNumEntries() == 1 + missShaders + hitGroups + callableShaders; the three add*
+        // calls immediately below are exactly what is counted here, and callables are never used.
+        nvrhi::rt::ShaderTableDesc shaderTableDesc;
+        shaderTableDesc.isCached   = true;
+        shaderTableDesc.maxEntries = 1u                                                                     // ray generation
+                                   + (m_exportMiss ? 1u : 0u)                                               // miss
+                                   + (m_rayGenOnly ? 0u : (uint32_t)baker->GetPerSubInstanceHitGroup().size());
+        shaderTableDesc.debugName  = "PTShaderTable_" + m_shortUniqueDebugID;
+
+        m_shaderTable = m_pipeline->createShaderTable(shaderTableDesc);
 
         if (!m_shaderTable)
-            { assert( false ); return; }
+            { m_us_lockedBaker = nullptr; return; }
 
         m_shaderTable->setRayGenerationShader(rayGenName.c_str());
 
@@ -398,6 +469,11 @@ void PTPipelineVariant::UpdateFinalize()
         if (m_exportMiss)
             m_shaderTable->addMissShader(missName.c_str());
 
+        // The one failure mode of the cached path: if the entries ever outgrow maxEntries, nvrhi reports an error and
+        // returns from setRayTracingState WITHOUT committing the dispatch template, i.e. it dispatches rays against a
+        // stale one. Silent and extremely confusing, so catch the sizing drift here instead.
+        assert( m_shaderTable->getNumEntries() == shaderTableDesc.maxEntries && "cached shader table sized wrong - see maxEntries above" );
+
         m_localVersion = baker->GetVersion();
 
         assert(m_pipeline != nullptr && m_shaderTable != nullptr);
@@ -407,15 +483,23 @@ void PTPipelineVariant::UpdateFinalize()
 }
 
 
-PTPipelineBaker::PTPipelineBaker(nvrhi::IDevice* device, std::shared_ptr<MaterialsBaker>& materialsBaker, nvrhi::BindingLayoutHandle bindingLayout, nvrhi::BindingLayoutHandle bindlessLayout)
+PTPipelineBaker::PTPipelineBaker(nvrhi::IDevice* device, std::shared_ptr<MaterialsBaker>& materialsBaker, nvrhi::BindingLayoutHandle bindingLayout, nvrhi::BindingLayoutHandle bindlessLayout, std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> globalMacrosGetter, nvrhi::BindingLayoutHandle bindlessHeapLayout, std::vector<donut::engine::ShaderMacro> hitGroupMacros)
     : m_device(device)
     , m_materialsBaker(materialsBaker)
     , m_bindingLayout(bindingLayout)
     , m_bindlessLayout(bindlessLayout)
+    , m_bindlessHeapLayout(bindlessHeapLayout)
+    , m_globalMacrosGetter(std::move(globalMacrosGetter))
+    , m_hitGroupMacros(std::move(hitGroupMacros))
     , m_enableNVAPIShaderExtension(device->queryFeatureSupport(nvrhi::Feature::HlslExtensionUAV))
 {
     if (!m_compilerConfig.Initialize(device, c_PTShaderBinariesRoot))
         donut::log::fatal("Failed to initialize shader compiler configuration");
+
+    // Hot-reload source watching runs on DirectoryModifiedMonitor's worker; walking this tree inline from Update() was a
+    // ~1.4 ms render-thread hitch twice a second. ComputePipelineBaker registers the same root, and the monitor folds
+    // the duplicate into a single scan.
+    m_sourceMonitor = DirectoryModifiedMonitor::Register( { m_compilerConfig.ShadersPath } );
 
     m_shadersFS = std::make_shared<vfs::RootFileSystem>();
     m_shadersFS->mount("/" + c_PTShaderBinariesRoot, m_compilerConfig.ShaderBinariesPath);
@@ -456,6 +540,34 @@ static bool macrosEqual(donut::engine::ShaderMacro& a, donut::engine::ShaderMacr
     return a.name == b.name && a.definition == b.definition;
 }
 
+// Apply 'overrides' on top of 'dst': a same-name macro replaces in place (keeping its position), a new one is appended.
+static void ApplyMacroOverrides(std::vector<donut::engine::ShaderMacro>& dst, const std::vector<donut::engine::ShaderMacro>& overrides)
+{
+    for (const auto& ov : overrides)
+    {
+        auto it = std::find_if(dst.begin(), dst.end(), [&ov](const donut::engine::ShaderMacro& m) { return m.name == ov.name; });
+        if (it != dst.end())
+            it->definition = ov.definition;
+        else
+            dst.push_back(ov);
+    }
+}
+
+bool PTPipelineVariant::RefreshDynamicMacros()
+{
+    if (!m_dynamicMacrosGetter)
+        return false;
+
+    m_dynamicMacrosScratch.clear();
+    m_dynamicMacrosGetter(m_dynamicMacrosScratch);
+
+    if (std::equal(m_dynamicMacrosScratch.begin(), m_dynamicMacrosScratch.end(), m_dynamicMacros.begin(), m_dynamicMacros.end(), macrosEqual))
+        return false;
+
+    m_dynamicMacros = m_dynamicMacrosScratch;
+    return true;
+}
+
 void PTPipelineBaker::EnqueueShaderPermutation(PTPipelineVariant::ShaderPermutation* perm)
 {
     if( perm->US_compileCmdLine != "" )
@@ -467,34 +579,29 @@ void PTPipelineBaker::EnqueueShaderPermutation(PTPipelineVariant::ShaderPermutat
     m_parallelCompileListAll.push_back(perm);
 }
 
-void PTPipelineBaker::Update(const std::shared_ptr<class ExtendedScene>& scene, unsigned int subInstanceCount, const std::function<void(std::vector<donut::engine::ShaderMacro>& macros)>& globalMacrosGetter, bool forceShaderReload)
+void PTPipelineBaker::Update(const std::shared_ptr<class ExtendedScene>& scene, unsigned int subInstanceCount, bool forceShaderReload)
 {
-    // Auto-reload: poll for source file changes
+    assert(m_globalMacrosGetter); // supplied at construction
+    // Auto-reload: check for source file changes. No timer and no directory walk here any more - the monitor's worker
+    // does the walking and this is a mutex plus a fold over one cached value.
     if (!forceShaderReload && !m_variants.empty())
     {
-        static auto lastPollTime = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        float elapsed = std::chrono::duration<float>(now - lastPollTime).count();
-        
-        if (elapsed >= m_autoReloadPollIntervalSeconds)
+        ZoneScopedN("PTPipelineHotReloadCheck");
+        auto currentTimestamp = DirectoryModifiedMonitor::Query(m_sourceMonitor);
+
+        if (currentTimestamp.has_value())
         {
-            lastPollTime = now;
-            auto currentTimestamp = GetLatestModifiedTimeDirectoryRecursive(m_compilerConfig.ShadersPath);
-            
-            if (currentTimestamp.has_value())
+            if (!m_cachedSourceTimestamp.has_value())
             {
-                if (!m_cachedSourceTimestamp.has_value())
-                {
-                    // First poll - just cache the timestamp
-                    m_cachedSourceTimestamp = currentTimestamp;
-                }
-                else if (*currentTimestamp != *m_cachedSourceTimestamp)
-                {
-                    // Source files changed - trigger reload
-                    m_cachedSourceTimestamp = currentTimestamp;
-                    forceShaderReload = true;
-                    log::info("RT shader source changes detected - triggering hot reload...");
-                }
+                // First observation - just cache the timestamp
+                m_cachedSourceTimestamp = currentTimestamp;
+            }
+            else if (*currentTimestamp != *m_cachedSourceTimestamp)
+            {
+                // Source files changed - trigger reload
+                m_cachedSourceTimestamp = currentTimestamp;
+                forceShaderReload = true;
+                log::info("RT shader source changes detected - triggering hot reload...");
             }
         }
     }
@@ -502,12 +609,24 @@ void PTPipelineBaker::Update(const std::shared_ptr<class ExtendedScene>& scene, 
     bool needsUpdate = m_uniqueHitGroups.size() == 0;
 
     std::vector<donut::engine::ShaderMacro> newMacros;
-    globalMacrosGetter(newMacros);
+    {
+        // Unlike the poll above this is NOT throttled - it runs every frame. GetPTPipelineGlobalMacros pushes 27
+        // ShaderMacros, each two std::strings, and most of the names are well past MSVC's 15-char SSO limit - so this
+        // is ~50+ malloc/free pairs plus the vector growth, every frame, purely to discover nothing changed.
+        ZoneScopedN("PTPipelineGlobalMacrosCompare");
+        m_globalMacrosGetter(newMacros);
+    }
     if (!std::equal(newMacros.begin(), newMacros.end(), m_macros.begin(), m_macros.end(), macrosEqual))
     {
         needsUpdate = true;
         m_macros = newMacros;
     }
+
+    // Per-variant runtime macro overrides. Cheap no-op for variants without a getter; for those that have one this is a
+    // compare against the cached set, so a recompile only happens when the produced macros actually change. Note '|=',
+    // not '||': every variant must be refreshed so its cache stays current.
+    for (auto& variant : m_variants)
+        needsUpdate |= variant->RefreshDynamicMacros();
 
     needsUpdate |= forceShaderReload;
 
@@ -529,7 +648,13 @@ void PTPipelineBaker::Update(const std::shared_ptr<class ExtendedScene>& scene, 
         // Prime the instances to make sure we only include the necessary CHS variants in the PSO. Many (sub)instances can map to same materials.
         m_uniqueHitGroups.clear();
         for (int i = 0; i < m_perSubInstanceHitGroup.size(); i++)
-            m_uniqueHitGroups[m_perSubInstanceHitGroup[i].GetShaderPermutationIndex()] = m_perSubInstanceHitGroup[i];
+        {
+            // Alpha testing is not part of the permutation, so alpha tested and opaque geometry can share a hit group:
+            // it needs the any-hit if any of them does. Opaque geometry never invokes it (GeometryFlags::Opaque).
+            const HitGroupInfo& info = m_perSubInstanceHitGroup[i];
+            HitGroupInfo& unique = m_uniqueHitGroups.try_emplace(info.GetShaderPermutationIndex(), info).first->second;
+            unique.HasAnyHitShader |= info.HasAnyHitShader;
+        }
         needsUpdate = true;
     }
 
@@ -543,11 +668,20 @@ void PTPipelineBaker::Update(const std::shared_ptr<class ExtendedScene>& scene, 
         // we need the output folder
         EnsureDirectoryExists(m_compilerConfig.ShaderBinariesPath);
 
-        std::optional<std::filesystem::file_time_type> a = GetLatestModifiedTimeDirectoryRecursive(m_compilerConfig.ShadersPath);
+        // ScanNow, not Query: this value feeds ShaderCompilerUtils::IsCompiledShaderUpToDate, which does
+        // 'binaryTime >= lastSourceModified' per shader, so a cached (up to one poll interval stale) timestamp could
+        // silently skip a compile. This runs only when a reload is already happening, where a 1.4 ms walk is nothing
+        // next to the compilation it is about to kick off.
+        std::optional<std::filesystem::file_time_type> a = DirectoryModifiedMonitor::ScanNow(m_sourceMonitor);
         // let's not track externals for perf reasons but here's the code in case it's needed
-        //std::optional<std::filesystem::file_time_type> b = GetLatestModifiedTimeRecursive(m_compilerConfig.ShadersPathExternalIncludes1);
-        //std::optional<std::filesystem::file_time_type> c = GetLatestModifiedTimeRecursive(m_compilerConfig.ShadersPathExternalIncludes2);
+        //for (const auto& includePath : m_compilerConfig.IncludePaths)
+        //    std::optional<std::filesystem::file_time_type> b = GetLatestModifiedTimeRecursive(includePath);
         m_lastUpdatedSourceTimestamp = a;
+
+        // Sync the watcher's baseline with what this batch compiles; otherwise an edit it hasn't polled yet (e.g. saved just
+        // before Ctrl+R) triggers a second, redundant reload.
+        if (a.has_value())
+            m_cachedSourceTimestamp = a;
     }
 
     if (!m_lastUpdatedSourceTimestamp.has_value())
@@ -663,21 +797,47 @@ void PTPipelineBaker::Update(const std::shared_ptr<class ExtendedScene>& scene, 
     #endif
 
             progressCompilingPSOs.Set(100);
+
+            // A pipeline or shader table that failed to create takes the same Retry / exit path as a compile error
+            for (const std::shared_ptr<PTPipelineVariant>& variant : updateQueue)
+                if (variant->GetVersion() != m_version)
+                {
+                    firstError = StringFormat("ERROR creating the ray tracing pipeline or shader table for '%s'", variant->m_shortUniqueDebugID.c_str());
+                    break;
+                }
         }
 
 
         if (firstError!="")
         {
+            // Unlock for Retry; otherwise the next pass's UpdateStart finds them still locked. Reset too, so Retry
+            // rebuilds the whole batch rather than keeping pipelines built from source that may have changed since
+            for (const std::shared_ptr<PTPipelineVariant>& variant : updateQueue)
+            {
+                variant->m_us_lockedBaker = nullptr;
+                variant->ResetPipeline();
+            }
+
+            firstError += m_compilerConfig.LongPathErrorHint();
+
+            // Nobody to click Retry: log and take the Cancel path
+            if (HelpersIsNonInteractive())
+            {
+                log::error("%s", firstError.c_str());
+                HelpersExitProcess(1);
+            }
+
 #if _WIN32
             extern HWND HelpersGetActiveWindow();
             int result = MessageBoxA(HelpersGetActiveWindow(), firstError.c_str(),
                 "Shader compile error", MB_RETRYCANCEL | MB_ICONWARNING | MB_SETFOREGROUND | MB_TASKMODAL);
             if (result == IDCANCEL)
 #endif
-                break;
+                HelpersExitProcess(1); // the renderer can't work with broken shaders
 
-            for (const std::shared_ptr<PTPipelineVariant>& variant : updateQueue)
-                variant->m_us_lockedBaker = nullptr;
+            // Retry: rescan, as the source may have been fixed while the error box was up
+            if (std::optional<std::filesystem::file_time_type> rescan = DirectoryModifiedMonitor::ScanNow(m_sourceMonitor); rescan.has_value())
+                m_lastUpdatedSourceTimestamp = m_cachedSourceTimestamp = rescan;
         }
         else
         {
@@ -704,9 +864,13 @@ void PTPipelineBaker::ReleaseVariant(std::shared_ptr<PTPipelineVariant>& variant
     assert(false);
 }
 
-std::shared_ptr<PTPipelineVariant> PTPipelineBaker::CreateVariant(const std::string & relativeSourcePath, std::vector<donut::engine::ShaderMacro> variantMacros, const std::string & shortUniqueDebugID, bool rayGenOnly)
+std::shared_ptr<PTPipelineVariant> PTPipelineBaker::CreateVariant(const std::string & relativeSourcePath, std::vector<donut::engine::ShaderMacro> variantMacros, const std::string & shortUniqueDebugID, bool rayGenOnly, std::function<void(std::vector<donut::engine::ShaderMacro> & macros)> variantMacrosGetter)
 {
-    std::shared_ptr<PTPipelineVariant> variant = std::shared_ptr<PTPipelineVariant>(new PTPipelineVariant(relativeSourcePath, variantMacros, this->shared_from_this(), shortUniqueDebugID, rayGenOnly));
+    // Folded in here rather than at the hit-group step so they reach the raygen compile too - a
+    // variant's raygen and its hit groups are one pipeline and have to be built against the same set.
+    variantMacros.insert(variantMacros.end(), m_hitGroupMacros.begin(), m_hitGroupMacros.end());
+
+    std::shared_ptr<PTPipelineVariant> variant = std::shared_ptr<PTPipelineVariant>(new PTPipelineVariant(relativeSourcePath, variantMacros, this->shared_from_this(), shortUniqueDebugID, rayGenOnly, std::move(variantMacrosGetter)));
     m_variants.push_back(variant);
     return variant;
 }

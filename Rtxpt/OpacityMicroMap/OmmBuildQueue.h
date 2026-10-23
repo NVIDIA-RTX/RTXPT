@@ -13,8 +13,13 @@
 #include <donut/engine/SceneTypes.h>
 #include <donut/engine/TextureCache.h>
 #include "../SampleCommon/AccelerationStructureUtil.h"
+#include "OmmBakeInputKey.h"
 
 #include <nvrhi/nvrhi.h>
+
+namespace bvh { class BlasCompactor; }
+struct MeshDebugData;
+struct MeshGeometryDebugData;
 #include <omm-gpu-nvrhi.h>
 #include <unordered_map>
 #include <list>
@@ -39,7 +44,7 @@ public:
 			std::shared_ptr < donut::engine::TextureData > alphaTexture;
 
 			// Settings
-			uint32_t maxSubdivisionLevel = 5;
+			uint32_t maxSubdivisionLevel = 6;
 			float dynamicSubdivisionScale = 2.f;
 			nvrhi::rt::OpacityMicromapFormat format = nvrhi::rt::OpacityMicromapFormat::OC1_4_State;
 			nvrhi::rt::OpacityMicromapBuildFlags flags = nvrhi::rt::OpacityMicromapBuildFlags::FastTrace;
@@ -72,12 +77,19 @@ public:
 	void CancelPendingBuilds();
 	void QueueBuild(const BuildInput& inputs);
 	uint32_t NumPendingBuilds() const;
+	void SetRetainDebugData(bool retain);
+
+	// When set, OMM BLASes are compacted into the shared pool rather than each keeping the buffer its
+	// build reserved. Null leaves the original per-BLAS allocation path in place.
+	void SetBlasCompactor(bvh::BlasCompactor* compactor) { m_blasCompactor = compactor; }
 
 private:
 
 	enum BuildState
 	{
 		None,
+		WaitingForSharedBake,
+		SharedBuild,
 		Setup,
 		BakeAndBuild,
 	};
@@ -114,10 +126,21 @@ private:
 		nvrhi::BufferHandle ommReadbackBuffer;
 	};
 
+	struct SharedBake
+	{
+		std::vector<nvrhi::TextureHandle> alphaTextures;
+		std::vector<bvh::OmmAttachment> attachments;
+		std::shared_ptr<MeshDebugData> debugData;
+		std::vector<MeshGeometryDebugData> geometryDebugData;
+		bool ready = false;
+	};
+
 	struct BuildTask
 	{
 		BuildInput input;
 		BuildState state = BuildState::None;
+		std::vector<omm::GpuBakeNvrhi::Input> bakeInputs;
+		std::shared_ptr<SharedBake> sharedBake;
 
 		Buffers buffers;
 		std::vector<BufferInfo> bufferInfos;
@@ -129,6 +152,10 @@ private:
 	void ConsumeOneTask(nvrhi::ICommandList& commandList, BuildState taskState);
 	bool ExecuteTask(nvrhi::ICommandList& commandList, BuildTask& taskState); // Returns whether the task is finished and can be removed from the queue
 
+	bool MakeInputKey(const BuildTask& task, omm::BakeInputKey& key) const;
+	void FindSharedBake(BuildTask& task);
+	void RunSharedBuild(nvrhi::ICommandList& commandList, BuildTask& task);
+	void FinalizeSharedBuild(BuildTask& task);
 	void RunSetup(nvrhi::ICommandList& commandList, BuildTask& task);
 	void RunBakeAndBuild(nvrhi::ICommandList& commandList, BuildTask& task);
 	void Finalize(nvrhi::ICommandList& commandList, BuildTask& task);
@@ -140,12 +167,20 @@ private:
 
 	bool ReadyToRecordWork();
 	void SubmitAndSubscribeQuery(nvrhi::ICommandList& commandList);
+	void CreateBaker(nvrhi::ICommandList& commandList);
 
 	std::vector<BuildTask> m_pending;
+	// Build-only ownership keeps triangle mappings alive through every consumer BLAS.
+	// Meshes own the shared hardware arrays after this cache is cleared.
+	std::unordered_map<omm::BakeInputKey, std::shared_ptr<SharedBake>, omm::BakeInputKeyHash> m_sharedBakes;
+	bool m_retainDebugData = false;
 	nvrhi::EventQueryHandle m_InFlightQuery;
 
 	nvrhi::DeviceHandle m_device;
+	bvh::BlasCompactor* m_blasCompactor = nullptr;
 	std::shared_ptr<donut::engine::DescriptorTableManager> m_descriptorTable;
 	std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
+	// Only alive while builds are queued: it owns a scratch pool (up to 256 MB) that it never shrinks, so it is released
+	// whenever the queue empties and Update recreates it for the next batch.
 	std::unique_ptr<omm::GpuBakeNvrhi> m_baker;
 };

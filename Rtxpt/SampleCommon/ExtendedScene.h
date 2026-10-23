@@ -19,6 +19,7 @@ struct LightSamplerLink
 {
     int         IndexOrBase = -1;       // index of a corresponding PolymorphicLight in the light sampler
     int         LastUpdateTag = -1;     // identifier of when IndexOrBase was last updated (either frame index or similar)
+    int         ClusterIndexOrBase = -1;// emissive geometry only: offset of its light clusters within the cluster block, -1 if none
 };
 
 struct LightExtension// : virtual public donut::engine::Light
@@ -73,7 +74,7 @@ public:
 class EnvironmentLight : public donut::engine::Light
 {
 public:
-    dm::float3 radianceScale = 1.f;
+    float intensity = 1.f;
     int textureIndex = -1;
     float rotation = 0.f;
     std::string path;
@@ -154,6 +155,11 @@ public:
     const std::vector<donut::engine::SceneImportResult> & GetModels() const               { return m_Models; }
 
 private:
+    void CreateMeshBuffers(nvrhi::ICommandList* commandList) override;
+    nvrhi::BufferHandle CreateMaterialBuffer() override;
+    nvrhi::BufferHandle CreateGeometryBuffer() override;
+    nvrhi::BufferHandle CreateInstanceBuffer() override;
+
     // maybe switch to SceneGraphWalker?
     void ProcessNodesRecursive(std::shared_ptr<donut::engine::SceneGraphNode> node);
 };

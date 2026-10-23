@@ -15,6 +15,7 @@
 #include <nvrhi/nvrhi.h>
 #include <donut/engine/ShaderFactory.h>
 #include <donut/engine/ThreadPool.h>
+#include "DirectoryModifiedMonitor.h"
 #include <unordered_map>
 
 #include "ShaderCompilerUtils.h"
@@ -63,8 +64,6 @@ private:
     const std::filesystem::path& GetShaderBinariesPath() const { return m_compilerConfig.ShaderBinariesPath; }
     const std::filesystem::path& GetShaderCompilerPath() const { return m_compilerConfig.ShaderCompilerPath; }
     const std::filesystem::path& GetShadersPath() const { return m_compilerConfig.ShadersPath; }
-    const std::filesystem::path& GetShadersPathExternalIncludes1() const { return m_compilerConfig.ShadersPathExternalIncludes1; }
-    const std::filesystem::path& GetShadersPathExternalIncludes2() const { return m_compilerConfig.ShadersPathExternalIncludes2; }
     
     std::shared_ptr<donut::vfs::RootFileSystem> GetFS() { return m_shadersFS; }
     std::mutex& GetMutex() { return m_mutex; }
@@ -102,6 +101,8 @@ private:
     
     // Additional directories to monitor for hot reload (besides ShadersPath)
     std::vector<std::filesystem::path> m_additionalMonitorPaths;
+    // Registered group covering ShadersPath + m_additionalMonitorPaths; walked on the monitor's worker thread.
+    DirectoryModifiedMonitor::Handle m_sourceMonitor = DirectoryModifiedMonitor::kInvalidHandle;
 };
 
 class ComputeShaderVariant
@@ -110,8 +111,11 @@ public:
     ~ComputeShaderVariant();
 
     // Get the compiled compute pipeline
-    // Returns nullptr if pipeline is not yet compiled or compilation failed
+    // Returns nullptr if it has never compiled; a failed recompile keeps the previous pipeline
     nvrhi::ComputePipelineHandle GetPipeline() const { return m_pipeline; }
+
+    // Binds the current pipeline and dispatches; does nothing and returns false until it has compiled
+    bool Dispatch(nvrhi::ICommandList* commandList, int width, int height, int depth, const nvrhi::BindingSetVector& bindings) const;
 
     // Check if the variant needs to be updated (recompiled)
     bool NeedsUpdate() const;
@@ -139,11 +143,12 @@ private:
     // Execute the actual compilation (called from thread pool)
     void CompileIfNeeded();
 
-    // Load shader blob and create pipeline
+    // Load shader blob and create the pending pipeline
     void LoadShaderAndCreatePipeline();
 
-    // Reset pipeline (forces recompile on next update)
-    void ResetPipeline();
+    // Swap the pending pipeline in, or drop it and keep the current one
+    void CommitPending();
+    void DiscardPending();
 
 private:
     std::weak_ptr<ComputePipelineBaker> m_baker;
@@ -162,10 +167,13 @@ private:
     std::string m_compiledFullPath;
     std::string m_compileCmdLine;  // empty if no recompile needed
     std::string m_compileError;
+    std::filesystem::file_time_type m_sourceSnapshot;  // source timestamp the compile is for, see CompileIfNeeded
 
     // Pipeline
     nvrhi::ShaderHandle m_shader;
     nvrhi::ComputePipelineHandle m_pipeline;
+    nvrhi::ShaderHandle m_pendingShader;           // built by the current batch; committed only if the whole batch succeeds
+    nvrhi::ComputePipelineHandle m_pendingPipeline;
 
     // Version tracking
     int64_t m_localVersion = -1;

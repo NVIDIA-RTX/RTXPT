@@ -142,25 +142,10 @@ float4 applyToneMapping(float2 texC)
     finalColor *= (kExposureKey / avgLuminance);
 #endif
 */
-    if(gParams.autoExposure)
-    {
-        // apply auto exposure
-
-#ifndef TONEMAPPING_AUTOEXPOSURE_CPU
-#error this must be defined
-#elif TONEMAPPING_AUTOEXPOSURE_CPU == 1
-        float avgLuminance = gParams.avgLuminance;
-#else
-        float avgLuminance = exp2(gLuminanceTex.SampleLevel(gLuminanceTexSampler, texC, kLuminanceLod).r);
-#endif
-        float pixelLuminance = calcLuminance(finalColor);
-
-        finalColor *= clamp( (kExposureKey / avgLuminance), gParams.autoExposureLumValueMin, gParams.autoExposureLumValueMax );
-    }
-
+    // when disabled, this is a pure passthrough - no exposure either
     if (gParams.enabled)
     {
-        // apply color grading
+        // apply color grading and exposure (auto x user, computed on the CPU)
         finalColor = mul(finalColor, (float3x3) gParams.colorTransform);
 
         // apply tone mapping
