@@ -74,6 +74,7 @@ All initial mirror bounces are traced, accumulating the mirrors' 3x3 image trans
 This allows seamless motion vector tracking, and therefore stable denoising, of content seen through multiple stacked reflections:
 
 https://github.com/user-attachments/assets/bf4cbff7-8de5-41eb-bd77-ff4ffa5d5665
+
 https://github.com/user-attachments/assets/c2a3307b-ff63-4769-94b4-b818b1cf14e3
 
 More complex cases, such as surfaces with both a delta reflection and a delta transmission lobe, are handled by decomposing the path into up to three layers, which allows (mostly) out-of-the-box handling of various pure specular setups. Decomposition is enabled per material.
