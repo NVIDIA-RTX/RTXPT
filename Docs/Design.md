@@ -73,7 +73,8 @@ All initial mirror bounces are traced, accumulating the mirrors' 3x3 image trans
 
 This allows seamless motion vector tracking, and therefore stable denoising, of content seen through multiple stacked reflections:
 
-[PSR Video 1](https://github.com/NVIDIA-RTX/RTXPT-Assets/raw/79edd32e02797d3624f56a153a768937e0432198/Docs/Design/PSR-1.mp4) [PSR Video 2](https://github.com/NVIDIA-RTX/RTXPT-Assets/raw/79edd32e02797d3624f56a153a768937e0432198/Docs/Design/PSR-2.mp4)
+https://github.com/user-attachments/assets/bf4cbff7-8de5-41eb-bd77-ff4ffa5d5665
+https://github.com/user-attachments/assets/c2a3307b-ff63-4769-94b4-b818b1cf14e3
 
 More complex cases, such as surfaces with both a delta reflection and a delta transmission lobe, are handled by decomposing the path into up to three layers, which allows (mostly) out-of-the-box handling of various pure specular setups. Decomposition is enabled per material.
 
@@ -91,7 +92,7 @@ For DLSS-RR, however, we run a single denoising pass, as three would be prohibit
 
 In this case...
 
-[Decomposition Video](https://github.com/NVIDIA-RTX/RTXPT-Assets/raw/79edd32e02797d3624f56a153a768937e0432198/Docs/Design/Decomposition.mp4)
+https://github.com/user-attachments/assets/c3831ae0-2bbe-4dec-88b5-d2d47bd4a27a
 
 ...the glass material's "Dominant bounce" is set to "Transparency" (its transmission lobe), so DLSS-RR receives the motion vectors of what is seen through the window and refracted through the glass sphere, and the transmitted image is denoised better than the reflection. This is a field of active research.
 
