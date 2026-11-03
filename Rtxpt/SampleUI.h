@@ -162,7 +162,7 @@ struct SampleUIData
     bool                                ActualUseReSTIRDI() const { return UseNEE && (RealtimeMode) && (UseReSTIRDI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
     bool                                ActualUseReSTIRGI() const { return (RealtimeMode) && (UseReSTIRGI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
     uint                                ActualSamplesPerPixel() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSamplesPerPixel : 1u; }
-    uint                                ActualSubSamplingMode() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSubSamplingMode : 0; }
+    uint                                ActualSubSamplingMode() const { return (RealtimeMode && !ActualUseStandaloneDenoiser() && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSubSamplingMode : 0; }
     uint                                SubSamplingScaleX() const { return ActualSubSamplingMode() > 0 ? 2 : 1; }
     uint                                SubSamplingScaleY() const { return (ActualSubSamplingMode() == 1 || ActualSubSamplingMode() == 3) ? 2 : 1; }
     uint                                SubSamplingRateNum() const { return ActualSubSamplingMode() == 1 ? 3 : 1; }   // traced pixels per ScaleX x ScaleY block
@@ -348,10 +348,12 @@ struct SampleUIData
 
     // Denoiser
     bool                                NRDModeChanged = false;
+    bool                                NRDResetHistory = false;
     NrdConfig::DenoiserMethod           NRDMethod = NrdConfig::DenoiserMethod::REBLUR;
-    float                               NRDDisocclusionThreshold = 0.03f;
-    bool                                NRDUseAlternateDisocclusionThresholdMix = true;
-    float                               NRDDisocclusionThresholdAlternate = 0.2f;
+    float                               NRDDisocclusionThreshold = nrd::CommonSettings{}.disocclusionThreshold;
+    bool                                NRDUseAlternateDisocclusionThresholdMix = nrd::CommonSettings{}.isDisocclusionThresholdMixAvailable;
+    float                               NRDDisocclusionThresholdAlternate = nrd::CommonSettings{}.disocclusionThresholdAlternate;
+    float                               NRDSplitScreen = nrd::CommonSettings{}.splitScreen;
     nrd::RelaxSettings                  RelaxSettings;
     nrd::ReblurSettings                 ReblurSettings;
     //nrd::ReferenceSettings              NRDReferenceSettings;

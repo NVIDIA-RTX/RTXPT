@@ -14,11 +14,20 @@
 #include "SampleGame/GameScene.h"
 #include "Sharc/SharcIntegration.h"
 #include <imgui_internal.h>
+#include <algorithm>
+#include <cfloat>
 
 using namespace donut::app;
 using namespace donut::engine;
 
 #define RESET_ON_CHANGE(code) do{if (code) m_ui.ResetAccumulation = true;} while(false)
+
+// These slider spans are practical tuning ranges. Ctrl+click permits larger values when NRD has no upper bound.
+static inline void NrdSliderFloat(const char* label, float* value, float minimum, float maximum, ImGuiSliderFlags flags = 0)
+{
+    if (ImGui::SliderFloat(label, value, minimum, maximum, "%.4g", flags))
+        *value = std::max(minimum, std::min(*value, FLT_MAX));
+}
 
 AdvancedSampleUI::AdvancedSampleUI(donut::app::DeviceManager * deviceManager, class SampleBaseApp& baseApp, class Sample& app, SampleUIData & ui, bool NVAPI_SERSupported, const struct CommandLineOptions& cmdLine)
     : SampleUI(deviceManager, baseApp, app, ui, NVAPI_SERSupported, cmdLine)
@@ -194,13 +203,17 @@ void AdvancedSampleUI::DrawSampleUI(float indent, float defItemWidth, const ImVe
                 }
 
                 {
-                    UI_SCOPED_DISABLE((m_ui.ActualUseReSTIRDI() || m_ui.ActualUseReSTIRGI()) || m_ui.RealtimeSamplesPerPixel != 1);
-                    RESET_ON_CHANGE(ImGui::Combo("Sub-sampling", (int*)&m_ui.RealtimeSubSamplingMode, "Disabled\0Three quarters\0Half\0Quarter\0\0"));
-                    m_ui.RealtimeSubSamplingMode = dm::clamp(m_ui.RealtimeSubSamplingMode, 0, 3);
+                    UI_SCOPED_DISABLE(m_ui.ActualUseStandaloneDenoiser() || (m_ui.ActualUseReSTIRDI() || m_ui.ActualUseReSTIRGI()) || m_ui.RealtimeSamplesPerPixel != 1);
+                    int subSamplingMode = m_ui.ActualUseStandaloneDenoiser() ? 0 : m_ui.RealtimeSubSamplingMode;
+                    RESET_ON_CHANGE(ImGui::Combo("Sub-sampling", &subSamplingMode, "Disabled\0Three quarters\0Half\0Quarter\0\0"));
+                    if (!m_ui.ActualUseStandaloneDenoiser())
+                        m_ui.RealtimeSubSamplingMode = dm::clamp(subSamplingMode, 0, 3);
                     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                        ImGui::SetTooltip("Opposite of 'Samples per pixel', we can compute lighting for only three quarters, half or a quarter of pixels for better performance.\n(currently incompatible with ReSTIR DI & ReSTIR GI)");
+                        ImGui::SetTooltip("Opposite of 'Samples per pixel', we can compute lighting for only three quarters, half or a quarter of pixels for better performance.\nUnavailable with NRD, ReSTIR DI, and ReSTIR GI.");
+                    if (m_ui.ActualUseStandaloneDenoiser())
+                        ImGui::TextDisabled("NRD traces every pixel.");
 
-                    if (m_ui.RealtimeSubSamplingMode > 0)
+                    if (m_ui.ActualSubSamplingMode() > 0)
                     {
                         RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
 
@@ -710,127 +723,106 @@ void AdvancedSampleUI::DrawSampleUI(float indent, float defItemWidth, const ImVe
     if (m_ui.ActualUseStandaloneDenoiser() && ImGui::CollapsingHeader("Standalone Denoiser (NRD)"))
     {
         RAII_SCOPE(ImGui::Indent(indent);, ImGui::Unindent(indent); );
-
-        ImGui::InputFloat("Disocclusion Threshold", &m_ui.NRDDisocclusionThreshold);
-        ImGui::Checkbox("Use Alternate Disocclusion Threshold Mix", &m_ui.NRDUseAlternateDisocclusionThresholdMix);
-        ImGui::InputFloat("Disocclusion Threshold Alt", &m_ui.NRDDisocclusionThresholdAlternate);
-        ImGui::InputFloat("Radiance clamping", &m_ui.DenoiserRadianceClampK);
-
-        ImGui::Separator();
+        const ImGuiSliderFlags boundInput = ImGuiSliderFlags_AlwaysClamp;
 
         m_ui.NRDModeChanged = ImGui::Combo("Denoiser Mode", (int*)&m_ui.NRDMethod, "REBLUR\0RELAX\0\0");
-        m_ui.NRDMethod = dm::clamp(m_ui.NRDMethod, (NrdConfig::DenoiserMethod)0, (NrdConfig::DenoiserMethod)1);
+        ImGui::SameLine();
+        if (ImGui::Button("Defaults"))
+        {
+            if (m_ui.NRDMethod == NrdConfig::DenoiserMethod::REBLUR)
+                m_ui.ReblurSettings = NrdConfig::getDefaultREBLURSettings();
+            else
+                m_ui.RelaxSettings = NrdConfig::getDefaultRELAXSettings();
+
+            const nrd::CommonSettings defaults = {};
+            m_ui.NRDDisocclusionThreshold = defaults.disocclusionThreshold;
+            m_ui.NRDDisocclusionThresholdAlternate = defaults.disocclusionThresholdAlternate;
+            m_ui.NRDUseAlternateDisocclusionThresholdMix = defaults.isDisocclusionThresholdMixAvailable;
+            m_ui.NRDSplitScreen = defaults.splitScreen;
+            m_ui.DenoiserRadianceClampK = 8.0f;
+            m_ui.NRDResetHistory = true;
+        }
+
+        ImGui::SliderFloat("Disocclusion Threshold", &m_ui.NRDDisocclusionThreshold, 0.01f, 0.02f, "%.4f", boundInput);
+        ImGui::Checkbox("Use Alternate Disocclusion Threshold Mix", &m_ui.NRDUseAlternateDisocclusionThresholdMix);
+        ImGui::SliderFloat("Disocclusion Threshold Alt", &m_ui.NRDDisocclusionThresholdAlternate, 0.02f, 0.2f, "%.4f", boundInput);
+        NrdSliderFloat("Radiance clamping", &m_ui.DenoiserRadianceClampK, FLT_MIN, 32.0f);
+        ImGui::SliderFloat("Split screen", &m_ui.NRDSplitScreen, 0.0f, 1.0f, "%.2f", boundInput);
+
+        ImGui::Separator();
 
         if (ImGui::CollapsingHeader("Advanced Settings"))
         {
             if (m_ui.NRDMethod == NrdConfig::DenoiserMethod::REBLUR)
             {
-                // TODO: make sure these are updated to constants
-                ImGui::SliderFloat("Hit Distance A", &m_ui.ReblurSettings.hitDistanceParameters.A, 0.0f, 10.0f);
-                ImGui::SliderFloat("Hit Distance B", &m_ui.ReblurSettings.hitDistanceParameters.B, 0.0f, 10.0f);
-                ImGui::SliderFloat("Hit Distance C", &m_ui.ReblurSettings.hitDistanceParameters.C, 0.0f, 50.0f);
+                nrd::ReblurSettings& settings = m_ui.ReblurSettings;
+                NrdSliderFloat("Hit Distance A", &settings.hitDistanceParameters.A, FLT_MIN, 10.0f);
+                NrdSliderFloat("Hit Distance B", &settings.hitDistanceParameters.B, FLT_MIN, 1.0f);
+                NrdSliderFloat("Hit Distance C", &settings.hitDistanceParameters.C, 1.0f, 100.0f);
 
-                ImGui::SliderFloat("Antilag Luminance Sigma Scale", &m_ui.ReblurSettings.antilagSettings.luminanceSigmaScale, 1.0f, 3.0f);
-                // ImGui::SliderFloat("Antilag Hit Distance Sigma Scale", &m_ui.ReblurSettings.antilagSettings.hitDistanceSigmaScale, 1.0f, 3.0f);
-                ImGui::SliderFloat("Antilag Luminance Sensitivity", &m_ui.ReblurSettings.antilagSettings.luminanceSensitivity, 0.001f, 1.0f);
-                // ImGui::SliderFloat("Antilag Hit Distance Sensitivity", &m_ui.ReblurSettings.antilagSettings.hitDistanceSensitivity, 0.001f, 1.0f);
+                NrdSliderFloat("Antilag Luminance Sigma Scale", &settings.antilagSettings.luminanceSigmaScale, FLT_MIN, 5.0f);
+                NrdSliderFloat("Antilag Luminance Sensitivity", &settings.antilagSettings.luminanceSensitivity, FLT_MIN, 5.0f);
 
-                ImGui::SliderInt("Max Accumulated Frames", (int*)&m_ui.ReblurSettings.maxAccumulatedFrameNum, 0, nrd::REBLUR_MAX_HISTORY_FRAME_NUM);
-                ImGui::SliderInt("Fast Max Accumulated Frames", (int*)&m_ui.ReblurSettings.maxFastAccumulatedFrameNum, 0, nrd::REBLUR_MAX_HISTORY_FRAME_NUM);
-                ImGui::SliderInt("History Fix Frames", (int*)&m_ui.ReblurSettings.historyFixFrameNum, 0, nrd::REBLUR_MAX_HISTORY_FRAME_NUM);
+                ImGui::Text("Accumulation target: 0.5 s (%u frames)", settings.maxAccumulatedFrameNum);
+                ImGui::Text("Fast history: %u frames (main / 6)", settings.maxFastAccumulatedFrameNum);
+                ImGui::Text("History fix: %u frames", settings.historyFixFrameNum);
 
-                ImGui::SliderFloat("Diffuse Prepass Blur Radius (pixels)", &m_ui.ReblurSettings.diffusePrepassBlurRadius, 0.0f, 100.0f);
-                ImGui::SliderFloat("Specular Prepass Blur Radius (pixels)", &m_ui.ReblurSettings.specularPrepassBlurRadius, 0.0f, 100.0f);
-                ImGui::SliderFloat("Min Blur Radius (pixels)", &m_ui.ReblurSettings.minBlurRadius, 0.0f, 100.0f);
-                ImGui::SliderFloat("Max Blur Radius (pixels)", &m_ui.ReblurSettings.maxBlurRadius, 0.0f, 100.0f);
+                // Probabilistic lobe selection requires both prepasses; zero disables a pass.
+                NrdSliderFloat("Diffuse Prepass Blur Radius (pixels)", &settings.diffusePrepassBlurRadius, FLT_MIN, 75.0f);
+                NrdSliderFloat("Specular Prepass Blur Radius (pixels)", &settings.specularPrepassBlurRadius, FLT_MIN, 75.0f);
+                NrdSliderFloat("Min Blur Radius (pixels)", &settings.minBlurRadius, 0.0f, 60.0f, ImGuiSliderFlags_Logarithmic);
+                NrdSliderFloat("Max Blur Radius (pixels)", &settings.maxBlurRadius, 0.0f, 60.0f, ImGuiSliderFlags_Logarithmic);
 
-                ImGui::SliderFloat("Lobe Angle Fraction", &m_ui.ReblurSettings.lobeAngleFraction, 0.0f, 1.0f);
-                ImGui::SliderFloat("Roughness Fraction", &m_ui.ReblurSettings.roughnessFraction, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Accumulation Roughness Threshold", &m_ui.ReblurSettings.responsiveAccumulationSettings.roughnessThreshold, 0.0f, 1.0f);
-
-                //ImGui::SliderFloat("Stabilization Strength", &m_ui.ReblurSettings.stabilizationStrength, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Plane Distance Sensitivity", &m_ui.ReblurSettings.planeDistanceSensitivity, 0.0f, 1.0f);
-
-                // ImGui::Combo("Checkerboard Mode", (int*)&m_ui.ReblurSettings.checkerboardMode, "Off\0Black\0White\0\0");
-
-                // these are uint8_t and ImGUI takes a ptr to int32_t :(
-                int hitDistanceReconstructionMode = (int)m_ui.ReblurSettings.hitDistanceReconstructionMode;
-                ImGui::Combo("Hit Distance Reconstruction Mode", &hitDistanceReconstructionMode, "Off\0AREA_3X3\0AREA_5X5\0\0");
-                m_ui.ReblurSettings.hitDistanceReconstructionMode = (nrd::HitDistanceReconstructionMode)hitDistanceReconstructionMode;
-
-                ImGui::Checkbox("Enable Firefly Filter", &m_ui.ReblurSettings.enableAntiFirefly);
-
-                // ImGui::Checkbox("Enable Diffuse Material Test", &m_ui.ReblurSettings.enableMaterialTestForDiffuse);
-                // ImGui::Checkbox("Enable Specular Material Test", &m_ui.ReblurSettings.enableMaterialTestForSpecular);
+                ImGui::SliderFloat("Lobe Angle Fraction", &settings.lobeAngleFraction, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::SliderFloat("Roughness Fraction", &settings.roughnessFraction, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::SliderFloat("Accumulation Roughness Threshold", &settings.responsiveAccumulationSettings.roughnessThreshold, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::SliderFloat("Plane Distance Sensitivity", &settings.planeDistanceSensitivity, 0.0f, 1.0f, "%.4f", boundInput);
+                ImGui::TextUnformatted("Hit distance reconstruction: 3x3");
+                ImGui::Checkbox("Enable Firefly Filter", &settings.enableAntiFirefly);
             }
-            else // m_ui.NRDMethod == NrdConfig::DenoiserMethod::RELAX
+            else
             {
-                ImGui::SliderFloat("Diffuse Prepass Blur Radius", &m_ui.RelaxSettings.diffusePrepassBlurRadius, 0.0f, 100.0f);
-                ImGui::SliderFloat("Specular Prepass Blur Radius", &m_ui.RelaxSettings.specularPrepassBlurRadius, 0.0f, 100.0f);
+                nrd::RelaxSettings& settings = m_ui.RelaxSettings;
+                NrdSliderFloat("Diffuse Prepass Blur Radius (pixels)", &settings.diffusePrepassBlurRadius, FLT_MIN, 75.0f);
+                NrdSliderFloat("Specular Prepass Blur Radius (pixels)", &settings.specularPrepassBlurRadius, FLT_MIN, 75.0f);
 
-                ImGui::SliderInt("Diffuse Max Accumulated Frames", (int*)&m_ui.RelaxSettings.diffuseMaxAccumulatedFrameNum, 0, nrd::RELAX_MAX_HISTORY_FRAME_NUM);
-                ImGui::SliderInt("Specular Max Accumulated Frames", (int*)&m_ui.RelaxSettings.specularMaxAccumulatedFrameNum, 0, nrd::RELAX_MAX_HISTORY_FRAME_NUM);
+                ImGui::Text("Accumulation target: 0.5 s (%u frames)", settings.diffuseMaxAccumulatedFrameNum);
+                ImGui::Text("Fast history: %u frames (main / 6)", settings.diffuseMaxFastAccumulatedFrameNum);
+                ImGui::Text("History fix: %u frames", settings.historyFixFrameNum);
 
-                ImGui::SliderInt("Diffuse Fast Max Accumulated Frames", (int*)&m_ui.RelaxSettings.diffuseMaxFastAccumulatedFrameNum, 0, 10);   // nrd::RELAX_MAX_HISTORY_FRAME_NUM
-                ImGui::SliderInt("Specular Fast Max Accumulated Frames", (int*)&m_ui.RelaxSettings.specularMaxFastAccumulatedFrameNum, 0, 10); // nrd::RELAX_MAX_HISTORY_FRAME_NUM
+                NrdSliderFloat("Diffuse Edge Stopping Sensitivity", &settings.diffusePhiLuminance, 0.0f, 10.0f);
+                NrdSliderFloat("Specular Edge Stopping Sensitivity", &settings.specularPhiLuminance, 0.0f, 10.0f);
+                ImGui::SliderFloat("Lobe Angle Fraction", &settings.lobeAngleFraction, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::SliderFloat("Roughness Fraction", &settings.roughnessFraction, 0.0f, 1.0f, "%.3f", boundInput);
+                NrdSliderFloat("Specular Variance Boost", &settings.specularVarianceBoost, 0.0f, 8.0f);
+                NrdSliderFloat("Specular Lobe Angle Slack (degrees)", &settings.specularLobeAngleSlack, 0.0f, 10.0f);
+                NrdSliderFloat("Normal Edge Stopping Power", &settings.historyFixEdgeStoppingNormalPower, FLT_MIN, 128.0f);
+                ImGui::SliderFloat("Clamping Color Box Sigma Scale", &settings.fastHistoryClampingSigmaScale, 1.0f, 3.0f, "%.3f", boundInput);
 
-                ImGui::SliderInt("History Fix Frame Num", (int*)&m_ui.RelaxSettings.historyFixFrameNum, 0, nrd::RELAX_MAX_HISTORY_FRAME_NUM);
+                const uint32_t minimumFrame = 0;
+                const uint32_t maximumFrame = 10;
+                ImGui::SliderScalar("Spatial Variance Estimation History Threshold", ImGuiDataType_U32, &settings.spatialVarianceEstimationHistoryThreshold, &minimumFrame, &maximumFrame, "%u");
+                ImGui::SliderInt("Number of Atrous iterations", (int*)&settings.atrousIterationNum, 2, 8, "%d", boundInput);
 
-                ImGui::SliderFloat("Diffuse Edge Stopping Sensitivity", &m_ui.RelaxSettings.diffusePhiLuminance, 0.0f, 10.0f);
-                ImGui::SliderFloat("Specular Edge Stopping Sensitivity", &m_ui.RelaxSettings.specularPhiLuminance, 0.0f, 10.0f);
+                ImGui::SliderFloat("Diffuse Min Luminance Weight", &settings.diffuseMinLuminanceWeight, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::SliderFloat("Specular Min Luminance Weight", &settings.specularMinLuminanceWeight, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::SliderFloat("Edge Stopping Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.4f", boundInput);
 
-                ImGui::SliderFloat("Lobe Angle Fraction", &m_ui.RelaxSettings.lobeAngleFraction, 0.0f, 1.0f);
-                ImGui::SliderFloat("Roughness Fraction", &m_ui.RelaxSettings.roughnessFraction, 0.0f, 1.0f);
+                NrdSliderFloat("Confidence: Relaxation Multiplier", &settings.confidenceDrivenRelaxationMultiplier, 0.0f, 1.0f);
+                NrdSliderFloat("Confidence: Luminance Edge Stopping Relaxation", &settings.confidenceDrivenLuminanceEdgeStoppingRelaxation, 0.0f, 1.0f);
+                NrdSliderFloat("Confidence: Normal Edge Stopping Relaxation", &settings.confidenceDrivenNormalEdgeStoppingRelaxation, 0.0f, 1.0f);
+                NrdSliderFloat("Luminance Edge Stopping Relaxation", &settings.luminanceEdgeStoppingRelaxation, 0.0f, 1.0f);
+                NrdSliderFloat("Normal Edge Stopping Relaxation", &settings.normalEdgeStoppingRelaxation, 0.0f, 1.0f);
+                NrdSliderFloat("Roughness Edge Stopping Relaxation", &settings.roughnessEdgeStoppingRelaxation, 0.0f, 1.0f);
 
-                ImGui::SliderFloat("Specular Variance Boost", &m_ui.RelaxSettings.specularVarianceBoost, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Specular Lobe Angle Slack", &m_ui.RelaxSettings.specularLobeAngleSlack, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Normal Edge Stopping Power", &m_ui.RelaxSettings.historyFixEdgeStoppingNormalPower, 0.0f, 30.0f);
-
-                ImGui::SliderFloat("Clamping Color Box Sigma Scale", &m_ui.RelaxSettings.fastHistoryClampingSigmaScale, 0.0f, 3.0f);
-
-                ImGui::SliderInt("Spatial Variance Estimation History Threshold", (int*)&m_ui.RelaxSettings.spatialVarianceEstimationHistoryThreshold, 0, nrd::RELAX_MAX_HISTORY_FRAME_NUM);
-
-                ImGui::SliderInt("Number of Atrous iterations", (int*)&m_ui.RelaxSettings.atrousIterationNum, 2, 8);
-
-                ImGui::SliderFloat("Diffuse Min Luminance Weight", &m_ui.RelaxSettings.diffuseMinLuminanceWeight, 0.0f, 1.0f);
-                ImGui::SliderFloat("Specular Min Luminance Weight", &m_ui.RelaxSettings.specularMinLuminanceWeight, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Edge Stopping Threshold", &m_ui.RelaxSettings.depthThreshold, 0.0f, 0.1f);
-
-                ImGui::SliderFloat("Confidence: Relaxation Multiplier", &m_ui.RelaxSettings.confidenceDrivenRelaxationMultiplier, 0.0f, 1.0f);
-                ImGui::SliderFloat("Confidence: Luminance Edge Stopping Relaxation", &m_ui.RelaxSettings.confidenceDrivenLuminanceEdgeStoppingRelaxation, 0.0f, 1.0f);
-                ImGui::SliderFloat("Confidence: Normal Edge Stopping Relaxation", &m_ui.RelaxSettings.confidenceDrivenNormalEdgeStoppingRelaxation, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Luminance Edge Stopping Relaxation", &m_ui.RelaxSettings.luminanceEdgeStoppingRelaxation, 0.0f, 1.0f);
-                ImGui::SliderFloat("Normal Edge Stopping Relaxation", &m_ui.RelaxSettings.normalEdgeStoppingRelaxation, 0.0f, 1.0f);
-
-                ImGui::SliderFloat("Roughness Edge Stopping Relaxation", &m_ui.RelaxSettings.roughnessEdgeStoppingRelaxation, 0.0f, 5.0f);
-
-                ImGui::SliderFloat("Antilag Acceleration Amount", &m_ui.RelaxSettings.antilagSettings.accelerationAmount, 0.0f, 1.0f);
-                ImGui::SliderFloat("Antilag Spatial Sigma Scale", &m_ui.RelaxSettings.antilagSettings.spatialSigmaScale, 0.0f, 5.0f);
-                ImGui::SliderFloat("Antilag Temporal Sigma Scale", &m_ui.RelaxSettings.antilagSettings.temporalSigmaScale, 0.0f, 5.0f);
-                ImGui::SliderFloat("Antilag Reset Amount", &m_ui.RelaxSettings.antilagSettings.resetAmount, 0.0f, 1.0f);
-
-                // ImGui::Combo("Checkerboard Mode", (int*)&m_ui.RelaxSettings.checkerboardMode, "Off\0Black\0White\0\0");
-
-                int hitDistanceReconstructionMode = (int)m_ui.RelaxSettings.hitDistanceReconstructionMode;  // these are uint8_t and ImGUI takes a ptr to int32_t :(
-                ImGui::Combo("Hit Distance Reconstruction Mode", &hitDistanceReconstructionMode, "Off\0AREA_3X3\0AREA_5X5\0\0");
-                m_ui.RelaxSettings.hitDistanceReconstructionMode = (nrd::HitDistanceReconstructionMode)hitDistanceReconstructionMode;
-
-                ImGui::Checkbox("Enable Firefly Filter", &m_ui.RelaxSettings.enableAntiFirefly);
-
-                ImGui::Checkbox("Roughness Edge Stopping", &m_ui.RelaxSettings.enableRoughnessEdgeStopping);
-
-                // ImGui::Checkbox("Enable Diffuse Material Test", &m_ui.RelaxSettings.enableMaterialTestForDiffuse);
-                // ImGui::Checkbox("Enable Specular Material Test", &m_ui.RelaxSettings.enableMaterialTestForSpecular);
+                ImGui::SliderFloat("Antilag Acceleration Amount", &settings.antilagSettings.accelerationAmount, 0.0f, 1.0f, "%.3f", boundInput);
+                NrdSliderFloat("Antilag Spatial Sigma Scale", &settings.antilagSettings.spatialSigmaScale, FLT_MIN, 10.0f);
+                NrdSliderFloat("Antilag Temporal Sigma Scale", &settings.antilagSettings.temporalSigmaScale, FLT_MIN, 10.0f);
+                ImGui::SliderFloat("Antilag Reset Amount", &settings.antilagSettings.resetAmount, 0.0f, 1.0f, "%.3f", boundInput);
+                ImGui::TextUnformatted("Hit distance reconstruction: 3x3");
+                ImGui::Checkbox("Enable Firefly Filter", &settings.enableAntiFirefly);
+                ImGui::Checkbox("Roughness Edge Stopping", &settings.enableRoughnessEdgeStopping);
             }
-
-            // Not really needed for now since we have reference codepath, but it could be used to debug some of the NRD codepaths so leaving in as a reminder
-            // ImGui::Checkbox("Reference Accumulation", &m_ui.NRDReferenceSettings.maxAccumulatedFrameNum);
         }
     }
 }

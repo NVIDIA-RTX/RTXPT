@@ -10,54 +10,57 @@
 
 #include "NrdConfig.h"
 
-namespace NrdConfig {
+#include <algorithm>
+#include <cmath>
 
-    nrd::RelaxSettings getDefaultRELAXSettings() {
-
-        nrd::RelaxSettings settings;
-        
-        settings.enableAntiFirefly = true;
-
-        settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::OFF;
-        // (pixels) - pre-accumulation spatial reuse pass blur radius (0 = disabled, must be used in case of probabilistic sampling) <- we're using probabilistic sampling
-        settings.diffusePrepassBlurRadius = 0.0f;
-        settings.specularPrepassBlurRadius = 0.0f;  // <- using prepass blur causes more issues than it solves
-
-        settings.atrousIterationNum = 5; // 5 is default; 4 gives better shadows but more boiling, 6 gives less boiling but loss in contact shadows
-
-        settings.lobeAngleFraction = 0.7f;
-        // settings.roughnessFraction = 0.3;
-
-        settings.specularLobeAngleSlack = 0.2f;         // good to hide noisy secondary bounces
-
-        settings.depthThreshold = 0.004f;
-
-        settings.diffuseMaxAccumulatedFrameNum = 25;
-        settings.specularMaxAccumulatedFrameNum = 40;
-
-        // aggressive anti-lag settings
-        settings.diffuseMaxFastAccumulatedFrameNum = 5;
-        settings.specularMaxFastAccumulatedFrameNum = 6;
-        settings.antilagSettings.accelerationAmount = 0.55f;
-        settings.antilagSettings.spatialSigmaScale = 2.5f;
-        settings.antilagSettings.temporalSigmaScale = 0.3f;
-        settings.antilagSettings.resetAmount = 0.5f;
-
-        return settings;
-    }
-
-    nrd::ReblurSettings getDefaultREBLURSettings() {
-
-        nrd::ReblurSettings settings;
-        settings.enableAntiFirefly = true;
-        settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_5X5;
-        settings.maxAccumulatedFrameNum = 50;
-
-        // reducing prepass blurs to reduce loss of sharp shadows
-        settings.diffusePrepassBlurRadius = 15.0f;
-        settings.specularPrepassBlurRadius = 40.0f;
-
-        return settings;
-    }
+static inline uint32_t GetNrdHistoryLength(float smoothedRenderedFPS, uint32_t maximum)
+{
+    constexpr float accumulationTime = 0.5f;
+    const float fps = std::isfinite(smoothedRenderedFPS) ? std::max(0.0f, smoothedRenderedFPS) : 60.0f;
+    // Bound the conversion before casting to integer; this is NRD's history limit, not a tuning cap.
+    const float boundedFPS = std::min(fps, float(maximum) / accumulationTime);
+    return std::max(nrd::GetMaxAccumulatedFrameNum(accumulationTime, boundedFPS), 1u);
 }
 
+static inline uint32_t GetNrdHistoryFixLength(uint32_t fastHistory, uint32_t defaultFrameNum)
+{
+    return fastHistory > 0 ? std::min(defaultFrameNum, fastHistory - 1) : 0u;
+}
+
+namespace NrdConfig {
+
+    nrd::RelaxSettings getDefaultRELAXSettings()
+    {
+        nrd::RelaxSettings settings = {};
+        settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+        return settings;
+    }
+
+    nrd::ReblurSettings getDefaultREBLURSettings()
+    {
+        nrd::ReblurSettings settings = {};
+        settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+        return settings;
+    }
+
+    void UpdateSettings(nrd::ReblurSettings& reblur, nrd::RelaxSettings& relax, float smoothedRenderedFPS)
+    {
+        // The path tracer uses full-grid probabilistic selection at the primary/PSR surface.
+        reblur.checkerboardMode = nrd::CheckerboardMode::OFF;
+        reblur.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+        reblur.usePrepassOnlyForSpecularMotionEstimation = false;
+        relax.checkerboardMode = nrd::CheckerboardMode::OFF;
+        relax.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+
+        reblur.maxAccumulatedFrameNum = GetNrdHistoryLength(smoothedRenderedFPS, nrd::REBLUR_MAX_HISTORY_FRAME_NUM);
+        reblur.maxFastAccumulatedFrameNum = reblur.maxAccumulatedFrameNum / 6;
+        reblur.maxStabilizedFrameNum = reblur.maxAccumulatedFrameNum;
+        reblur.historyFixFrameNum = GetNrdHistoryFixLength(reblur.maxFastAccumulatedFrameNum, nrd::ReblurSettings{}.historyFixFrameNum);
+
+        relax.diffuseMaxAccumulatedFrameNum = GetNrdHistoryLength(smoothedRenderedFPS, nrd::RELAX_MAX_HISTORY_FRAME_NUM);
+        relax.specularMaxAccumulatedFrameNum = relax.diffuseMaxAccumulatedFrameNum;
+        relax.diffuseMaxFastAccumulatedFrameNum = relax.diffuseMaxAccumulatedFrameNum / 6;
+        relax.specularMaxFastAccumulatedFrameNum = relax.specularMaxAccumulatedFrameNum / 6;
+        relax.historyFixFrameNum = GetNrdHistoryFixLength(relax.diffuseMaxFastAccumulatedFrameNum, nrd::RelaxSettings{}.historyFixFrameNum);
+    }
+}

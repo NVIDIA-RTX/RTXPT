@@ -117,6 +117,7 @@ namespace PathTracer
         }
 
 #if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+        // Legacy shared guide for DLSS-RR. NRD uses per-layer first-bounce distances without this roughness cutoff.
         static const float          kSpecularRoughnessThresholdForHitT     = 0.35f;
         const bool isDiffuseForSpecHitT = bs.isLobe(LobeType::DiffuseReflection) || bs.isLobe(LobeType::DiffuseTransmission) || roughness > kSpecularRoughnessThresholdForHitT;
         if (onDominantDenoisingLayer && !isDiffuseForSpecHitT)
@@ -193,6 +194,18 @@ namespace PathTracer
                 preGeneratedSamples = UniformSampleSequenceGenerator::Generate( ActiveBSDF::cRandomNumberCountForSampling, sgBase, SampleGeneratorEffectSeed::ScatterBSDF );
         }
 
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+        if (bsdf.nrdLobeSelection)
+        {
+            uint2 pixelPos = path.GetPixelPos();
+            uint2 lowBits = pixelPos & 1;
+            uint2 highBits = (pixelPos >> 1) & 1;
+            uint bayerValue = 4 * (2 * (lowBits.x ^ lowBits.y) + lowBits.y) + 2 * (highBits.x ^ highBits.y) + highBits.y;
+            float temporalJitter = frac(float(Bridge::getSampleIndex()) * 0.377964473);
+            preGeneratedSamples.z = frac((float(bayerValue) + 0.5) / 16.0 + temporalJitter);
+        }
+#endif
+
         BSDFSample result;
         bool valid = bsdf.sample(shadingData, preGeneratedSamples, result, kUseBSDFSampling);
 
@@ -252,6 +265,10 @@ namespace PathTracer
         // Reject false hits in nested dielectrics but also updates 'outside index of refraction' and dependent data
         bool rejectedFalseHit = !HandleNestedDielectrics(surface, path, workingContext);
 
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+        Bridge::AccumulateNrdHitDistance(path, rayTCurrent, !rejectedFalseHit, workingContext.DenoisingLayers);
+#endif
+
 #if PATH_TRACER_MODE==PT_DENOISING_LAYERS_BUILD && ENABLE_DEBUG_DELTA_TREE_VIZUALISATION
         if (path.hasFlag(PathFlags::deltaTreeExplorer))
         {
@@ -272,6 +289,9 @@ namespace PathTracer
         const ShadingData shadingData    = surface.shadingData;
         // bsdf is left non-const so SharcPrepareHit below can clamp its roughness on the SHaRC update pass
         ActiveBSDF bsdf   = surface.bsdf;
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+        bsdf.nrdLobeSelection = workingContext.PtConsts.useNRD != 0 && path.hasFlag(PathFlags::denoisingLayerOnPlane);
+#endif
 
 #if ENABLE_DEBUG_VIZUALISATIONS && ENABLE_DEBUG_LINES_VIZ && PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
         if (debugPath)

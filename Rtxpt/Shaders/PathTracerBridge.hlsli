@@ -39,6 +39,11 @@ namespace Bridge
     // Gets primary camera ray for given pixel position; Note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
     static Ray computeCameraRay(const uint2 pixelPos);
 
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+    // Supply the NRD collector with the same layer view depth and normalization parameters as input preparation.
+    static void AccumulateNrdHitDistance(inout PathState path, const float rayTCurrent, const bool acceptedHit, const DenoisingLayersContext denoisingLayers);
+#endif
+
     /** Helper to create a texture sampler instance.
     The method for computing texture level-of-detail depends on the configuration.
     \param[in] path Path state.

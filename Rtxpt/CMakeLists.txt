@@ -125,6 +125,9 @@ set(DEST_DIR_RTXDI_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Sour
 # shader files - SHaRC shader dependencies
 set(SOURCE_DIR_SHARC_SHADERS "${PROJECT_SOURCE_DIR}/External/SHARC/include")
 set(DEST_DIR_SHARC_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Source/External/SHARC/include")
+# NRD's public material helpers are also used by dynamically compiled path-tracing shaders.
+set(SOURCE_DIR_NRD_SHADERS "${PROJECT_SOURCE_DIR}/External/Nrd/Shaders")
+set(DEST_DIR_NRD_SHADERS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ShaderDynamic/Source/External/Nrd/Shaders")
 #message("SourceDir=${SOURCE_DIR_RTXPT_SHADERS}, DestDir=${DEST_DIR_RTXPT_SHADERS}")
 add_custom_target(ShaderDynamicAssets_CopyAlways
 #    OUTPUT "${DYNSH_COPY3_MARKER}" <- let this run every build; it will only update changed
@@ -138,6 +141,8 @@ add_custom_target(ShaderDynamicAssets_CopyAlways
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${SOURCE_DIR_RTXDI_SHADERS} ${DEST_DIR_RTXDI_SHADERS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_SHARC_SHADERS}
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${SOURCE_DIR_SHARC_SHADERS} ${DEST_DIR_SHARC_SHADERS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR_NRD_SHADERS}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SOURCE_DIR_NRD_SHADERS}/NRD.hlsli ${SOURCE_DIR_NRD_SHADERS}/NRDConfig.hlsli ${DEST_DIR_NRD_SHADERS}
 #    COMMAND ${CMAKE_COMMAND} -E touch "${DYNSH_COPY3_MARKER}" <- let this run every build; it will only update changed
     COMMENT "Copying shader sources"
 )

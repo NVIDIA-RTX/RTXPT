@@ -26,5 +26,9 @@ namespace NrdConfig {
 
     nrd::ReblurSettings getDefaultREBLURSettings();
 
+    // Apply time-based histories (including history fix) and probabilistic-sampling requirements; preserve other tuning.
+    // The supplied FPS must describe rendered frames, excluding frame generation.
+    void UpdateSettings(nrd::ReblurSettings& reblur, nrd::RelaxSettings& relax, float smoothedRenderedFPS);
+
 
 }

@@ -798,6 +798,23 @@ struct FalcorBSDF // : IBxDF
         __init(shadingData.shadingFlags, shadingData.V, shadingData.N, data, shadingData.GetEta());
     }
 
+    // Keep both non-deterministic lobe groups represented in NRD's 3x3 reconstruction footprint.
+    void ClampLobeSelectionForNrd()
+    {
+        float diffuseProbability = pDiffuseReflection + pDiffuseTransmission;
+        float specularProbability = pSpecularReflection + pSpecularReflectionTransmission;
+        if (diffuseProbability > 0.0 && specularProbability > 0.0)
+        {
+            float boundedDiffuseProbability = clamp(diffuseProbability, 0.25, 0.75);
+            float diffuseScale = boundedDiffuseProbability / diffuseProbability;
+            float specularScale = (1.0 - boundedDiffuseProbability) / specularProbability;
+            pDiffuseReflection *= diffuseScale;
+            pDiffuseTransmission *= diffuseScale;
+            pSpecularReflection *= specularScale;
+            pSpecularReflectionTransmission *= specularScale;
+        }
+    }
+
     static FalcorBSDF make( const ShadingData shadingData, const StandardBSDFData data )     { FalcorBSDF ret; ret.__init(shadingData, data); return ret; }
 
     static FalcorBSDF make(

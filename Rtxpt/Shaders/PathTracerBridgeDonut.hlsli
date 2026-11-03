@@ -340,6 +340,20 @@ void Bridge::ExportSpecHitTStop(const PathState path)
 //        DebugPixel( pixelPos.xy, float4( saturate(specHitT/10.0).xxx, 1 ) );
 }
 
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+void Bridge::AccumulateNrdHitDistance(inout PathState path, const float rayTCurrent, const bool acceptedHit, const DenoisingLayersContext denoisingLayers)
+{
+    if (!path.hasFlag(PathFlags::collectNrdHitDistance))
+        return;
+
+    DenoisingLayer layer = denoisingLayers.LoadDenoisingLayer(path.GetPixelPos(), path.getDenoisingLayerIndex());
+    const Ray cameraRay = Bridge::computeCameraRay(path.GetPixelPos());
+    float3 virtualWorldPos = cameraRay.origin + cameraRay.dir * layer.SceneLength;
+    float viewZ = mul(float4(virtualWorldPos, 1), g_Const.view.matWorldToView).z;
+    denoisingLayers.AccumulateNrdHitDistance(path, rayTCurrent, acceptedHit, viewZ, g_Const.denoisingHitParamConsts);
+}
+#endif
+
 PathTracer::WorkingContext Bridge::GetWorkingContext()
 {
     PathTracer::WorkingContext ret;
