@@ -28,14 +28,19 @@ static inline uint32_t GetNrdHistoryFixLength(uint32_t fastHistory, uint32_t def
 
 namespace NrdConfig {
 
-    // - 3x3 reconstruction mode because the path tracer uses full-grid probabilistic selection at the primary/PSR surface
-    // - anti firefly because the path tracer may produce them
+    // - 3x3 reconstruction mode because the path tracer uses the probabilistic lobe selection at the primary/PSR surface
+    // - anti-firefly because the path tracer may produce them
+    // - a bit of diffuse pre-pass is needed to better compensate the probabilistic lobe selection and low-frequency boiling in the input (may be 0)
+    // - specular pre-pass is needed to additionally estimate proper hitT for specular tracking (can't be 0 or use "usePrepassOnlyForSpecularMotionEstimation")
+    // TODO: custom antilag settings? Better use "history confidence"
 
     nrd::RelaxSettings getDefaultRELAXSettings()
     {
         nrd::RelaxSettings settings = {};
         settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
         settings.enableAntiFirefly = true;
+        settings.diffusePrepassBlurRadius = 10.0f;
+        settings.specularPrepassBlurRadius = 25.0f;
 
         return settings;
     }
@@ -45,6 +50,8 @@ namespace NrdConfig {
         nrd::ReblurSettings settings = {};
         settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
         settings.enableAntiFirefly = true;
+        settings.diffusePrepassBlurRadius = 10.0f;
+        settings.specularPrepassBlurRadius = 25.0f;
 
         return settings;
     }

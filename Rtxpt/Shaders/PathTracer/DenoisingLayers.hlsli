@@ -68,6 +68,11 @@ struct DenoisingLayer
     uint    NrdDiffuseHitDistanceCount;     // Skipped diffuse lobes and zero distances do not contribute
     float   NrdHitDistanceCurrent;          // Current diffuse or specular ray length across rejected dielectric intersections
     float   NrdSpecHitDistance;             // NRD's minimum-nonzero reduction across first-bounce specular samples
+    float   NrdDirectDiffuseHitDistanceSum; // Direct-light distances, without PDF or throughput weighting
+    float   NrdDirectDiffuseNormHitDistanceSum; // Normalize each direct distance before reduction for REBLUR
+    uint    NrdDirectDiffuseHitDistanceCount;
+    float   NrdDirectDiffuseWeight;         // Includes shadowed samples so occluder distances survive in shadows
+    float   NrdDirectDiffuseVisibleWeight;  // Direct diffuse radiance actually included in the noisy signal
 
 #if !defined(__cplusplus) // shader only!
     bool            IsEmpty()                   { return (VertexIndexAndRoughness >> 16) == 0; }
@@ -77,6 +82,18 @@ struct DenoisingLayer
     float           GetNrdDiffuseHitDistance()  { return NrdDiffuseHitDistanceCount == 0 ? 0.0 : NrdDiffuseHitDistanceSum / float(NrdDiffuseHitDistanceCount); }
     float           GetNrdDiffuseNormHitDistance() { return NrdDiffuseHitDistanceCount == 0 ? 0.0 : NrdDiffuseNormHitDistanceSum / float(NrdDiffuseHitDistanceCount); }
     float           GetNrdSpecHitDistance()     { float hitDistance = NrdSpecHitDistance; NRD_FrontEnd_SpecHitDistAveraging_End(hitDistance); return hitDistance; }
+    float           GetNrdDirectDiffuseHitDistance() { return NrdDirectDiffuseHitDistanceCount > 0 ? NrdDirectDiffuseHitDistanceSum / float(NrdDirectDiffuseHitDistanceCount) : 0.0; }
+    float           GetNrdDirectDiffuseNormHitDistance() { return NrdDirectDiffuseHitDistanceCount > 0 ? NrdDirectDiffuseNormHitDistanceSum / float(NrdDirectDiffuseHitDistanceCount) : 0.0; }
+    float           GetNrdDirectDiffuseMix(float noisyDiffuseWeight)
+    {
+        // Keep the zero marker when the diffuse lobe was skipped and no direct diffuse radiance was visible.
+        if (NrdDiffuseHitDistanceCount == 0 && noisyDiffuseWeight <= 0.0)
+            return 0.0;
+        float indirectWeight = max(noisyDiffuseWeight - NrdDirectDiffuseVisibleWeight, 0.0);
+        // With a distant light, the indirect ray may miss and normalize to 1. A 0.5 cap then
+        // leaves the mixed distance large enough to blur across even a nearby shadow blocker.
+        return NrdDirectDiffuseWeight / (NrdDirectDiffuseWeight + indirectWeight + 1e-6);
+    }
 
     float3          GetNoisyRadiance()          { return Fp16ToFp32(PackedNoisyRadianceAndSpecAvg).xyz; }
     float4          GetNoisyRadianceAndSpecRA() { return Fp16ToFp32(PackedNoisyRadianceAndSpecAvg).xyzw; }
@@ -281,6 +298,21 @@ struct DenoisingLayersContext
             DenoisingLayersUAV[address].NrdSpecHitDistance = accumulatedHitDistance;
         }
         path.setFlag(PathFlags::collectNrdHitDistance, false);
+    }
+
+    void AccumulateNrdDirectDiffuseHitDistance(const PathState path, float hitDistance, float diffuseWeight, bool visible, float viewZ, const float3 hitDistanceParams)
+    {
+        if (hitDistance <= 0.0 || diffuseWeight <= 0.0)
+            return;
+
+        uint address = PixelToAddress(path.GetPixelPos(), path.getDenoisingLayerIndex());
+        hitDistance = min(hitDistance, kMaxRayTravel);
+        DenoisingLayersUAV[address].NrdDirectDiffuseHitDistanceSum += hitDistance;
+        DenoisingLayersUAV[address].NrdDirectDiffuseNormHitDistanceSum += REBLUR_FrontEnd_GetNormHitDist(hitDistance, viewZ, hitDistanceParams, 1.0);
+        DenoisingLayersUAV[address].NrdDirectDiffuseHitDistanceCount += 1;
+        DenoisingLayersUAV[address].NrdDirectDiffuseWeight += diffuseWeight;
+        if (visible)
+            DenoisingLayersUAV[address].NrdDirectDiffuseVisibleWeight += diffuseWeight;
     }
 
     void CommitDenoiserRadiance(inout PathState path)

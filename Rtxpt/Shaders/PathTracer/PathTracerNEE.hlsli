@@ -132,7 +132,11 @@ namespace PathTracer
             /*candidateSample.Pdf =*/ const float pdf = lightSample.SolidAnglePdf * selectionPdf;
             candidateSample.Li = pdf > 0.f ? (lightSample.Radiance / pdf) : float3(0,0,0);
             candidateSample.SolidAnglePdf = lightSample.SolidAnglePdf;
-            float3 surfToLight = lightSample.Position-shadingData.posW;
+            // Directional samples store a direction instead of a world-space position.
+            float3 lightPosition = lightSample.Position;
+            if (PolymorphicLight::DecodeType(packedLightInfo) == PolymorphicLightType::kDirectional)
+                lightPosition = shadingData.posW + normalize(lightPosition) * DISTANT_LIGHT_DISTANCE;
+            float3 surfToLight = lightPosition-shadingData.posW;
             candidateSample.Distance = length(surfToLight);
             candidateSample.Direction = surfToLight / max( candidateSample.Distance, 1e-7 );
             candidateSample.LightIndex = lightIndex;
@@ -188,17 +192,24 @@ namespace PathTracer
         return ret;
     }
 
-    // This will ray cast and, if light visible, accumulate radiance properly, including doing weighted sum for 
+    // Trace visibility, accumulate visible radiance, and retain direct-light distances for NRD's diffuse guide.
     void ProcessLightSample(inout NEEResult accum, LightSample lightSample, uint candidateSampleCount, uint fullSamples, uint localCount, uint globalCount,
                                 const ShadingData shadingData, const ActiveBSDF bsdf, const PathState preScatterPath, LightSampler lightSampler,
                                 inout UniformSampleSequenceGenerator sampleGenerator, const WorkingContext workingContext)
     {
         bool visible = false;
+        float visibilityHitDistance = 0.0;
+
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+        const bool collectNrdDirectHitDistance = workingContext.PtConsts.useNRD != 0 && preScatterPath.hasFlag(PathFlags::denoisingLayerOnPlane) && lightSample.Valid();
+#else
+        const bool collectNrdDirectHitDistance = false;
+#endif
 
         /*[branch]*/ if (lightSample.Valid())   // if sample's bad, skip; we tried casting the ray anyway but ignoring the results - didn't yield better perf
         {
             RayDesc ray = ComputeVisibilityRay(lightSample, shadingData);
-            visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), preScatterPath.GetPixelPos(), workingContext.Debug);
+            visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone, preScatterPath.getVertexIndex(), preScatterPath.GetPixelPos(), workingContext.Debug, visibilityHitDistance);
         }
 
         // if( workingContext.Debug.IsDebugPixel() )
@@ -208,7 +219,7 @@ namespace PathTracer
         SER_REORDER( visible?(1):(0), 1 );
 #endif
 
-        /*[branch]*/ if (visible)
+        /*[branch]*/ if (visible || collectNrdDirectHitDistance)
         {
             // add compute grazing angle fadeout
             float fadeOut = 1.0;
@@ -245,14 +256,15 @@ namespace PathTracer
             float radianceAvg = Average(radiance);
             float luminance = Luminance(radiance);
             float specAvg = bsdfThp.w * Average(lightSample.Li);
+            float fireflyDampening = 1.0;
 
 #if RTXPT_FIREFLY_FILTER && PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD  // firefly filter has cost - only enable if denoiser REALLY requires it
             if( workingContext.PtConsts.fireflyFilterThreshold != 0 )
             {
                 const float pdf = lightSample.SelectionPdf * lightSample.SolidAnglePdf;
                 float neeFireflyFilterK = ComputeNewScatterFireflyFilterK(preScatterPath.GetFireflyFilterK(), pdf, 1.0);
-                const float ffDampening = FireflyFilterShort(radianceAvg, workingContext.PtConsts.fireflyFilterThreshold, neeFireflyFilterK);
-                radiance *= ffDampening;
+                fireflyDampening = FireflyFilterShort(radianceAvg, workingContext.PtConsts.fireflyFilterThreshold, neeFireflyFilterK);
+                radiance *= fireflyDampening;
                 // specAvg *= ffDampening; // KNOWN ERROR, intentionally not fixed: without it filtered NEE samples skew the diffuse/specular
                 //                         // split toward specular, but specAvg will be removed in the future
                 // luminance *= ffDampening; // luminance used for NEE feedback weight later - testing suggests it's same or better if not firefly-filtered
@@ -265,6 +277,19 @@ namespace PathTracer
             radiance *= preScatterThp;
             specAvg *= preScatterPathThpAvg;
             luminance *= preScatterPathThpAvg;
+
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+            if (collectNrdDirectHitDistance)
+            {
+                // Use the potential direct contribution even behind an occluder, where visible radiance is zero.
+                // The distance itself remains geometric and is never divided by a PDF or throughput.
+                float diffuseWeight = max(Average(radiance) - specAvg * fireflyDampening, 0.0) * Bridge::getNoisyRadianceAttenuation();
+                float directHitDistance = visible ? lightSample.Distance : visibilityHitDistance;
+                Bridge::AccumulateNrdDirectDiffuseHitDistance(preScatterPath, directHitDistance, diffuseWeight, visible, workingContext.DenoisingLayers);
+            }
+#endif
+            if (!visible)
+                return;
 
             // accumulate radiances
             accum.AccumulateRadiance( radiance, specAvg );

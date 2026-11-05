@@ -181,6 +181,10 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             
             float3 denoiserDiffRadiance = sp.GetNoisyDiffRadiance();
             float3 denoiserSpecRadiance = sp.GetNoisySpecRadiance();
+            // Mix direct-light geometry into the diffuse guide according to its potential contribution.
+            // Shadowed samples still carry occluder distance; direct-dominated pixels need its
+            // distance even when the indirect ray escapes to the environment.
+            float directDiffuseHitDistanceMix = sp.GetNrdDirectDiffuseMix(Average(denoiserDiffRadiance));
 
             // demodulate
             denoiserDiffRadiance.xyz /= diffBSDFEstimate.xyz;
@@ -196,13 +200,13 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             NRDRadianceClamp( denoiserSpecRadiance, g_Const.ptConsts.denoiserRadianceClampK*16 );
 
             float specHitT = sp.GetNrdSpecHitDistance();
-            float diffHitT = sp.GetNrdDiffuseHitDistance();
+            float diffHitT = lerp(sp.GetNrdDiffuseHitDistance(), sp.GetNrdDirectDiffuseHitDistance(), directDiffuseHitDistanceMix);
     #if USE_RELAX
             u_DenoiserDiffRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserDiffRadiance.xyz, diffHitT, true );
             u_DenoiserSpecRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserSpecRadiance.xyz, specHitT, true );
     #else
             float3 hitParams = g_Const.denoisingHitParamConsts;
-            float diffNormHitDistance = sp.GetNrdDiffuseNormHitDistance();
+            float diffNormHitDistance = lerp(sp.GetNrdDiffuseNormHitDistance(), sp.GetNrdDirectDiffuseNormHitDistance(), directDiffuseHitDistanceMix);
             u_DenoiserDiffRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserDiffRadiance.xyz, diffNormHitDistance, true );
             float normalizationRoughness = NRD_FrontEnd_UnpackNormalAndRoughness(u_DenoiserNormalRoughness[pixelPos]).w;
             float specNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( specHitT, virtualViewspaceZ, hitParams, normalizationRoughness);
