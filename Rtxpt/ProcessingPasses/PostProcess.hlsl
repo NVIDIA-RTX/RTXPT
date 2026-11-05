@@ -17,12 +17,8 @@
 
 #define VIEWZ_SKY_MARKER        FLT_MAX             // for 16bit use HLF_MAX but make sure it's bigger than commonSettings.denoisingRange in NRD!
 
-// Per-denoiser reflectance floor. This used to be a single clamp applied when the denoising layer was written
-// (DenoisingLayers.hlsli), which forced both denoisers to share one value; the estimates are now stored unfloored and each
-// denoiser applies its own - see DLSSRR_MIN_ALBEDO in DenoisingGuidesBaker.hlsl for the DLSS-RR side.
-// NRD_MIN_REFLECTANCE guards the demodulate (radiance /= estimate) / re-modulate (radiance *= estimate) round trip. Both
-// sides MUST use the identical value or the pair stops cancelling and energy is lost on dark surfaces.
-#define NRD_MIN_REFLECTANCE     0.04
+// NRD factors are computed with NRD_MaterialFactors at guide creation and stored separately
+// from the BSDF estimates consumed by DLSS-RR. Preparation and composition use the same stored values.
 
 #if defined(DENOISING_LAYERS_DEBUG_VIZ)
 
@@ -141,12 +137,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         {
             hasSurface = true;
             float3 diffBSDFEstimate, specBSDFEstimate;
-            UnpackTwoFp32ToFp16(sp.DenoiserPackedBSDFEstimate, diffBSDFEstimate, specBSDFEstimate);
-            //diffBSDFEstimate = 1.xxx; specBSDFEstimate = 1.xxx;
-
-            // NRD reflectance floor - must match the re-modulate site in the resolve pass below, see NRD_MIN_REFLECTANCE
-            diffBSDFEstimate = max( diffBSDFEstimate, NRD_MIN_REFLECTANCE.xxx );
-            specBSDFEstimate = max( specBSDFEstimate, NRD_MIN_REFLECTANCE.xxx );
+            UnpackTwoFp32ToFp16(sp.NrdPackedMaterialFactors, diffBSDFEstimate, specBSDFEstimate);
 
             float3 virtualWorldPos = cameraRay.origin + cameraRay.dir * sp.SceneLength;
             float4 viewPos = mul(float4(/*bridgedData.shadingData.posW*/virtualWorldPos, 1), g_Const.view.matWorldToView);
@@ -164,8 +155,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             u_DenoiserViewspaceZ[pixelPos]          = virtualViewspaceZ;
             u_DenoiserMotionVectors[pixelPos]       = float4(motionVectors, 0);
 
-            const float kMinRoughness = 0.2;
-            float finalRoughness = max( kMinRoughness, sp.GetRoughness() );
+            const float finalRoughness = sp.GetRoughness();
 
             float disocclusionRelax = 0.0;
             float aliasingDampen = 0.0;
@@ -189,10 +179,12 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             // adjust for thp and map to [0,1]
             u_CombinedHistoryClampRelax[pixelPos] = saturate(u_CombinedHistoryClampRelax[pixelPos] + disocclusionRelax * saturate(Luminance(thp)) );
             
-            finalRoughness = saturate( finalRoughness + disocclusionRelax );
-            
             float3 denoiserDiffRadiance = sp.GetNoisyDiffRadiance();
             float3 denoiserSpecRadiance = sp.GetNoisySpecRadiance();
+            // Mix direct-light geometry into the diffuse guide according to its potential contribution.
+            // Shadowed samples still carry occluder distance; direct-dominated pixels need its
+            // distance even when the indirect ray escapes to the environment.
+            float directDiffuseHitDistanceMix = sp.GetNrdDirectDiffuseMix(Average(denoiserDiffRadiance));
 
             // demodulate
             denoiserDiffRadiance.xyz /= diffBSDFEstimate.xyz;
@@ -207,25 +199,17 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
             NRDRadianceClamp( denoiserDiffRadiance, g_Const.ptConsts.denoiserRadianceClampK*16 );
             NRDRadianceClamp( denoiserSpecRadiance, g_Const.ptConsts.denoiserRadianceClampK*16 );
 
-#if 1 // new specHitT
-            float specHitT = 0;
-            uint dominantDenoisingLayerIndex = denoisingLayers.LoadDominantIndex(pixelPos);
-            if (dominantDenoisingLayerIndex == denoisingLayerIndex)
-            {
-                specHitT = u_SpecularHitT[pixelPos];
-                // DebugPixel( pixelPos, float4( specHitT / 100.0, 1 ) );
-            }
-#endif
-
-
+            float specHitT = sp.GetNrdSpecHitDistance();
+            float diffHitT = lerp(sp.GetNrdDiffuseHitDistance(), sp.GetNrdDirectDiffuseHitDistance(), directDiffuseHitDistanceMix);
     #if USE_RELAX
-            u_DenoiserDiffRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserDiffRadiance.xyz, 0, true );
+            u_DenoiserDiffRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserDiffRadiance.xyz, diffHitT, true );
             u_DenoiserSpecRadianceHitDist[pixelPos] = RELAX_FrontEnd_PackRadianceAndHitDist( denoiserSpecRadiance.xyz, specHitT, true );
     #else
             float3 hitParams = g_Const.denoisingHitParamConsts;
-            float diffNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( 0, virtualViewspaceZ, hitParams, 1);
-            u_DenoiserDiffRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserDiffRadiance.xyz, /*diffNormHitDistance*/0, true );
-            float specNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( specHitT, virtualViewspaceZ, hitParams, sp.GetRoughness());
+            float diffNormHitDistance = lerp(sp.GetNrdDiffuseNormHitDistance(), sp.GetNrdDirectDiffuseNormHitDistance(), directDiffuseHitDistanceMix);
+            u_DenoiserDiffRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserDiffRadiance.xyz, diffNormHitDistance, true );
+            float normalizationRoughness = NRD_FrontEnd_UnpackNormalAndRoughness(u_DenoiserNormalRoughness[pixelPos]).w;
+            float specNormHitDistance = REBLUR_FrontEnd_GetNormHitDist( specHitT, virtualViewspaceZ, hitParams, normalizationRoughness);
             u_DenoiserSpecRadianceHitDist[pixelPos] = REBLUR_FrontEnd_PackRadianceAndNormHitDist( denoiserSpecRadiance.xyz, specNormHitDistance, true );
     #endif
         }
@@ -293,12 +277,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     if (hasSurface)
     {
         float3 diffBSDFEstimate, specBSDFEstimate;
-        UnpackTwoFp32ToFp16(t_DenoisingLayersBuffer[spAddress].DenoiserPackedBSDFEstimate, diffBSDFEstimate, specBSDFEstimate);
-        //diffBSDFEstimate = 1.xxx; specBSDFEstimate = 1.xxx;
-
-        // Re-modulate side of the NRD demodulation round trip - must use exactly the same floor as the demodulate above
-        diffBSDFEstimate = max( diffBSDFEstimate, NRD_MIN_REFLECTANCE.xxx );
-        specBSDFEstimate = max( specBSDFEstimate, NRD_MIN_REFLECTANCE.xxx );
+        UnpackTwoFp32ToFp16(t_DenoisingLayersBuffer[spAddress].NrdPackedMaterialFactors, diffBSDFEstimate, specBSDFEstimate);
 
         relaxedDisocclusion = t_DenoiserDisocclusionThresholdMix[pixelPos];
     #if 1 // classic

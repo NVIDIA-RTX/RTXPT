@@ -36,19 +36,19 @@ public:
     bool Initialize(uint32_t width, uint32_t height, donut::engine::ShaderFactory& shaderFactory);
     bool IsAvailable() const;
 
-    void RunDenoiserPasses(
+    bool RunDenoiserPasses(
         nvrhi::ICommandList* commandList,
         const RenderTargets& renderTargets,
         int pass,
         const donut::engine::PlanarView& view, 
         const donut::engine::PlanarView& viewPrev,
         uint32_t frameIndex,
-        float disocclusionThreshold,
         float disocclusionThresholdAlternate,
         bool useDisocclusionThresholdAlternateMix,
         float timeDeltaBetweenFrames, // < 0 to track internally in NRD
         bool enableValidation,
         bool resetHistory,
+        float splitScreen,
         const void* methodSettings);
 
     const nrd::Denoiser GetDenoiser() const { return m_denoiser; }

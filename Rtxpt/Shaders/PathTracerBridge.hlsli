@@ -39,6 +39,12 @@ namespace Bridge
     // Gets primary camera ray for given pixel position; Note: all realtime mode subSamples currently share same camera ray at subSampleIndex == 0 (otherwise denoising guidance buffers would be noisy)
     static Ray computeCameraRay(const uint2 pixelPos);
 
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+    // Supply the NRD collector with the same layer view depth and normalization parameters as input preparation.
+    static void AccumulateNrdHitDistance(inout PathState path, const float rayTCurrent, const bool acceptedHit, const DenoisingLayersContext denoisingLayers);
+    static void AccumulateNrdDirectDiffuseHitDistance(const PathState path, const float hitDistance, const float diffuseWeight, const bool visible, const DenoisingLayersContext denoisingLayers);
+#endif
+
     /** Helper to create a texture sampler instance.
     The method for computing texture level-of-detail depends on the configuration.
     \param[in] path Path state.
@@ -70,7 +76,7 @@ namespace Bridge
 
     // There's a relatively high cost to this when used in large shaders just due to register allocation required for alphaTest, even if all geometries are opaque.
     // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
-    static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug);
+    static bool traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug, out float hitDistance);
 
     static void traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug);
 

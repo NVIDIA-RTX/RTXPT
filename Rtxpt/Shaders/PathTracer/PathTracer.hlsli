@@ -239,6 +239,8 @@ namespace PathTracer
         UpdatePathTravelled(path, rayOrigin, rayDir, rayTCurrent, workingContext);
 
 #if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+        Bridge::AccumulateNrdHitDistance(path, rayTCurrent, true, workingContext.DenoisingLayers);
+
         if (path.hasFlag(PathFlags::exportSpecHitTQueued)) // this is the end of the trip, so if exporting SpecHitT - do it now!
         {
             Bridge::ExportSpecHitTStop( path );

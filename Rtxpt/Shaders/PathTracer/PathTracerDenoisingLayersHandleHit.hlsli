@@ -299,9 +299,9 @@ namespace PathTracer
             //BSDFProperties bsdfProperties = surface.bsdf.getProperties(surface.shadingData);
             surface.bsdf.estimateSpecDiffBSDF(diffBSDFEstimate, specBSDFEstimate, surface.shadingData.N, surface.shadingData.V);
 
-            // if blockedAtSurface is true, one of the previous vertices landed on high curvature surface which breaks our motion vector calculations; 
-            // so we stop calculating MVs at that surface and consider everything else as zero roughness specular for denoising purposes (as DLSS-RR can infer specular MVs)
-            if (blockedAtSurface)
+            // DLSS-RR can infer specular motion when explicit motion-vector propagation stops.
+            // Lower its guide roughness to request that behavior.
+            if (blockedAtSurface && workingContext.PtConsts.useDLSSRR != 0)
             {
                 roughness *= kSpecularRoughnessThreshold * 0.95;         // these ensure spec MVs are used
                 //specBSDFEstimate = saturate(specBSDFEstimate+0.2.xxx);  // these ensure spec MVs are used
@@ -310,6 +310,11 @@ namespace PathTracer
             bool isDominant = path.hasFlag(PathFlags::denoisingLayerOnDominantBranch);
             workingContext.DenoisingLayers.StoreDenoisingLayer(pixelPos, currentSPIndex, vertexIndex, rayOrigin, rayDir, path.stableBranchID, path.GetSceneLength(), rayTCurrent, path.GetThp(), 
                 /*surface.shadingData.toPrevPosW*/virtualWorldMotion, roughness, worldNormal, diffBSDFEstimate, specBSDFEstimate, isDominant, 0, 0); //path.flagsAndVertexIndex, path.packedCounters);
+
+            float3 nrdDiffuseFactor, nrdSpecularFactor;
+            surface.bsdf.getNrdMaterialFactors(surface.shadingData.N, surface.shadingData.V, nrdDiffuseFactor, nrdSpecularFactor);
+            uint layerAddress = workingContext.DenoisingLayers.PixelToAddress(pixelPos, currentSPIndex);
+            workingContext.DenoisingLayers.DenoisingLayersUAV[layerAddress].NrdPackedMaterialFactors = PackTwoFp32ToFp16(nrdDiffuseFactor, nrdSpecularFactor);
 
             if (isDominant)
             {
@@ -376,6 +381,11 @@ namespace PathTracer
         }
         if (!path.hasFlag(PathFlags::denoisingLayerOnPlane))
             path.incrementCounter(PackedCounters::BouncesFromDenoisingLayer);
+
+        // Capture the sampled lobe on every layer at every roughness, including replacement surfaces behind glass.
+        // Keep the original in-lobe ray distance when ReSTIR GI later resamples the lighting.
+        if (workingContext.PtConsts.useNRD != 0 && wasOnDenoisingLayer && !path.hasFlag(PathFlags::denoisingLayerOnPlane))
+            workingContext.DenoisingLayers.StartNrdHitDistance(path);
     }
 #endif
 

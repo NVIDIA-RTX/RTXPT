@@ -19,6 +19,11 @@
 #include "IBSDF.hlsli"
 #include "BxDF.hlsli"
 
+#ifndef NRD_INCLUDED
+#define NRD_HEADER_ONLY
+#include <Nrd/Shaders/NRD.hlsli>
+#endif
+
 /** Implementation of Falcor's standard surface BSDF.
 
     The BSDF has the following lobes:
@@ -40,12 +45,14 @@ struct StandardBSDF // : IBSDF
 #endif
 
     StandardBSDFData data;      ///< BSDF parameters.
+    bool nrdLobeSelection;      ///< Bound primary/PSR lobe probabilities consistently in sampling and MIS PDFs.
     // float3 emission;            ///< Radiance emitted in the incident direction (wi).
 
     static StandardBSDF make( StandardBSDFData data ) 
     { 
         StandardBSDF d;
         d.data = data;
+        d.nrdLobeSelection = false;
         //d.emission = emission;
         return d;
     }
@@ -68,6 +75,8 @@ struct StandardBSDF // : IBSDF
         float3 woLocal = float3(0,0,0);
 
         FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+        if (nrdLobeSelection)
+            bsdf.ClampLobeSelectionForNrd();
 #if RecycleSelectSamples
         bool valid = bsdf.sample(wiLocal, woLocal, result.pdf, result.weight, result.lobe, result.lobeP, preGeneratedSamples.xyz);
 #else
@@ -86,8 +95,24 @@ struct StandardBSDF // : IBSDF
         float3 woLocal = shadingData.ToLocal(wo);
 
         FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+        if (nrdLobeSelection)
+            bsdf.ClampLobeSelectionForNrd();
 
         return bsdf.evalPdf(wiLocal, woLocal);
+    }
+
+    void getNrdMaterialFactors(const float3 normal, const float3 viewVector, out float3 diffuseFactor, out float3 specularFactor)
+    {
+        NRD_MaterialFactors(normal, viewVector, data.Diffuse(), data.Specular(), data.Roughness(), diffuseFactor, specularFactor);
+
+        // NRD's standard helper describes reflection. Extend it with the same lobe weights as this BSDF for transmission.
+        float diffuseTransmission = saturate(data.DiffuseTransmission());
+        float specularTransmission = saturate(data.SpecularTransmission());
+        float3 transmissionFactor = lerp(NRD_MATERIAL_FACTOR_MIN_SCALE.xxx, 1.0.xxx, saturate(data.Transmission()));
+        diffuseFactor = (1.0 - specularTransmission) * lerp(diffuseFactor, transmissionFactor, diffuseTransmission);
+        specularFactor = lerp(specularFactor, transmissionFactor, specularTransmission);
+        diffuseFactor = max(diffuseFactor, NRD_MATERIAL_FACTOR_MIN_SCALE.xxx);
+        specularFactor = max(specularFactor, NRD_MATERIAL_FACTOR_MIN_SCALE.xxx);
     }
 
     void estimateSpecDiffBSDF( out float3 outDiffEstimate, out float3 outSpecEstimate, const float3 normal, const float3 viewVector )

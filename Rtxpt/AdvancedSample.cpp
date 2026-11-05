@@ -326,7 +326,9 @@ void AdvancedPathTracer::PathTrace(nvrhi::IFramebuffer* framebuffer, const Sampl
     {
         RTXPT_GPU_SCOPE(m_commandList, "Denoising Guides Bake");
 
-        m_denoisingGuidesBaker->DenoiseSpecHitT(m_commandList, m_bindingSet);
+        // NRD needs the raw skipped-lobe zeros for its own reconstruction; DLSS-RR uses the filtered guide.
+        if (!m_ui.ActualUseStandaloneDenoiser())
+            m_denoisingGuidesBaker->DenoiseSpecHitT(m_commandList, m_bindingSet);
 
         if (m_ui.DebugView != DebugViewType::Disabled)
             m_denoisingGuidesBaker->RenderDebugViz(m_commandList, m_ui.DebugView, m_bindingSet);

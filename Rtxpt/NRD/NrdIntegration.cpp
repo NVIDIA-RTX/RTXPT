@@ -21,6 +21,7 @@ static_assert(NRD_VERSION_MAJOR >= 4 && NRD_VERSION_MINOR >= 17, "Unsupported NR
 #include <donut/engine/View.h>
 #include <donut/engine/ShaderFactory.h>
 #include <sstream>
+#include <memory>
 #include <donut/core/log.h>
 
 static void* NrdAllocate(void* userArg, size_t size, size_t alignment)
@@ -124,7 +125,7 @@ NrdIntegration::NrdIntegration(nvrhi::IDevice* device, nrd::Denoiser denoiser)
 
 NrdIntegration::~NrdIntegration()
 {
-    if (m_initialized)
+    if (m_instance != nullptr)
     {
         nrd::DestroyInstance(*m_instance);
     }
@@ -132,23 +133,41 @@ NrdIntegration::~NrdIntegration()
 
 bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::ShaderFactory& shaderFactory)
 {
+    if (m_initialized)
+        return true;
+
+    auto releasePartialResources = [&]()
+    {
+        m_bindingCache.Clear();
+        m_constantBuffer = nullptr;
+        m_pipelines.clear();
+        m_samplers.clear();
+        m_permanentTextures.clear();
+        m_transientTextures.clear();
+        return false;
+    };
+    releasePartialResources();
+
     const nrd::DenoiserDesc denoiserDescs[] =
     {
         { m_identifier, m_denoiser }
     };
 
-    nrd::InstanceCreationDesc instanceCreationDesc;
+    nrd::InstanceCreationDesc instanceCreationDesc = {};
     instanceCreationDesc.allocationCallbacks.Allocate = NrdAllocate;
     instanceCreationDesc.allocationCallbacks.Reallocate = NrdReallocate;
     instanceCreationDesc.allocationCallbacks.Free = NrdFree;
     instanceCreationDesc.denoisers = denoiserDescs;
     instanceCreationDesc.denoisersNum = dim(denoiserDescs);
 
-    nrd::Result res = nrd::CreateInstance(instanceCreationDesc, m_instance);
+    nrd::Instance* instance = nullptr;
+    nrd::Result res = nrd::CreateInstance(instanceCreationDesc, instance);
+    auto destroyInstance = [](nrd::Instance* value) { if (value != nullptr) nrd::DestroyInstance(*value); };
+    std::unique_ptr<nrd::Instance, decltype(destroyInstance)> instanceGuard(instance, destroyInstance);
     if (res != nrd::Result::SUCCESS)
-        return false;
+        return releasePartialResources();
 
-    const nrd::InstanceDesc& instanceDesc = *nrd::GetInstanceDesc(*m_instance);
+    const nrd::InstanceDesc& instanceDesc = *nrd::GetInstanceDesc(*instance);
 
     constexpr uint32_t maxInFlightFrames = 4;
     const nvrhi::BufferDesc constantBufferDesc = nvrhi::utils::CreateVolatileConstantBufferDesc(
@@ -157,6 +176,8 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         instanceDesc.descriptorPoolDesc.setsMaxNum * maxInFlightFrames);
 
     m_constantBuffer = m_device->createBuffer(constantBufferDesc);
+    if (!m_constantBuffer)
+        return releasePartialResources();
 
     for (uint32_t samplerIndex = 0; samplerIndex < instanceDesc.samplersNum; samplerIndex++)
     {
@@ -177,7 +198,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
             break;
         default:
             assert(!"Unknown NRD sampler mode");
-            break;
+            return releasePartialResources();
         }
 
         auto samplerDesc = nvrhi::SamplerDesc()
@@ -189,7 +210,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         if (!sampler)
         {
             assert(!"Cannot create an NRD sampler");
-            return false;
+            return releasePartialResources();
         }
 
         m_samplers.push_back(sampler);
@@ -210,7 +231,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         if (!pipeline.Shader)
         {
             assert(!"Cannot create an NRD shader");
-            return false;
+            return releasePartialResources();
         }
 
         // our NRD integration compiles shaders using donut_compile_shaders (see \external\CMakeLists.txt) - that's why we're not relying on libraryDesc.spirvBindingOffsets anymore!
@@ -223,7 +244,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         if (!pipeline.ResourcesBindingLayout || !pipeline.ConstantsAndSamplersBindingLayout)
         {
             assert(!"Cannot create an NRD binding layout");
-            return false;
+            return releasePartialResources();
         }
 
         nvrhi::ComputePipelineDesc pipelineDesc;
@@ -234,7 +255,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         if (!pipeline.Pipeline)
         {
             assert(!"Cannot create an NRD pipeline");
-            return false;
+            return releasePartialResources();
         }
 
         m_pipelines.push_back(pipeline);
@@ -255,15 +276,15 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         if (format == nvrhi::Format::UNKNOWN)
         {
             assert(!"Unknown or unsupported NRD format");
-            return false;
+            return releasePartialResources();
         }
 
         std::stringstream ss;
         ss << "NRD " << (isPermanent ? "Permanent" : "Transient") << "Texture [" << (isPermanent ? i : i - instanceDesc.permanentPoolSize) << "]";
 
         nvrhi::TextureDesc textureDesc;
-        textureDesc.width = std::max(width / nrdTextureDesc.downsampleFactor, 1u);
-        textureDesc.height = std::max(height / nrdTextureDesc.downsampleFactor, 1u);
+        textureDesc.width = (width + nrdTextureDesc.downsampleFactor - 1) / nrdTextureDesc.downsampleFactor;
+        textureDesc.height = (height + nrdTextureDesc.downsampleFactor - 1) / nrdTextureDesc.downsampleFactor;
         textureDesc.format = format;
         textureDesc.mipLevels = 1;
         textureDesc.dimension = nvrhi::TextureDimension::Texture2D;
@@ -277,7 +298,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
         if (!texture)
         {
             assert(!"Cannot create an NRD texture");
-            return false;
+            return releasePartialResources();
         }
 
         if (isPermanent)
@@ -286,6 +307,7 @@ bool NrdIntegration::Initialize(uint32_t width, uint32_t height, donut::engine::
             m_transientTextures.push_back(texture);
     }
 
+    m_instance = instanceGuard.release();
     m_initialized = true;
     return true;
 }
@@ -376,24 +398,28 @@ static inline void MatrixToNrd(float* dest, const dm::float4x4& m)
     memcpy(dest, &m, sizeof(m));
 }
 
-void NrdIntegration::RunDenoiserPasses(
+bool NrdIntegration::RunDenoiserPasses(
     nvrhi::ICommandList* commandList,
     const RenderTargets& renderTargets,
     int pass,
     const donut::engine::PlanarView& view, 
     const donut::engine::PlanarView& viewPrev, 
     uint32_t frameIndex,
-    float disocclusionThreshold,
     float disocclusionThresholdAlternate,
     bool useDisocclusionThresholdAlternateMix,
     float timeDeltaBetweenFrames,
     bool enableValidation,
     bool resetHistory,
+    float splitScreen,
     const void* methodSettings)
 {
+    if (!m_initialized || m_instance == nullptr)
+        return false;
+
     if (methodSettings)
     {
-        nrd::SetDenoiserSettings(*m_instance, m_identifier, methodSettings);
+        if (nrd::SetDenoiserSettings(*m_instance, m_identifier, methodSettings) != nrd::Result::SUCCESS)
+            return false;
     }
 
     nrd::CommonSettings commonSettings;
@@ -415,10 +441,10 @@ void NrdIntegration::RunDenoiserPasses(
     commonSettings.frameIndex = frameIndex;
     commonSettings.denoisingRange = kMaxSceneDistance * 2;   // with various bounces (in non-primary planes or with PSR) the virtual view Z can be much longer, so adding 2x!
     commonSettings.enableValidation = enableValidation && renderTargets.DenoiserOutValidation != nullptr;
-    commonSettings.disocclusionThreshold = disocclusionThreshold;
     commonSettings.disocclusionThresholdAlternate = disocclusionThresholdAlternate;
     commonSettings.isDisocclusionThresholdMixAvailable = useDisocclusionThresholdAlternateMix;
     commonSettings.timeDeltaBetweenFrames = timeDeltaBetweenFrames;
+    commonSettings.splitScreen = splitScreen;
     commonSettings.accumulationMode = (resetHistory)?(nrd::AccumulationMode::CLEAR_AND_RESTART):(nrd::AccumulationMode::CONTINUE);
     
     auto const& textureDesc = renderTargets.DenoiserNormalRoughness->getDesc();
@@ -432,11 +458,13 @@ void NrdIntegration::RunDenoiserPasses(
     commonSettings.rectSizePrev[1] = textureDesc.height;
     
 
-    nrd::SetCommonSettings(*m_instance, commonSettings);
+    if (nrd::SetCommonSettings(*m_instance, commonSettings) != nrd::Result::SUCCESS)
+        return false;
 
     const nrd::DispatchDesc* dispatchDescs = nullptr;
     uint32_t dispatchDescNum = 0;
-    nrd::GetComputeDispatches(*m_instance, &m_identifier, 1, dispatchDescs, dispatchDescNum);
+    if (nrd::GetComputeDispatches(*m_instance, &m_identifier, 1, dispatchDescs, dispatchDescNum) != nrd::Result::SUCCESS)
+        return false;
 
     const nrd::InstanceDesc& instanceDesc = *nrd::GetInstanceDesc(*m_instance);
 
@@ -564,6 +592,7 @@ void NrdIntegration::RunDenoiserPasses(
             GpuProfiler::End(commandList);
         }
     }
+    return true;
 }
 
 #endif

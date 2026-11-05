@@ -2278,12 +2278,13 @@ void Sample::UpdatePathTracerConstants( PathTracerConstants & constants, const P
 
     // no denoising layers by default
     constants.denoisingEnabled = m_ui.ActualUseStandaloneDenoiser() || m_ui.RealtimeAA == 3;
+    constants.useNRD = m_ui.ActualUseStandaloneDenoiser();
+    constants.useDLSSRR = m_ui.RealtimeMode && m_ui.RealtimeAA == 3;
 
     constants._activeDenoisingLayerCount           = m_ui.ActualDenoisingLayersActiveCount();
     constants.maxDenoisingLayerVertexDepth         = std::min( std::min( (uint)m_ui.DenoisingLayersMaxVertexDepth, cDenoisingLayerMaxVertexIndex ), (uint)m_ui.BounceCount );
     constants.allowPrimarySurfaceReplacement    = m_ui.AllowPrimarySurfaceReplacement;
     constants.denoisingLayersSplitStopThreshold    = m_ui.DenoisingLayersSplitStopThreshold;
-    constants._padding3                         = 0;
     constants.denoisingLayersSuppressPrimaryIndirectSpecularK  = m_ui.DenoisingLayersSuppressPrimaryIndirectSpecular?m_ui.DenoisingLayersSuppressPrimaryIndirectSpecularK:0.0f;
     constants.denoisingLayersAntiAliasingFallthrough = m_ui.DenoisingLayersAntiAliasingFallthrough;
     constants.frameIndex                        = m_frameIndex & 0xFFFFFFFF; //GetFrameIndex();
@@ -2790,6 +2791,7 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 
     if (m_ui.NRDModeChanged) // if changing between ReLAX and ReBLUR
     {
+        m_ui.NRDModeChanged = false;
         needNewPasses = true;
         for (int i = 0; i < std::size(m_nrd); i++)
             m_nrd[i] = nullptr;
@@ -3019,6 +3021,11 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
 
         // I suppose we need to clear depth for right-click picking at least
         m_renderTargets->Clear( m_commandList );
+
+        // DeviceManager averages rendered-frame times; DLSS frame generation is accounted for separately in the FPS display.
+        const double nrdFrameTime = GetDeviceManager()->GetAverageFrameTimeSeconds();
+        const float nrdRenderedFPS = (std::isfinite(nrdFrameTime) && nrdFrameTime > 0.0) ? float(1.0 / nrdFrameTime) : 60.0f;
+        NrdConfig::UpdateSettings(m_ui.ReblurSettings, m_ui.RelaxSettings, m_ui.NRDAccumulationTime, nrdRenderedFPS);
 
         UpdatePathTracerConstants(constants.ptConsts, cameraData);
         constants.MaterialCount = m_materialsBaker->GetMaterialDataCount(); // m_scene->GetSceneGraph()->GetMaterials().size();
@@ -3590,7 +3597,12 @@ void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
                 nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR : nrd::Denoiser::RELAX_DIFFUSE_SPECULAR;
 
             m_nrd[i] = std::make_unique<NrdIntegration>(GetDevice(), denoiserMethod);
-            m_nrd[i]->Initialize(m_renderSize.x, m_renderSize.y, *m_shaderFactory);
+            if (!m_nrd[i]->Initialize(m_renderSize.x, m_renderSize.y, *m_shaderFactory))
+            {
+                m_nrd[i].reset();
+                log::fatal("Cannot initialize NRD denoising layer %d", i);
+                return;
+            }
         }
     }
 
@@ -3620,13 +3632,20 @@ void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
 
         const float timeDeltaBetweenFrames = -1.f; // < 0: NRD tracks the frame time itself
         bool enableValidation = m_ui.DebugView == DebugViewType::DenoisingLayer_DenoiserValidation;
+        bool denoisingSucceeded;
         if (nrdUseRelax)
         {
-            m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThreshold, m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, &m_ui.RelaxSettings);
+            denoisingSucceeded = m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, m_ui.NRDSplitScreen, &m_ui.RelaxSettings);
         }
         else
         {
-            m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThreshold, m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, &m_ui.ReblurSettings);
+            denoisingSucceeded = m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, m_ui.NRDSplitScreen, &m_ui.ReblurSettings);
+        }
+        if (!denoisingSucceeded)
+        {
+            GpuProfiler::End(m_commandList);
+            log::fatal("NRD dispatch setup failed for denoising layer %d", pass);
+            return;
         }
 
         GpuProfiler::Begin(m_commandList, "MergeOutputs");

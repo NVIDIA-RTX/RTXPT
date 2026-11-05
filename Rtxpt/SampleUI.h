@@ -162,7 +162,7 @@ struct SampleUIData
     bool                                ActualUseReSTIRDI() const { return UseNEE && (RealtimeMode) && (UseReSTIRDI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
     bool                                ActualUseReSTIRGI() const { return (RealtimeMode) && (UseReSTIRGI) && (RealtimeAA < 3 || !DisableReSTIRsWithDLSSRR); }
     uint                                ActualSamplesPerPixel() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSamplesPerPixel : 1u; }
-    uint                                ActualSubSamplingMode() const { return (RealtimeMode && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSubSamplingMode : 0; }
+    uint                                ActualSubSamplingMode() const { return (RealtimeMode && !ActualUseStandaloneDenoiser() && !(ActualUseReSTIRDI() || ActualUseReSTIRGI())) ? RealtimeSubSamplingMode : 0; }
     uint                                SubSamplingScaleX() const { return ActualSubSamplingMode() > 0 ? 2 : 1; }
     uint                                SubSamplingScaleY() const { return (ActualSubSamplingMode() == 1 || ActualSubSamplingMode() == 3) ? 2 : 1; }
     uint                                SubSamplingRateNum() const { return ActualSubSamplingMode() == 1 ? 3 : 1; }   // traced pixels per ScaleX x ScaleY block
@@ -186,7 +186,7 @@ struct SampleUIData
 
     bool                                ActualUseApproximateMIS() const { return (RealtimeMode)?(NEEMISType!=0):(NEEMISType==2); }
 
-    // In the future we'll likely drop support for multi-layer NRD 
+    // In the future we'll likely drop support for multi-layer NRD
     //int                                 ActualDenoisingLayersActiveCount() const { return ActualUseStandaloneDenoiser()?1:DenoisingLayersActiveCount; }
     int                                 ActualDenoisingLayersActiveCount() const { return DenoisingLayersActiveCount; }
 
@@ -288,7 +288,7 @@ struct SampleUIData
     AccelerationStructureUIData         AS;
 
     RtxdiUserSettings                   RTXDI;
-    
+
     bool                                ShowDeltaTree = false;
     bool                                ShowMaterialEditor = true;  // this makes material editor default right click option
 
@@ -349,9 +349,10 @@ struct SampleUIData
     // Denoiser
     bool                                NRDModeChanged = false;
     NrdConfig::DenoiserMethod           NRDMethod = NrdConfig::DenoiserMethod::REBLUR;
-    float                               NRDDisocclusionThreshold = 0.03f;
     bool                                NRDUseAlternateDisocclusionThresholdMix = true;
     float                               NRDDisocclusionThresholdAlternate = 0.2f;
+    float                               NRDAccumulationTime = 0.5f;
+    float                               NRDSplitScreen = 0.0f;
     nrd::RelaxSettings                  RelaxSettings;
     nrd::ReblurSettings                 ReblurSettings;
     //nrd::ReferenceSettings              NRDReferenceSettings;
@@ -425,7 +426,7 @@ private:
     bool BuildUIScriptsAndEtc(void);
     void BuildUIResolutionPicker();
     void BuildUIPerformancePresets();
-    
+
     void DLSSFGSelectorUI();
 
 private:

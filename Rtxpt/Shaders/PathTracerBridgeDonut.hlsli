@@ -116,10 +116,14 @@ HomogeneousVolumeData Bridge::loadHomogeneousVolumeData(const uint materialDataI
 
 // There's a relatively high cost to this when used in large shaders just due to register allocation required for alphaTest, even if all geometries are opaque.
 // Consider simplifying alpha testing - perhaps splitting it up from the main geometry path, load it with fewer indirections or something like that.
-bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug)
+bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pathVertexIndex, const uint2 pixelPos, DebugContext debug, out float hitDistance)
 {
-    // RAY_FLAG_FORCE_OMM_2_STATE?
+    // NRD needs the nearest accepted blocker distance; accept-first traversal does not guarantee that.
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
+#else
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery;
+#endif
     rayQuery.TraceRayInline(SceneBVH, RAY_FLAG_NONE, 0xff, ray);
 
     while (rayQuery.Proceed())
@@ -142,15 +146,17 @@ bool Bridge::traceVisibilityRay(RayDesc ray, const RayCone rayCone, const int pa
     }
         
 #if ENABLE_DEBUG_VIZUALISATIONS && ENABLE_DEBUG_LINES_VIZ && !NON_PATH_TRACING_PASS && PATH_TRACER_MODE!=PT_DENOISING_LAYERS_BUILD
-    float visible = rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    float debugHit = rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     if (rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
         ray.TMax = rayQuery.CommittedRayT();    // <- this gets passed via NvMakeHitWithRecordIndex/NvInvokeHitObject as RayTCurrent() or similar in ubershader path
 
     if( debug.IsDebugPixel(pixelPos) )
-        debug.DrawLine(ray.Origin, ray.Origin+ray.Direction*ray.TMax, float4(visible.x, visible.x, 0.8, 0.2), float4(visible.x, visible.x, 0.8, 0.2));
+        debug.DrawLine(ray.Origin, ray.Origin+ray.Direction*ray.TMax, float4(debugHit.x, debugHit.x, 0.8, 0.2), float4(debugHit.x, debugHit.x, 0.8, 0.2));
 #endif
 
-    return !rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    const bool visible = rayQuery.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
+    hitDistance = visible ? ray.TMax : rayQuery.CommittedRayT();
+    return visible;
 }
 
 void Bridge::traceScatterRay(const PathState path, inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS> rayQuery, const float2 tMinMax, DebugContext debug)
@@ -339,6 +345,29 @@ void Bridge::ExportSpecHitTStop(const PathState path)
 //         //DebugPixel( pixelPos.xy, float4( 0.0, saturate(specHitT/10.0), 1.0, 1 ) );
 //        DebugPixel( pixelPos.xy, float4( saturate(specHitT/10.0).xxx, 1 ) );
 }
+
+#if PATH_TRACER_MODE==PT_DENOISING_LAYERS_FILL
+static inline float GetNrdLayerViewZ(const PathState path, const DenoisingLayersContext denoisingLayers)
+{
+    DenoisingLayer layer = denoisingLayers.LoadDenoisingLayer(path.GetPixelPos(), path.getDenoisingLayerIndex());
+    const Ray cameraRay = Bridge::computeCameraRay(path.GetPixelPos());
+    float3 virtualWorldPos = cameraRay.origin + cameraRay.dir * layer.SceneLength;
+    return mul(float4(virtualWorldPos, 1), g_Const.view.matWorldToView).z;
+}
+
+void Bridge::AccumulateNrdHitDistance(inout PathState path, const float rayTCurrent, const bool acceptedHit, const DenoisingLayersContext denoisingLayers)
+{
+    if (!path.hasFlag(PathFlags::collectNrdHitDistance))
+        return;
+
+    denoisingLayers.AccumulateNrdHitDistance(path, rayTCurrent, acceptedHit, GetNrdLayerViewZ(path, denoisingLayers), g_Const.denoisingHitParamConsts);
+}
+
+void Bridge::AccumulateNrdDirectDiffuseHitDistance(const PathState path, const float hitDistance, const float diffuseWeight, const bool visible, const DenoisingLayersContext denoisingLayers)
+{
+    denoisingLayers.AccumulateNrdDirectDiffuseHitDistance(path, hitDistance, diffuseWeight, visible, GetNrdLayerViewZ(path, denoisingLayers), g_Const.denoisingHitParamConsts);
+}
+#endif
 
 PathTracer::WorkingContext Bridge::GetWorkingContext()
 {
