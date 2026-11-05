@@ -3025,7 +3025,7 @@ void Sample::Render(nvrhi::IFramebuffer* framebuffer)
         // DeviceManager averages rendered-frame times; DLSS frame generation is accounted for separately in the FPS display.
         const double nrdFrameTime = GetDeviceManager()->GetAverageFrameTimeSeconds();
         const float nrdRenderedFPS = (std::isfinite(nrdFrameTime) && nrdFrameTime > 0.0) ? float(1.0 / nrdFrameTime) : 60.0f;
-        NrdConfig::UpdateSettings(m_ui.ReblurSettings, m_ui.RelaxSettings, nrdRenderedFPS);
+        NrdConfig::UpdateSettings(m_ui.ReblurSettings, m_ui.RelaxSettings, m_ui.NRDAccumulationTime, nrdRenderedFPS);
 
         UpdatePathTracerConstants(constants.ptConsts, cameraData);
         constants.MaterialCount = m_materialsBaker->GetMaterialDataCount(); // m_scene->GetSceneGraph()->GetMaterials().size();
@@ -3613,7 +3613,7 @@ void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
     PostProcess::ComputePassType preparePassType = nrdUseRelax ? PostProcess::ComputePassType::RELAXDenoiserPrepareInputs : PostProcess::ComputePassType::REBLURDenoiserPrepareInputs;
     PostProcess::ComputePassType mergePassType = nrdUseRelax ? PostProcess::ComputePassType::RELAXDenoiserFinalMerge : PostProcess::ComputePassType::REBLURDenoiserFinalMerge;
 
-    bool resetHistory = m_ui.ResetRealtimeCaches || m_ui.NRDResetHistory;
+    bool resetHistory = m_ui.ResetRealtimeCaches;
 
     int maxPassCount = std::min(m_ui.ActualDenoisingLayersActiveCount(), (int)std::size(m_nrd));
     bool initWithStableRadiance = true;
@@ -3635,11 +3635,11 @@ void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
         bool denoisingSucceeded;
         if (nrdUseRelax)
         {
-            denoisingSucceeded = m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThreshold, m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, m_ui.NRDSplitScreen, &m_ui.RelaxSettings);
+            denoisingSucceeded = m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, m_ui.NRDSplitScreen, &m_ui.RelaxSettings);
         }
         else
         {
-            denoisingSucceeded = m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThreshold, m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, m_ui.NRDSplitScreen, &m_ui.ReblurSettings);
+            denoisingSucceeded = m_nrd[pass]->RunDenoiserPasses(m_commandList, *m_renderTargets, pass, *m_view, *m_viewPrevious, GetFrameIndex(), m_ui.NRDDisocclusionThresholdAlternate, m_ui.NRDUseAlternateDisocclusionThresholdMix, timeDeltaBetweenFrames, enableValidation, resetHistory, m_ui.NRDSplitScreen, &m_ui.ReblurSettings);
         }
         if (!denoisingSucceeded)
         {
@@ -3654,7 +3654,6 @@ void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
 
         GpuProfiler::End(m_commandList);
     }
-    m_ui.NRDResetHistory = false;
 }
 
 void Sample::PostProcessAA(nvrhi::IFramebuffer* framebuffer, bool reset)

@@ -186,7 +186,7 @@ struct SampleUIData
 
     bool                                ActualUseApproximateMIS() const { return (RealtimeMode)?(NEEMISType!=0):(NEEMISType==2); }
 
-    // In the future we'll likely drop support for multi-layer NRD 
+    // In the future we'll likely drop support for multi-layer NRD
     //int                                 ActualDenoisingLayersActiveCount() const { return ActualUseStandaloneDenoiser()?1:DenoisingLayersActiveCount; }
     int                                 ActualDenoisingLayersActiveCount() const { return DenoisingLayersActiveCount; }
 
@@ -288,7 +288,7 @@ struct SampleUIData
     AccelerationStructureUIData         AS;
 
     RtxdiUserSettings                   RTXDI;
-    
+
     bool                                ShowDeltaTree = false;
     bool                                ShowMaterialEditor = true;  // this makes material editor default right click option
 
@@ -348,12 +348,11 @@ struct SampleUIData
 
     // Denoiser
     bool                                NRDModeChanged = false;
-    bool                                NRDResetHistory = false;
     NrdConfig::DenoiserMethod           NRDMethod = NrdConfig::DenoiserMethod::REBLUR;
-    float                               NRDDisocclusionThreshold = nrd::CommonSettings{}.disocclusionThreshold;
-    bool                                NRDUseAlternateDisocclusionThresholdMix = nrd::CommonSettings{}.isDisocclusionThresholdMixAvailable;
-    float                               NRDDisocclusionThresholdAlternate = nrd::CommonSettings{}.disocclusionThresholdAlternate;
-    float                               NRDSplitScreen = nrd::CommonSettings{}.splitScreen;
+    bool                                NRDUseAlternateDisocclusionThresholdMix = true;
+    float                               NRDDisocclusionThresholdAlternate = 0.2f;
+    float                               NRDAccumulationTime = 0.5f;
+    float                               NRDSplitScreen = 0.0f;
     nrd::RelaxSettings                  RelaxSettings;
     nrd::ReblurSettings                 ReblurSettings;
     //nrd::ReferenceSettings              NRDReferenceSettings;
@@ -427,7 +426,7 @@ private:
     bool BuildUIScriptsAndEtc(void);
     void BuildUIResolutionPicker();
     void BuildUIPerformancePresets();
-    
+
     void DLSSFGSelectorUI();
 
 private:

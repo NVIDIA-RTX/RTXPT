@@ -405,7 +405,6 @@ bool NrdIntegration::RunDenoiserPasses(
     const donut::engine::PlanarView& view, 
     const donut::engine::PlanarView& viewPrev, 
     uint32_t frameIndex,
-    float disocclusionThreshold,
     float disocclusionThresholdAlternate,
     bool useDisocclusionThresholdAlternateMix,
     float timeDeltaBetweenFrames,
@@ -442,7 +441,6 @@ bool NrdIntegration::RunDenoiserPasses(
     commonSettings.frameIndex = frameIndex;
     commonSettings.denoisingRange = kMaxSceneDistance * 2;   // with various bounces (in non-primary planes or with PSR) the virtual view Z can be much longer, so adding 2x!
     commonSettings.enableValidation = enableValidation && renderTargets.DenoiserOutValidation != nullptr;
-    commonSettings.disocclusionThreshold = disocclusionThreshold;
     commonSettings.disocclusionThresholdAlternate = disocclusionThresholdAlternate;
     commonSettings.isDisocclusionThresholdMixAvailable = useDisocclusionThresholdAlternateMix;
     commonSettings.timeDeltaBetweenFrames = timeDeltaBetweenFrames;

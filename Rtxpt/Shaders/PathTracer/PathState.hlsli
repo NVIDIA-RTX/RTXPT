@@ -13,7 +13,7 @@
 
 #define PATH_STATE_DEFINED
 
-#include "Config.h"    
+#include "Config.h"
 #include "Utils/Math/Ray.hlsli"
 #include "Utils/Utils.hlsli"
 #include "Utils/SampleGenerators.hlsli"
@@ -47,14 +47,14 @@ enum class PathFlags
     delta                           = (1<<4),   ///< Scatter ray went through a delta event.
 
     insideDielectricVolume          = (1<<5),   ///< Path vertex is inside a dielectric volume.
-    terminateAtNextBounce           = (1<<6),   ///< This path is flagged for termination next bounce; in the next bounce it should not collect NEE - it's dead 
-    
+    terminateAtNextBounce           = (1<<6),   ///< This path is flagged for termination next bounce; in the next bounce it should not collect NEE - it's dead
+
     // see https://github.com/NVIDIA-RTX/RTXDI/blob/main/Doc/RestirGI.md
     restirGIStarted                 = (1<<7),   ///< This path has started collecting data for ReSTIR GI - all radiance from now on is diverted into ReSTIR GI buffers
     restirGICollectSecondarySurface = (1<<8),   ///< This path has started collecting data for ReSTIR GI - next hit surface (or sky) info needs to be saved into ReSTIR GI buffers !!and the flag will be removed then!!
 
     enableThreadReorder             = (1<<9),   ///< Path has become divergent, it's probably good to invoke Shader Execution Reordering for the next bounce
-    collectNrdHitDistance            = (1<<10),   ///< Collect the first diffuse or specular ray segment after a denoising layer, including rejected dielectric intersections.
+    collectNrdHitDistance           = (1<<10),   ///< Collect the first diffuse or specular ray segment after a denoising layer, including rejected dielectric intersections.
     deltaTransmissionPath           = (1<<11),  ///< Path started with and followed delta transmission events (whenever possible - TIR could be an exception) until it hit the first non-delta event.
     deltaOnlyPath                   = (1<<12),  ///< There was no non-delta events along the path so far.
 
@@ -78,7 +78,7 @@ enum class PackedCounters // each packed to 8 bits, 4 max fits in 32bit uint
     DiffuseBounces              = 0,    ///< Diffuse reflection.
     RejectedHits                = 1,    ///< Number of false intersections rejected along the path. This is used as a safeguard to avoid deadlock in pathological cases.
     BouncesFromDenoisingLayer      = 2,    ///< Number of bounces after the last denoising layer the path was on (path.vertexIndex - currentDenoisingLayerVertexIndex)
-    //SubSampleIndex              = 3     ///< Used when doing multiple (sub)samples per pixels: when the path gets terminated, this counter is incremented, and if still < 
+    //SubSampleIndex              = 3     ///< Used when doing multiple (sub)samples per pixels: when the path gets terminated, this counter is incremented, and if still <
 };
 
 /** Live state for the path tracer.
@@ -113,7 +113,7 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
     uint        stableBranchID  /*PAYLOAD_FIELD_RW_ALL*/;       ///< Path 'stable delta tree' branch ID for finding matching DenoisingLayer; Gets updated on scatter while path isDeltaOnlyPath;
 
     // 5th 16 bytes
-    RayCone     rayCone         /*PAYLOAD_FIELD_RW_ALL*/;                ///< 4 or 8 bytes depending on USE_RAYCONES_WITH_FP16_IN_RAYPAYLOAD (on, so 4 bytes by default). 
+    RayCone     rayCone         /*PAYLOAD_FIELD_RW_ALL*/;                ///< 4 or 8 bytes depending on USE_RAYCONES_WITH_FP16_IN_RAYPAYLOAD (on, so 4 bytes by default).
     // lpfloat     fireflyFilterK;                          ///< (0, 1] multiplier for the global firefly filter threshold if used; CAN be compressed to 16bit float!
     // lpfloat     bsdfScatterPdf;                          ///< 0 if delta lobe (zero roughness specular) bounce
     uint        pack0           /*PAYLOAD_FIELD_RW_ALL*/;       ///< packed fireflyFilterK && bsdfScatterPdf
@@ -270,6 +270,6 @@ struct /*PAYLOAD_QUALIFIER*/ PathState
 
     uint getDenoisingLayerIndex()                  { return (flagsAndVertexIndex & kDenoisingLayerIndexBitMask) >> kDenoisingLayerIndexBitOffset; }
     void setDenoisingLayerIndex(uint index)        { flagsAndVertexIndex &= ~kDenoisingLayerIndexBitMask; flagsAndVertexIndex |= index << kDenoisingLayerIndexBitOffset; }
-};                                         
+};
 
 #endif // __PATH_STATE_HLSLI__

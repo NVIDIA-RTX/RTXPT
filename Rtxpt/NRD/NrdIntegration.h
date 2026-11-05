@@ -43,7 +43,6 @@ public:
         const donut::engine::PlanarView& view, 
         const donut::engine::PlanarView& viewPrev,
         uint32_t frameIndex,
-        float disocclusionThreshold,
         float disocclusionThresholdAlternate,
         bool useDisocclusionThresholdAlternateMix,
         float timeDeltaBetweenFrames, // < 0 to track internally in NRD
